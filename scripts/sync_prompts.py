@@ -18,8 +18,8 @@ Usage:
 from __future__ import annotations
 
 import argparse
-from pathlib import Path
 import sys
+from pathlib import Path
 
 # Ensure repository root is on sys.path when invoked as a script
 _THIS_FILE = Path(__file__).resolve()
@@ -46,7 +46,7 @@ def main() -> int:
 
     result = sync_bundled_prompts(force=args.force)
     print("\nSync results:")
-    for key in ("copied", "updated", "skipped", "same"):
+    for key in ("copied", "updated", "skipped", "same", "deleted"):
         items = result.get(key, [])
         print(f"- {key}: {len(items)}")
         for name in items:

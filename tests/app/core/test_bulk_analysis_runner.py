@@ -88,10 +88,10 @@ def test_combine_chunk_summaries_hierarchical_batches_large_docs() -> None:
     """Test that large documents trigger hierarchical batching."""
     # Create summaries that will exceed token limit when combined
     # Each summary is ~10000 characters (~2500 tokens)
-    # 65% of 130K (Claude's safe window) = ~84K tokens
-    # Need >84K tokens to trigger hierarchical, so use 40 summaries = ~100K tokens
+    # Claude's safe window ~130K tokens, and we use ~95% of that for combining (~123K)
+    # Need >123K tokens to trigger hierarchical, so use 55 summaries ≈ 137K tokens
     large_summary = "x" * 10000
-    summaries = [large_summary] * 40  # 40 summaries = ~100,000 tokens
+    summaries = [large_summary] * 55  # 55 summaries ≈ 137,500 tokens
 
     invoke_calls = []
 
@@ -121,7 +121,7 @@ def test_combine_chunk_summaries_hierarchical_respects_cancellation() -> None:
     """Test that cancellation is respected during hierarchical reduction."""
     # Create large enough summaries to trigger hierarchical batching
     large_summary = "x" * 10000
-    summaries = [large_summary] * 40
+    summaries = [large_summary] * 60
     cancel_after_first = True
 
     def is_cancelled():
@@ -156,7 +156,7 @@ def test_combine_chunk_summaries_hierarchical_wraps_errors_with_context() -> Non
     """Test that errors during hierarchical reduction include helpful context."""
     # Create large summaries to trigger hierarchical batching
     large_summary = "x" * 10000
-    summaries = [large_summary] * 40
+    summaries = [large_summary] * 60
 
     def mock_invoke(prompt: str) -> str:
         raise RuntimeError("Provider error")

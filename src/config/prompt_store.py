@@ -19,10 +19,11 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
+
 from .paths import (
     app_prompts_root,
-    app_templates_root,
     app_resource_root,
+    app_templates_root,
 )
 
 
@@ -161,6 +162,7 @@ def _sync_resource(repo_dir: Path, bundled_dir: Path, *, force: bool) -> dict:
     updated: List[str] = []
     skipped: List[str] = []
     same: List[str] = []
+    deleted: List[str] = []
 
     for name, src in repo_files.items():
         dst = bundled_dir / name
@@ -179,6 +181,17 @@ def _sync_resource(repo_dir: Path, bundled_dir: Path, *, force: bool) -> dict:
             else:
                 skipped.append(name)
 
+    # Remove stale bundled files that no longer exist in the repo.
+    existing_files = _collect_md_files(bundled_dir)
+    for name, path in existing_files.items():
+        if name not in repo_files:
+            try:
+                path.unlink()
+                deleted.append(name)
+            except OSError:
+                # Ignore delete failures; leave file intact.
+                continue
+
     _save_manifest(
         bundled_dir,
         {
@@ -188,6 +201,7 @@ def _sync_resource(repo_dir: Path, bundled_dir: Path, *, force: bool) -> dict:
             "updated": updated,
             "skipped": skipped,
             "same": same,
+            "deleted": deleted,
             "previous_manifest": manifest,
         },
     )
@@ -197,6 +211,7 @@ def _sync_resource(repo_dir: Path, bundled_dir: Path, *, force: bool) -> dict:
         "updated": updated,
         "skipped": skipped,
         "same": same,
+        "deleted": deleted,
     }
 
 

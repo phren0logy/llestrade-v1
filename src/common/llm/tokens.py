@@ -8,28 +8,30 @@ from typing import Dict, List, Optional, Any
 
 logger = logging.getLogger(__name__)
 
-# Model context window sizes (in tokens)
-# Using 65% of actual limits for safety margin
+# Model context window sizes (actual token limits)
 MODEL_CONTEXT_WINDOWS = {
     # Azure OpenAI
-    "gpt-4.1": int(1_000_000 * 0.65),  # 650,000 tokens
-    "gpt-4-turbo": int(128_000 * 0.65),  # 83,200 tokens
-    "gpt-35-turbo": int(16_000 * 0.65),  # 10,400 tokens
-    
+    "gpt-4.1": 1_000_000,
+    "gpt-4-turbo": 128_000,
+    "gpt-35-turbo": 16_000,
+
     # Anthropic Claude
-    "claude-sonnet-4-5-20250929": int(200_000 * 0.65),   # 130,000 tokens
-    "claude-sonnet-4-20250514": int(200_000 * 0.65),     # 130,000 tokens
-    "claude-opus-4-1-20250805": int(200_000 * 0.65),     # 130,000 tokens
-    "anthropic.claude-sonnet-4-5-20250929-v1:0": int(200_000 * 0.65),
-    "anthropic.claude-3-5-sonnet-20240620-v1:0": int(200_000 * 0.65),
-    "anthropic.claude-3-sonnet-20240229-v1:0": int(200_000 * 0.65),
-    "anthropic.claude-opus-4-1-20250805-v1:0": int(200_000 * 0.65),
-    
+    "claude-sonnet-4-5-20250929": 200_000,
+    "claude-sonnet-4-20250514": 200_000,
+    "claude-opus-4-1-20250805": 200_000,
+    "anthropic.claude-sonnet-4-5-20250929-v1:0": 200_000,
+    "anthropic.claude-3-5-sonnet-20240620-v1:0": 200_000,
+    "anthropic.claude-3-sonnet-20240229-v1:0": 200_000,
+    "anthropic.claude-opus-4-1-20250805-v1:0": 200_000,
+
     # Google Gemini
-    "gemini-2.5-pro-preview-05-06": int(2_000_000 * 0.65),  # 1,300,000 tokens
-    "gemini-1.5-pro": int(2_000_000 * 0.65),  # 1,300,000 tokens
-    "gemini-1.5-flash": int(1_000_000 * 0.65),  # 650,000 tokens
+    "gemini-2.5-pro-preview-05-06": 2_000_000,
+    "gemini-1.5-pro": 2_000_000,
+    "gemini-1.5-flash": 1_000_000,
 }
+
+SAFE_WINDOW_RATIO = 0.65
+DEFAULT_CONTEXT_WINDOW = int(30_000 / SAFE_WINDOW_RATIO)
 
 # Token counting cache
 _TOKEN_COUNT_CACHE = {}
@@ -41,29 +43,38 @@ class TokenCounter:
     """Unified token counting for all providers."""
     
     @staticmethod
-    def get_model_context_window(model_name: str) -> int:
+    def get_model_context_window(model_name: str, ratio: Optional[float] = None) -> int:
         """
         Get the safe context window size for a model.
         
         Args:
             model_name: The model identifier
+            ratio: Optional multiplier to apply to the raw context window.
+                Defaults to SAFE_WINDOW_RATIO (0.65) to keep a safety buffer.
             
         Returns:
             The safe context window size in tokens (65% of actual limit)
             Defaults to 30,000 tokens if model not found
         """
-        # Check exact match first
+        raw_window = TokenCounter._resolve_context_window(model_name)
+        applied_ratio = SAFE_WINDOW_RATIO if ratio is None else ratio
+        applied_ratio = max(0.0, min(1.0, applied_ratio))
+        return int(raw_window * applied_ratio)
+
+    @staticmethod
+    def _resolve_context_window(model_name: str) -> int:
+        """Return the raw (max) context window for a model."""
+        if not model_name:
+            return DEFAULT_CONTEXT_WINDOW
         if model_name in MODEL_CONTEXT_WINDOWS:
             return MODEL_CONTEXT_WINDOWS[model_name]
-        
-        # Check for partial matches (e.g., if model name contains version info)
+
         for known_model, window_size in MODEL_CONTEXT_WINDOWS.items():
             if known_model in model_name or model_name in known_model:
                 return window_size
-        
-        # Default conservative limit for unknown models
+
         logger.warning(f"Unknown model '{model_name}', using default context window of 30,000 tokens")
-        return 30_000
+        return DEFAULT_CONTEXT_WINDOW
     
     @staticmethod
     def count(

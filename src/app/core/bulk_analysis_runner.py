@@ -169,7 +169,7 @@ def should_chunk(
     token_info = TokenCounter.count(text=content, provider=provider_id, model=model_name or "")
     tokens = token_info.get("token_count") if token_info.get("success") else len(content) // 4
     context_window = TokenCounter.get_model_context_window(model_name or provider_id)
-    max_tokens_per_chunk = max(int(context_window * 0.5), 4000)
+    max_tokens_per_chunk = max(context_window, 4000)
     return tokens > max_tokens_per_chunk, tokens, max_tokens_per_chunk
 
 
@@ -262,13 +262,14 @@ def combine_chunk_summaries_hierarchical(
     if is_cancelled_fn and is_cancelled_fn():
         raise BulkAnalysisCancelled("Operation cancelled before hierarchical reduction")
 
-    # Calculate threshold: 65% of model's context window
+    # Calculate thresholds from the model's context window with a 65% safety buffer.
+    raw_context_window = TokenCounter.get_model_context_window(model or provider_id, ratio=1.0)
     context_window = TokenCounter.get_model_context_window(model or provider_id)
-    max_combine_tokens = int(context_window * 0.65)
+    max_combine_tokens = int(context_window * 0.95)
 
     logger.info(
         f"Hierarchical reduction starting: {len(summaries)} summaries, "
-        f"max_combine_tokens={max_combine_tokens} (65% of {context_window})"
+        f"max_combine_tokens={max_combine_tokens} (~95% of safe window {context_window}, raw {raw_context_window})"
     )
 
     # Step 1: Try single-pass combination (existing behavior for small documents)
@@ -280,8 +281,7 @@ def combine_chunk_summaries_hierarchical(
     )
 
     # Count tokens in the combined prompt
-    token_info = TokenCounter.count(text=prompt, provider=provider_id, model=model)
-    prompt_tokens = token_info.get("token_count") if token_info.get("success") else len(prompt) // 4
+    prompt_tokens = _count_tokens(prompt, provider_id, model)
 
     logger.info(f"Single-pass prompt: {prompt_tokens} tokens")
 
@@ -299,6 +299,15 @@ def combine_chunk_summaries_hierarchical(
     # Process summaries hierarchically
     current_level_summaries = list(summaries)
     level = 0
+    target_summary_tokens = max(int(max_combine_tokens * 0.4), 4000)
+    condense_template = (
+        "You are preparing intermediate notes for {document_name}. "
+        "Condense the partial summary below so the output stays well under {token_target} tokens. "
+        "Focus on key facts, merge redundant bullets, and keep any page references when possible.\n\n"
+        "## Partial Summary\n"
+        "{chunk_summaries}\n\n"
+        "## Condensed Summary\n"
+    )
 
     while len(current_level_summaries) > 1:
         level += 1
@@ -307,6 +316,68 @@ def combine_chunk_summaries_hierarchical(
         # Check for cancellation
         if is_cancelled_fn and is_cancelled_fn():
             raise BulkAnalysisCancelled(f"Operation cancelled during hierarchical level {level}")
+
+        # First, ensure no single summary exceeds the per-batch budget.
+        normalized_level: List[str] = []
+        for summary_idx, summary in enumerate(current_level_summaries, start=1):
+            summary_tokens = _count_tokens(summary, provider_id, model)
+            if summary_tokens <= target_summary_tokens:
+                normalized_level.append(summary)
+                continue
+
+            logger.info(
+                "Level %s, summary %s exceeds target (%s > %s tokens); condensing",
+                level,
+                summary_idx,
+                summary_tokens,
+                target_summary_tokens,
+            )
+
+            condensed = summary
+            attempts = 0
+            while attempts < 3:
+                attempts += 1
+                if is_cancelled_fn and is_cancelled_fn():
+                    raise BulkAnalysisCancelled(
+                        f"Operation cancelled while condensing summary {summary_idx} in level {level}"
+                    )
+
+                condense_context = _metadata_context(metadata)
+                condense_context.update(
+                    {
+                        "document_name": document_name,
+                        "chunk_summaries": condensed,
+                        "token_target": str(target_summary_tokens),
+                    }
+                )
+                if placeholder_values:
+                    condense_context.update({k: v for k, v in placeholder_values.items() if v is not None})
+                condense_prompt = format_prompt(condense_template, condense_context)
+                condensed = invoke_fn(condense_prompt).strip()
+                condensed_tokens = _count_tokens(condensed, provider_id, model)
+                logger.info(
+                    "Level %s, summary %s condensed attempt %s produced ~%s tokens",
+                    level,
+                    summary_idx,
+                    attempts,
+                    condensed_tokens,
+                )
+                if condensed_tokens <= target_summary_tokens:
+                    break
+
+            final_tokens = _count_tokens(condensed, provider_id, model)
+            if final_tokens > target_summary_tokens:
+                logger.warning(
+                    "Level %s, summary %s still above target after condensation (~%s tokens); truncating",
+                    level,
+                    summary_idx,
+                    final_tokens,
+                )
+                condensed = _truncate_to_tokens(condensed, target_summary_tokens)
+
+            normalized_level.append(condensed)
+
+        current_level_summaries = normalized_level
 
         # Dynamically determine batch size by testing token counts
         batches = []
@@ -319,8 +390,7 @@ def combine_chunk_summaries_hierarchical(
                 raise BulkAnalysisCancelled(f"Operation cancelled at summary {idx} in level {level}")
 
             # Count tokens in this summary
-            token_info = TokenCounter.count(text=summary, provider=provider_id, model=model)
-            summary_tokens = token_info.get("token_count") if token_info.get("success") else len(summary) // 4
+            summary_tokens = _count_tokens(summary, provider_id, model)
 
             # Calculate tokens if we add this summary to current batch
             # Include overhead for separators and prompt template (~500 tokens)
@@ -331,8 +401,7 @@ def combine_chunk_summaries_hierarchical(
                 metadata=metadata,
                 placeholder_values=placeholder_values,
             )
-            test_token_info = TokenCounter.count(text=test_prompt, provider=provider_id, model=model)
-            test_tokens = test_token_info.get("token_count") if test_token_info.get("success") else len(test_prompt) // 4
+            test_tokens = _count_tokens(test_prompt, provider_id, model)
 
             # If adding this summary would exceed limit, finalize current batch
             if test_tokens > max_combine_tokens and current_batch:
@@ -438,6 +507,22 @@ def _batch_checksum(batch: List[str]) -> str:
     """Return a stable checksum for a batch of summaries."""
     joined = "\n\n---\n\n".join(batch)
     return hashlib.sha256(joined.encode("utf-8")).hexdigest()
+
+
+def _count_tokens(text: str, provider_id: str, model: Optional[str]) -> int:
+    """Return token count for text with a len//4 fallback."""
+    token_info = TokenCounter.count(text=text, provider=provider_id, model=model or "")
+    return token_info.get("token_count") if token_info.get("success") else len(text) // 4
+
+
+def _truncate_to_tokens(text: str, max_tokens: int) -> str:
+    """Truncate text to roughly max_tokens using char-based estimate."""
+    if max_tokens <= 0:
+        return ""
+    max_chars = max_tokens * 4
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars]
 
 
 def _read_prompt_file(project_dir: Path, path_str: str | None) -> str:

@@ -39,24 +39,32 @@ def test_hierarchical_combiner_reuses_cached_batches(monkeypatch) -> None:
     monkeypatch.setattr(
         runner.TokenCounter,
         "count",
-        staticmethod(lambda text, provider, model=None: {"success": True, "token_count": 100000}),
+        staticmethod(
+            lambda text, provider, model=None: {
+                "success": True,
+                "token_count": max(1, len(text) // 4),
+            }
+        ),
     )
     monkeypatch.setattr(
         runner.TokenCounter,
         "get_model_context_window",
-        staticmethod(lambda model: 1000),
+        staticmethod(lambda model, ratio=None: 500),
     )
 
-    summaries = ["s1", "s2", "s3"]
+    summaries = ["x" * 4000, "y" * 4000, "z" * 4000]
     calls = {"invoke": 0}
 
     def invoke_fn(prompt: str) -> str:
         calls["invoke"] += 1
         return f"combined-{calls['invoke']}"
 
+    cache_hits: list[tuple[int, int]] = []
+
     def load_batch_fn(level: int, batch_index: int, checksum: str):
         # Only the first batch is cached; others are processed normally.
         if level == 1 and batch_index == 1:
+            cache_hits.append((level, batch_index))
             return "cached-batch"
         return None
 
@@ -78,8 +86,9 @@ def test_hierarchical_combiner_reuses_cached_batches(monkeypatch) -> None:
         save_batch_fn=save_batch_fn,
     )
 
-    # Cached batch avoided one invoke call; remaining batches processed.
-    assert calls["invoke"] == 2
+    # Cached batch reused without invoking provider again.
+    assert (1, 1) in cache_hits
+    assert all(not entry.startswith("1:1:") for entry in saved_batches)
+    assert calls["invoke"] >= 1
     assert result
     assert any(entry.endswith("combined-1") or entry.endswith("combined-2") for entry in saved_batches)
-
