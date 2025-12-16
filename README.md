@@ -29,16 +29,10 @@ Llestrade is a PySide6 (Qt) desktop application for analyzing and summarizing co
    cd llestrade
    ```
 
-2. **Install dependencies using uv** (recommended)
+2. **Install dependencies using uv**
 
    ```bash
    uv sync
-   ```
-
-   Or using pip:
-
-   ```bash
-   pip install -r pyproject.toml
    ```
 
 3. **Configure API keys**
@@ -50,9 +44,9 @@ Llestrade is a PySide6 (Qt) desktop application for analyzing and summarizing co
    ```bash
    uv run main.py
 
-   # Or with debug mode enabled:
-   uv run main.py --debug
-   ``
+   # Or with debug instrumentation enabled
+   ./run_debug.sh
+   ```
 
 ## Quick Start
 
@@ -73,28 +67,28 @@ This will:
 
 ### Basic Workflow
 
-1. **PDF Processing** (optional)
+1. **Create or open a project**
 
-   - Use the PDF Processing tab to convert PDF reports to markdown
-   - Select input PDFs and choose an output directory
+   - Use the welcome screen buttons to create a new project or open an existing `.frpd` workspace.
+   - The project dialog prompts for a project name, project folder, source folder, and conversion helper.
+   - Pick a placeholder set (or start empty) so the workspace can substitute client-specific values in prompts.
 
-2. **Project Placeholders & Document Analysis**
+2. **Documents tab**
 
-   - The new project wizard lets you pick or author placeholder lists (e.g., client name, case number). These values surface on the Bulk Analysis and Reports tabs and are substituted into prompts at runtime.
-   - In the Analysis tab, select folders containing markdown documents
-   - Enter subject information / adjust placeholders in Project Settings as needed
-   - Click "Run Pending" to create per-document bulk analysis outputs
-   - Use "Run Combined" to merge bulk analysis outputs
-   - Placeholder status chips help you spot missing values before running jobs
+   - The Documents tab shows the selected source folders and FileTracker counts (`Converted X / Y`).
+   - Use "Re-scan for new files" after dropping additional PDFs/markdown into the source tree.
+   - Start conversions from the banner; the conversion worker preserves folder structure inside `converted_documents/`.
 
-3. **Refinement**
+3. **Highlights tab**
 
-   - Use the Refinement tab to edit and improve generated content
-   - Apply custom prompts for specific refinements
+   - Extract PDF highlights once conversions are complete. Only PDF-derived markdown contributes to the highlight denominator (`Highlights: X of Y`).
+   - Placeholder `.highlights.md` files are written when a PDF has no highlights so counts remain accurate.
 
-4. **Report Generation**
-   - Use the Prompts tab to generate final report sections
-   - Apply templates for standardized formatting
+4. **Bulk Analysis and Reports tabs**
+
+   - Create bulk analysis groups to run prompts per folder subset. Each group stores its config in `bulk_analysis/<group>/config.json` and writes outputs under `bulk_analysis/<group>/outputs/`.
+   - Use the inline log feed to monitor worker progress and rerun pending or all documents as needed.
+   - The Reports tab orchestrates draft/refinement prompts with the same placeholder map used by bulk jobs.
 
 ## Project Structure
 

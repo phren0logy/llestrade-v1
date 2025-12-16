@@ -12,165 +12,66 @@ Transform the current wizard-style UI into a dashboard-based workflow that suppo
 - **No overengineering**: Simple solutions preferred
 - **Progressive enhancement**: Build on existing working code
 
-### Phase 1: Core Infrastructure & Dashboard
-
-#### Pre-Flight Foundation Audit
-
-- [x] Identify unused/abandoned modules and move them into `src/archive/`
-- [x] Remove obsolete wiring from `main_new.py` and stage imports that will be replaced
-- [x] Capture retained legacy behavior in notes/TODOs before deletion *(see "Legacy UI Reference" summary below)*
-
-#### Step 0 - Decommission Wizard Flow
-
-- [x] Refactor stage navigation to support the dashboard model
-  - [x] Retire the linear wizard assumptions in `StageManager`
-  - [x] Remove unused stages (e.g., `refine`) and decouple welcome from project routing
-  - [x] Introduce a `WorkspaceController` (or equivalent) that can manage tabbed dashboards
-- [x] Redesign `main_new.py` to host the dashboard shell (sidebar + tabbed workspace)
-  - [x] Preserve welcome-screen entry, but swap the stacked wizard for a minimal tab scaffold (welcome + empty workspace)
-  - [x] Add temporary feature flag handling so current flows continue to launch
-- [x] Stub out `src/new/stages/project_workspace.py` with placeholder tabs to unblock downstream work
+### Phase 1: Core Infrastructure & Dashboard (Remaining Work)
 
 #### Legacy UI Reference (Captured 2025-03-11)
 
-- StageManager’s linear gating is intentionally replaced by a scan-driven workflow after project setup
-- Project setup keeps evaluator/output guardrails, auto-sanitizes folder name (spaces → dashes), and informs users about folder creation
-- Source management pivots to folder-level include/exclude (tree checkboxes) with relative paths; root-level files trigger warnings instead of silent skips
-- Conversion helpers remain responsible for PDFs/complex formats; simple text/markdown bypass conversion and duplicates are prevented via in-memory tracking
-- Bulk analysis reuses legacy chunking/logging patterns but surface streamlined logs; reports move to a placeholder tab until redesigned
+- StageManager’s linear gating is intentionally replaced by a scan-driven workflow after project setup.
+- Project setup keeps evaluator/output guardrails, auto-sanitizes folder name (spaces → dashes), and informs users about folder creation.
+- Source management pivots to folder-level include/exclude (tree checkboxes) with relative paths; root-level files trigger warnings instead of silent skips.
+- Conversion helpers remain responsible for PDFs/complex formats; simple text/markdown bypass conversion and duplicates are prevented via in-memory tracking.
+- Bulk analysis reuses legacy chunking/logging patterns but surfaces streamlined logs; reports move to a placeholder tab until redesigned.
 
-#### Step 1 - Core Infrastructure
+#### Welcome Stage Stabilization
 
-- [x] Create FileTracker class (`src/app/core/file_tracker.py`)
-  - [x] Implement file existence checking with folder structure preservation
-  - [x] Add project statistics calculation
-  - [x] Write pytest tests for critical methods
-  - [x] Limit initial scope to counts, last-run timestamps, and deterministic reconciliation
-- [x] Update ProjectManager (`src/app/core/project_manager.py`)
-  - [x] Persist new project layout (create `<parent>/<project-name>/` folder, sanitize name, keep readable)
-  - [x] Store source folder configuration as relative paths with include/exclude tree state
-  - [x] Record selected conversion helper and per-project conversion preferences
-  - [x] Expose lightweight dashboard state (last opened tab, pending job descriptors) instead of `WorkflowState`
-  - [x] Surface FileTracker statistics and bulk-analysis metadata for the workspace views
-- [x] Add AWS Bedrock support to the Anthropic provider stack (dual cloud/Bedrock options, shared factory wiring)
-- [x] Create bulk analysis group system (`src/app/core/bulk_analysis_groups.py`)
-- [x] Implement BulkAnalysisGroup dataclass
-  - [x] Add config.json serialization for groups
-  - [x] Create folder structure management
-  - [x] Base mocked responses on fixtures captured from real provider calls
-- [x] Extract and consolidate worker threads (implemented under `src/app/workers/`)
-  - [x] Move processing/summarization into workers (`ConversionWorker`, `HighlightWorker`, `BulkAnalysisWorker`)
-  - [x] Create shared base class for workers (`DashboardWorker`)
-  - [x] Set up QThreadPool for parallel operations (max 3 workers) with `WorkerCoordinator`
+- [ ] Exercise the refreshed welcome stage (`src/app/ui/stages/welcome_stage.py`) with existing `.frpd` projects and resolve regressions uncovered by legacy project metadata.
 
-#### Step 2 - Dashboard Enhancement & Project Setup
+#### Workspace Polish
 
-- [x] Wire `main_new.py` dashboard shell into welcome + workspace views
-  - [ ] Enhance Welcome Stage (`src/app/ui/stages/welcome_stage.py`)
-    - [x] Add FileTracker stats to project cards (X/Y converted, X/Y summarized)
-    - [x] Implement project deletion
-    - [x] Add "Open Folder" action
-    - [ ] Test with existing projects (breaking changes OK)
-- [x] Simplify project creation
-  - [x] Single-screen setup (name, source folder, output folder)
-  - [x] Create `<selected folder>/<project-name>/` (spaces → dashes) and call out folder creation to the user
-  - [x] Remove multi-stage wizard flow; initial import deferred to Documents tab
-  - [x] Capture conversion helper selection in the setup dialog
+- [ ] Default to the Bulk Analysis tab on open once project setup is complete and FileTracker shows converted folders (`src/app/ui/stages/project_workspace.py`).
+- [ ] Keep the Progress tab officially descoped—document that the Bulk Analysis tab’s inline log feed is the canonical activity surface.
 
-#### Step 3 - Project Workspace
+#### Automated Conversion Follow-ups
 
-- [x] Create tabbed workspace (`src/app/ui/stages/project_workspace.py`)
-  - [x] Replace linear stages with QTabWidget
-  - [x] Create Documents and Bulk Analysis tabs *(progress feed handled within Bulk Analysis; separate tab descoped)*
-  - [x] Provide "home" navigation to return to the welcome screen
-  - [ ] Default to Bulk Analysis tab on open once setup is complete
-- [x] Documents Tab
-  - [x] Source folder picker with tree view checkboxes (folder-level only, default to all selected)
-  - [x] Store selections as relative paths and surface manual "Re-scan for new files" action with last-scan timestamp
-  - [x] Warn when files exist in the source root but no folders are selected (conversion requires subfolders)
-  - [x] Display `X of Y` counts from FileTracker for files converted vs. pending (including converted_documents)
-  - [x] Keep batch operations non-blocking and track in-flight conversions to avoid duplicate submissions
-- [x] Bulk Analysis Tab
-  - [x] List bulk analysis groups with `X of Y` document coverage using FileTracker data
-  - [x] Reuse folder tree with greyed-out (tooltip: "Enable in Documents → Sources") entries for folders not selected for conversion *(simplified to converted_documents tree only)*
-  - [x] Offer system/user prompt file pickers per group (stored as relative paths)
-  - [x] Provide run/stop controls that enqueue work on the shared worker pool and surface concise logs *(uses real workers with cancellation)*
-  - [x] Split run actions into "Run Pending" and "Run All" with explicit confirmation for force re-runs
-  - [x] Mirror the split controls for combined operations (standard vs. force) with manifest-based skipping
-  - [x] Add an inline activity log so bulk-analysis messages remain visible during long runs
-- [ ] Progress Tab *(descoped; future activity feed will live in Bulk Analysis tab)*
+- [ ] After conversions finish, trigger bulk analysis for eligible groups (folders selected in both Documents and Bulk Analysis tabs) using existing chunking for large files.
 
-#### Step 4 - Automated Conversion & Bulk Analysis
+### Phase 2: Bulk Analysis & Integration (Remaining Work)
 
-- [x] Extend project metadata to capture project root, source-relative folder selections, and conversion helper choice
-- [x] Update project creation to gather source folder and output folder (warning about root-level files); helper selection stored in project metadata
-- [x] On project open (and when "Re-scan" is pressed), detect new/changed files and prompt for conversion + bulk analysis
-- [x] Implement conversion helper registry that handles PDFs/complex formats while skipping simple markdown/plain-text files *(default helper in place; additional helpers TBD)*
-- [x] Track in-flight conversions in memory to avoid duplicate submissions during long runs; rely on file existence post-run
-- [ ] After conversion, trigger bulk analysis for eligible groups (folders selected in both tabs) using existing chunking for large files
-- [x] Provide clear UI to accept/decline runs and surface log output per operation
+#### Bulk Analysis Group Dialog (`src/app/ui/dialogs/bulk_analysis_group_dialog.py`)
 
-### Phase 2: Bulk Analysis & Integration
+- [ ] Add a duplicate-name warning/validation before saving a group configuration.
 
-#### Step 4 - Bulk Analysis Groups Implementation
+#### Bulk Workflow QA
 
-- [x] Create Bulk Analysis tab scaffolding
-  - [x] List groups with status chips (`Converted X / Y`, `Bulk Analysis X / Y`)
-  - [x] "Create Group" launches modal; inline edit deferred for later polish
-  - [x] Delete action triggers confirmation noting all generated outputs will be removed
-  - [x] Run button enqueues jobs and streams concise log output
-- [ ] Group dialog (`src/app/ui/dialogs/summary_group_dialog.py`)
-  - [ ] Group name input with duplicate-name warning
-  - [x] Folder tree mirrors Documents tab selections (checkboxes only at folder level, greyed-out nodes blocked with tooltip)
-  - [x] System prompt + user prompt file pickers (persisted as relative paths)
-  - [x] Model/provider selection leveraging existing configuration helpers
-  - [x] Persist include/exclude choices and prompt paths into group `config.json`
+- [ ] Test with multiple bulk groups and overlapping folder selections to ensure manifest skipping and prompt hashing behave correctly.
 
-#### Step 5 - Integration & Testing
+#### Worker Instrumentation & Observability
 
-- [ ] Connect bulk analysis workflow to groups
-  - [x] Modify worker threads to accept group metadata and prompt file paths
-  - [x] Update output structure to use `bulk_analysis/<group_name>/` directories
-  - [x] Add skip logic for existing analyses (based on timestamp + prompt hash)
-  - [ ] Test with multiple groups and overlapping folders
-- [x] Consolidate worker infrastructure under `src/app/workers/`
-  - [x] Move document processing/summarization threads into shared base classes
-  - [x] Register workers with a `QThreadPool` (max 3) and add cancellation hooks
-  - [ ] Emit consistent debug logging (job id + status transitions) for traceability
-  - [x] Add unit tests for worker lifecycle and error propagation
-- [x] Normalize highlight color outputs
-  - [x] Write color aggregates to `highlights/colors` instead of `highlights/documents/colors`
-  - [x] Migrate legacy color files on extraction and clean up obsolete folders
-  - [x] Add regression tests covering the migration and color aggregate writes
-- [x] Standardize Markdown metadata
-  - [x] Introduce shared front matter helper (`src/common/markdown/frontmatter_utils.py`) backed by python-frontmatter
-  - [x] Apply helper to conversion, highlight, bulk analysis, and report workers with project/sources/prompt metadata
-- [ ] Phoenix integration for LLM calls
-  - [ ] Keep existing observability.py setup
-  - [ ] Add bulk analysis group context to traces
-  - [ ] Use fixture export for test mocks
-- [ ] Business logic testing with pytest
-  - [x] Test FileTracker functionality
-  - [x] Test bulk analysis group CRUD operations
-  - [ ] Test document conversion with folder preservation
-  - [ ] Reuse existing tests where applicable
-  - [x] Stand up `tests/new_ui/` for dashboard logic (FileTracker, bulk analysis, project lifecycle)
-  - [ ] Add mocked smoke tests driven by recorded fixtures (no live API calls)
-  - [ ] Maintain a separate, optional live suite for provider calls using dedicated credentials
-  - [ ] Audit codebase for "summary" terminology and update to "bulk analysis" where appropriate
+- [ ] Emit consistent debug logging (job ID + status transitions) across all `DashboardWorker` subclasses.
+- [ ] Keep `observability.py` wiring current and add Phoenix spans that include bulk analysis group context.
+- [ ] Export Phoenix fixtures for deterministic tests.
 
-#### Step 6 - Polish & Cleanup
+#### Business Logic Testing
 
-- [ ] Settings & UI Polish
-  - [ ] Add minimize on close setting
-  - [ ] Test resume after restart functionality
-  - [ ] Verify error handling (panel at bottom)
-  - [ ] Cost tracking stub (implementation deferred)
-- [ ] Code cleanup
-  - [ ] Archive legacy UI to `src/archive/legacy/`
-  - [ ] Update `main.py` to drop legacy entry points
-  - [ ] Clean settings/tests that reference legacy-only classes
-  - [ ] Document archival status + reference path in README
+- [ ] Test document conversion with folder preservation.
+- [ ] Reuse/migrate legacy test scenarios where applicable into `tests/app/**`.
+- [ ] Add mocked smoke tests driven by recorded fixtures (no live API calls).
+- [ ] Maintain a separate, optional live suite for provider calls using dedicated credentials.
+- [ ] Audit the codebase for “summary” terminology and replace it with “bulk analysis” where appropriate.
+
+### Phase 3: Polish & Cleanup
+
+#### Settings & UI Polish
+
+- [ ] Add minimize-on-close setting.
+- [ ] Test resume-after-restart functionality.
+- [ ] Verify error handling and surface failures in the workspace footer panel.
+- [ ] Implement the cost-tracking stub (even if the final UI ships later).
+
+#### Code Cleanup & Documentation
+
+- [ ] Clean settings/tests that still reference pre-dashboard classes or legacy-only code paths.
+- [ ] Document the streamlined dashboard-first workflow in README/CLAUDE/AGENTS as future features land.
 
 ### Folder Structure After Refactoring
 
@@ -231,25 +132,25 @@ Note: Highlights denominator uses PDFs only (pending/highlights reflect PDF-elig
 
 ### Application Architecture
 
-- **Technology**: PySide6 desktop application targeting macOS, Windows, and Linux
+- **Technology**: PySide6 desktop application targeting macOS, Windows, and Linux.
 - **UI Transition**:
-  - **Legacy UI**: Fully functional, to be archived after dashboard implementation
-  - **New UI**: Moving from wizard-style to dashboard + tabbed workspace
+  - **Legacy UI**: Archived; dashboard is now the default experience launched from `main.py`.
+  - **Dashboard UI**: Tabbed workspace under `src/app/ui/stages/project_workspace.py` with Documents, Highlights, Bulk Analysis, and Reports tabs.
 
 ### Testing Status
 
-- **487 test cases** for legacy UI
-- **NO tests** for new UI components (17 files untested)
-- **No coverage reporting** currently configured
+- Dashboard-era tests live under `tests/app/**` (FileTracker, workspace controllers, worker coordinator, placeholder flows).
+- Legacy UI regression tests remain for reference but are no longer expanded.
+- Coverage reporting is not yet automated; pytest can be run manually with `uv run pytest tests/`.
 
 ### Codebase Health
 
 - **Minimal langchain usage** (only MarkdownHeaderTextSplitter) ✓
 - **Standard file operations** (pathlib, shutil) ✓
 - **Large files needing refactoring**:
-  - `analysis_tab.py` (1501 lines)
-  - `record_review_tab.py` (1382 lines)
-  - `llm_summary_thread.py` (847 lines)
+  - `src/app/ui/workspace/controllers/documents.py` (~810 lines)
+  - `src/app/ui/workspace/controllers/bulk.py` (~755 lines)
+  - `src/app/ui/workspace/controllers/reports.py` (~1,400 lines)
 
 ## Phase 1: Deep Code Analysis & Cleanup (Week 1-2)
 
@@ -278,20 +179,15 @@ dev = [
 
 **Files to Split (>800 lines)**:
 
-- [ ] `src/legacy/ui/analysis_tab.py` → Split into:
-  - `analysis_tab_ui.py` (UI components)
-  - `analysis_tab_logic.py` (business logic)
-  - `analysis_tab_handlers.py` (event handlers)
-- [ ] `src/legacy/ui/record_review_tab.py` → Split into:
-  - `record_review_ui.py`
-  - `record_review_logic.py`
-  - `record_review_handlers.py`
+- [ ] `src/app/ui/workspace/controllers/documents.py` → Separate data/model helpers, tree-building utilities, and UI wiring so each module stays <400 lines.
+- [ ] `src/app/ui/workspace/controllers/bulk.py` → Extract run-control logic and manifest formatting into dedicated services.
+- [ ] `src/app/ui/workspace/controllers/reports.py` → Break into prompt orchestration, table widgets, and background job coordination modules.
 
 **Project Structure Review**:
 
-- [ ] Evaluate consolidating `src/legacy/` and `src/new/` after cleanup
-- [ ] Review `src/common/` for proper shared components
-- [ ] Identify redundant modules for consolidation
+- [ ] Keep `src/app/`, `src/core/`, and `src/common/` boundaries clean; move any lingering dashboard helpers out of legacy folders.
+- [ ] Review `src/common/` for proper shared components.
+- [ ] Identify redundant modules for consolidation.
 
 ### 1.4 Leverage PySide6 Components Better
 
@@ -488,12 +384,7 @@ _The wizard-style UI with linear stages has been replaced by the dashboard appro
 
 ## Immediate Next Steps
 
-- [x] Surface conversion helper selection in the new project dialog and plumb helper-specific options
-- [x] Extend Documents tab counts/logging to show converted vs. pending documents after each run
-- [ ] Add automatic hand-off from conversion completion to bulk-analysis job scheduling where configured
-- [x] Build out the Bulk Analysis tab actions (folder gating, prompt pickers, run + delete flows)
-- [x] Enhance Welcome Stage with per-project stats/open-folder action; UI polish for legacy cleanup remains
-- [x] Wire project placeholders end-to-end: editor, preview highlighting, bulk/report validation, and worker substitution
+- [ ] Add automatic hand-off from conversion completion to bulk-analysis job scheduling where configured.
 
 ## Proposed Additions (For Review Later)
 
@@ -504,7 +395,7 @@ _The wizard-style UI with linear stages has been replaced by the dashboard appro
 - Observability: instrument LLM calls with Phoenix/OpenInference and attach group context; update dev deps snippet accordingly.
 - Worker traceability: add consistent job identifiers in logs and progress signals.
 - Highlights UX: add "Re-extract highlights" action and surface reasons when a file remains pending.
-- Welcome polish: finish remaining legacy cleanup messaging and small UI tweaks.
+- Welcome polish: finish remaining cleanup messaging and small UI tweaks.
 
 ## Notes
 

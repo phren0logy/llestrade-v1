@@ -2,6 +2,14 @@
 
 This document tracks completed work on Llestrade (formerly Forensic Psych Report Drafter).
 
+## 2025-07-05 - Dashboard Foundations Landed
+- Replaced the wizard-era launcher with the dashboard entry point in `src/app/main_window.py`, wiring the welcome stage and workspace controller together so projects can open directly from the new UI.
+- Finished the workspace shell in `src/app/ui/stages/project_workspace.py`, including the Documents, Highlights, Bulk Analysis, and Reports tabs plus home navigation; this retired the old `src/new/` scaffolding entirely.
+- Implemented FileTracker, the bulk analysis group system, and the updated `ProjectManager` under `src/app/core/`, ensuring projects capture source selections, conversion helpers, and dashboard metrics on disk.
+- Consolidated workers into `src/app/workers/` with a shared `QThreadPool` coordinator, new conversion/highlight/bulk/report worker classes, and manifest-aware skip logic for re-runs.
+- Delivered the dashboard documents and bulk tabs (tree selectors, conversion banners, activity log, run pending/all flows) plus placeholder-aware reports UI, aligned with the new workspace file layout.
+- Added pytest coverage for the dashboard-era modules under `tests/app/**` (FileTracker reconcilers, workspace controllers, worker coordinator, placeholder analysis, etc.), replacing the placeholder `tests/new_ui` plan.
+
 ## 2025-07-04 - Fixed Project Advancement from Setup to Import Stage
 - Added `project_data` property to ProjectManager to provide data in format expected by stages
 - Added `project_name` property to extract name from project path
