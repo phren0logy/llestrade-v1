@@ -40,7 +40,7 @@ def test_both_clients():
             logging.info("Testing Anthropic response...")
             response = anthropic_client.generate(
                 prompt="What is the capital of France?",
-                model="claude-3-7-sonnet-20250219",
+                model="claude-sonnet-4-5-20250929",
                 temperature=0.1
             )
             

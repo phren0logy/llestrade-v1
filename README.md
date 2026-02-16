@@ -248,11 +248,11 @@ The application stores settings in `var/app_settings.json` (created on first run
   "llm_provider_configs": {
     "anthropic": {
       "enabled": true,
-      "default_model": "claude-3-sonnet-20240229"
+      "default_model": "claude-sonnet-4-5-20250929"
     },
     "anthropic_bedrock": {
       "enabled": true,
-      "default_model": "anthropic.claude-sonnet-4-5-20250929-v1:0"
+      "default_model": "anthropic.claude-sonnet-4-5-v1"
     },
     "gemini": {
       "enabled": true,

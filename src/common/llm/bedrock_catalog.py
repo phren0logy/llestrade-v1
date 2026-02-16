@@ -5,6 +5,7 @@ Utilities for discovering Anthropic Claude models available via AWS Bedrock.
 from __future__ import annotations
 
 import logging
+import re
 import time
 from dataclasses import dataclass
 from threading import Lock
@@ -25,22 +26,19 @@ class BedrockModel:
 
 _DEFAULT_MODELS: List[BedrockModel] = [
     BedrockModel(
-        model_id="anthropic.claude-sonnet-4-5-20250929-v1:0",
-        name="Claude Sonnet 4.5 (2025-09-29)",
+        model_id="anthropic.claude-sonnet-4-5-v1",
+        name="Claude Sonnet 4.5",
     ),
     BedrockModel(
-        model_id="anthropic.claude-3-5-sonnet-20240620-v1:0",
-        name="Claude 3.5 Sonnet (2024-06-20)",
-    ),
-    BedrockModel(
-        model_id="anthropic.claude-3-sonnet-20240229-v1:0",
-        name="Claude 3 Sonnet (2024-02-29)",
-    ),
-    BedrockModel(
-        model_id="anthropic.claude-opus-4-1-20250805-v1:0",
-        name="Claude Opus 4.1 (2025-08-05)",
+        model_id="anthropic.claude-opus-4-6-v1",
+        name="Claude Opus 4.6",
     ),
 ]
+
+_CLAUDE_MODEL_VERSION_RE = re.compile(
+    r"claude-(?:[a-z]+-)?(?P<major>\d+)(?:-(?P<minor>\d+))?",
+    re.IGNORECASE,
+)
 
 _catalog_lock = Lock()
 _cached_models: List[BedrockModel] = list(_DEFAULT_MODELS)
@@ -95,6 +93,8 @@ def _fetch_models_from_bedrock(
                 model_name = summary.get("modelName") or model_id
                 if not model_id:
                     continue
+                if not _supports_minimum_version(model_id):
+                    continue
                 models.append(
                     BedrockModel(
                         model_id=model_id,
@@ -115,6 +115,18 @@ def _fetch_models_from_bedrock(
         logger.debug("Bedrock model discovery failed: %s", exc)
 
     return list(DEFAULT_BEDROCK_MODELS)
+
+
+def _supports_minimum_version(model_id: str) -> bool:
+    """Allow only Claude models at version 4.1 or newer."""
+    match = _CLAUDE_MODEL_VERSION_RE.search(model_id or "")
+    if not match:
+        return False
+
+    major = int(match.group("major"))
+    minor_text = match.group("minor")
+    minor = int(minor_text) if minor_text else 0
+    return major > 4 or (major == 4 and minor >= 1)
 
 
 def list_bedrock_models(

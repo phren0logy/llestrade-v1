@@ -16,12 +16,13 @@ MODEL_CONTEXT_WINDOWS = {
     "gpt-35-turbo": 16_000,
 
     # Anthropic Claude
+    "claude-sonnet-4-5": 200_000,
     "claude-sonnet-4-5-20250929": 200_000,
-    "claude-sonnet-4-20250514": 200_000,
+    "claude-opus-4-6": 200_000,
     "claude-opus-4-1-20250805": 200_000,
+    "anthropic.claude-sonnet-4-5-v1": 200_000,
+    "anthropic.claude-opus-4-6-v1": 200_000,
     "anthropic.claude-sonnet-4-5-20250929-v1:0": 200_000,
-    "anthropic.claude-3-5-sonnet-20240620-v1:0": 200_000,
-    "anthropic.claude-3-sonnet-20240229-v1:0": 200_000,
     "anthropic.claude-opus-4-1-20250805-v1:0": 200_000,
 
     # Google Gemini

@@ -20,7 +20,10 @@ from .base import DashboardWorker
 # Mapping of Anthropic cloud model slugs to their AWS Bedrock equivalents.
 # Reference: https://docs.claude.com/en/api/claude-on-amazon-bedrock
 _BEDROCK_MODEL_ALIASES: Dict[str, str] = {
-    "claude-sonnet-4-5-20250929": "anthropic.claude-sonnet-4-5-20250929-v1:0",
+    "claude-sonnet-4-5": "anthropic.claude-sonnet-4-5-v1",
+    "claude-sonnet-4-5-20250929": "anthropic.claude-sonnet-4-5-v1",
+    "claude-opus-4-6": "anthropic.claude-opus-4-6-v1",
+    # Backward compatibility for existing saved selections.
     "claude-opus-4-1-20250805": "anthropic.claude-opus-4-1-20250805-v1:0",
 }
 

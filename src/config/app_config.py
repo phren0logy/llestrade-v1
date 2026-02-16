@@ -25,7 +25,7 @@ DEFAULT_SETTINGS = {
         "anthropic_bedrock": {
             "enabled": True,
             "label": "AWS Bedrock (Claude)",
-            "default_model": "anthropic.claude-sonnet-4-5-20250929-v1:0"
+            "default_model": "anthropic.claude-sonnet-4-5-v1"
         },
         "gemini": {
             "enabled": True,
@@ -56,7 +56,7 @@ def get_available_providers_and_models() -> list[dict[str, str]]:
         'id': provider_id (e.g., "anthropic")
         'label': provider_label (e.g., "Anthropic Claude")
         'model': default_model_name or deployment_id
-        'display_name': A user-friendly string like "Anthropic Claude (claude-3-sonnet-latest)"
+        'display_name': A user-friendly string like "Anthropic Claude (claude-sonnet-4-5-20250929)"
     """
     settings = load_app_settings()
     providers_and_models = []

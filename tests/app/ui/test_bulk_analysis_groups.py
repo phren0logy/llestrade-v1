@@ -20,7 +20,7 @@ def test_bulk_analysis_group_save_and_load(project_manager: ProjectManager):
         files=["medical/doc1.md"],
         directories=["medical"],
         provider_id="anthropic",
-        model="claude-3-sonnet",
+        model="claude-sonnet-4-5-20250929",
         system_prompt_path="resources/prompts/system.md",
         user_prompt_path="resources/prompts/user.md",
     )

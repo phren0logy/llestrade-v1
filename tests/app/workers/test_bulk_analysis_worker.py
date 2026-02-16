@@ -68,7 +68,7 @@ def test_compute_prompt_hash_changes_on_prompt_and_settings() -> None:
     assert first != second
 
     group.use_reasoning = False
-    config_alt = ProviderConfig(provider_id="anthropic", model="claude-3")
+    config_alt = ProviderConfig(provider_id="anthropic", model="claude-opus-4-6")
     third = _compute_prompt_hash(bundle, config_alt, group, metadata)
     assert first != third
 

@@ -75,3 +75,48 @@ def test_anthropic_bedrock_provider_initialises_with_stubbed_client(monkeypatch)
     assert "stub output" in result["content"]
     assert result["usage"]["input_tokens"] == 10
     assert result["usage"]["output_tokens"] == 20
+
+
+def test_list_bedrock_models_filters_out_pre_41_models(monkeypatch):
+    """Discovery should include only Claude 4.1+ models."""
+
+    class _FakeBedrockClient:
+        def __init__(self):
+            self.meta = types.SimpleNamespace(region_name="us-east-1")
+
+        def list_foundation_models(self, **_kwargs):
+            return {
+                "modelSummaries": [
+                    {
+                        "modelId": "anthropic.claude-3-5-sonnet-20240620-v1:0",
+                        "modelName": "Claude 3.5 Sonnet",
+                        "providerName": "Anthropic",
+                    },
+                    {
+                        "modelId": "anthropic.claude-opus-4-1-20250805-v1:0",
+                        "modelName": "Claude Opus 4.1",
+                        "providerName": "Anthropic",
+                    },
+                    {
+                        "modelId": "anthropic.claude-opus-4-6-v1",
+                        "modelName": "Claude Opus 4.6",
+                        "providerName": "Anthropic",
+                    },
+                ]
+            }
+
+    class _FakeSession:
+        def client(self, *_args, **_kwargs):
+            return _FakeBedrockClient()
+
+    monkeypatch.setattr(catalog, "_create_session", lambda profile: _FakeSession())
+    monkeypatch.setattr(catalog, "_cached_models", [], raising=False)
+    monkeypatch.setattr(catalog, "_cache_key", (None, None), raising=False)
+    monkeypatch.setattr(catalog, "_cache_expiry", 0.0, raising=False)
+
+    models = catalog.list_bedrock_models(region=None, profile=None, force_refresh=True)
+    model_ids = [model.model_id for model in models]
+
+    assert "anthropic.claude-3-5-sonnet-20240620-v1:0" not in model_ids
+    assert "anthropic.claude-opus-4-1-20250805-v1:0" in model_ids
+    assert "anthropic.claude-opus-4-6-v1" in model_ids

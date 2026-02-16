@@ -86,7 +86,7 @@ class AnthropicBedrockProvider(BaseLLMProvider):
         self._aws_profile = aws_profile
         self._available_models: List[BedrockModel] = list(DEFAULT_BEDROCK_MODELS)
 
-        preferred_model_id = os.getenv("AWS_BEDROCK_DEFAULT_MODEL") or "anthropic.claude-sonnet-4-5-20250929-v1:0"
+        preferred_model_id = os.getenv("AWS_BEDROCK_DEFAULT_MODEL") or "anthropic.claude-sonnet-4-5-v1"
         self._default_model_id = self._select_default_model(preferred_model_id)
 
         if not _should_attempt_initialization():

@@ -235,8 +235,8 @@ class ReportsController:
             ("anthropic", "claude-sonnet-4-5-20250929"),
         )
         combo.addItem(
-            "Anthropic Claude (claude-opus-4-1-20250805)",
-            ("anthropic", "claude-opus-4-1-20250805"),
+            "Anthropic Claude (claude-opus-4-6)",
+            ("anthropic", "claude-opus-4-6"),
         )
 
         try:
