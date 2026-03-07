@@ -27,4 +27,5 @@ Live-provider tests are skipped by default unless `RUN_LIVE_PROVIDER_TESTS=1`.
 
 ## Coverage Policy
 - PR deterministic lane reports coverage for `src/app/core`, `src/app/workers`, and `src/common/llm`.
+- Citation coverage should include `src/app/core/citations.py` (indexing, verification, chunked Azure ingestion).
 - Coverage trends should be reviewed on high-risk refactors; thresholds can be raised incrementally once the suite stabilizes.

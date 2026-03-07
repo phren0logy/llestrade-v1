@@ -15,11 +15,13 @@ This document is the concise behavior baseline for cleanup, testing, and future 
 - Converted markdown lives in `converted_documents/` and mirrors source folder structure.
 - Highlight outputs live in `highlights/` and mirror converted paths using `.highlights.md`.
 - Bulk analysis outputs live under `bulk_analysis/<group>/`.
+- Citation/evidence metadata is stored in `.llestrade/citations.db` per project.
 
 ## Metrics and Counts
 - Highlights denominator is PDF-only.
 - Placeholder `.highlights.md` files are written when PDFs have no highlights.
 - Bulk and report prompt runs use project placeholder mapping plus runtime context placeholders.
+- Generated analyses/reports may include inline citation markers in the format `[CIT:ev_<id>]`.
 
 ## Observability Status
 - Phoenix wiring and fixture export paths exist.

@@ -143,6 +143,8 @@ When you create a project, the application maintains a self-contained workspace 
 <project>/
 ├── project.frpd                # Project metadata (source config, helper, UI state)
 ├── sources.json                # Included folders (+ warnings for root files)
+├── .llestrade/
+│   └── citations.db            # Canonical citation/evidence store (SQLite)
 ├── converted_documents/        # Markdown outputs mirroring selected folder structure
 │   ├── medical_records/
 │   │   ├── report1.md
@@ -178,6 +180,8 @@ Notes:
 - Highlights are extracted only for PDFs. If a PDF has no highlights, a placeholder `.highlights.md` file is created with a processed timestamp.
 - Dashboard highlight counts use a PDF-only denominator (e.g., `Highlights: X of Y` where `Y` is the number of PDF-converted documents), so DOCX and other non-PDF sources are excluded from the “pending highlights” count.
 - Bulk analysis and report prompts now substitute project placeholders (client, case, project name) along with per-document metadata. Ensure required placeholders are filled in Project Settings before running jobs.
+- Citation-aware outputs can include inline markers like `[CIT:ev_<id>]`. These IDs resolve through `.llestrade/citations.db`.
+- Use `uv run scripts/export_citations.py <project_dir>` to export citation tables to JSON for debugging.
 
 ## YAML Front Matter
 
