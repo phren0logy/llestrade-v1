@@ -21,6 +21,7 @@ Copy `config.template.env` to `.env` and populate provider keys (`ANTHROPIC_API_
 
 ## Dashboard Refactor Focus
 Treat `docs/work_plan.md` as the source of truth. Priority 0 centers on shipping the dashboard workspace: land `FileTracker`, bulk analysis groups, and `QThreadPool` consolidation before touching legacy cleanup. Keep the project tree lean—`converted_documents/`, `highlights/`, `bulk_analysis/`, `reports/`, `templates/`, and `backups/` cover the current workflow, with bulk-analysis outputs living inside each group folder under `bulk_analysis/`.
+Use `docs/current_behavior.md` for a concise statement of current runtime behavior when docs disagree.
 
 ### Highlights and Counts
 - Highlight outputs live under `highlights/` and mirror `converted_documents/` paths with a `.highlights.md` suffix.

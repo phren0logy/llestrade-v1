@@ -7,6 +7,7 @@ Guidance for Claude Code when working in this repository.
 - **App name**: Llestrade (forensic psych report drafter).
 - **Tech stack**: Python 3.12+, PySide6/Qt, uv for dependency management, pytest/pytest-qt for tests.
 - **Entry point**: `main.py` → imports `src.app.run()` which builds the Qt application.
+- **Behavior baseline**: `docs/current_behavior.md` is the concise source for current runtime behavior.
 - **Data directories**: runtime artefacts live under `var/` (logs, test output), user workspaces live under `~/Documents/llestrade/`.
 
 ## Current Package Layout

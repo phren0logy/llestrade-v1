@@ -442,26 +442,22 @@ For detailed documentation, see the `docs/` directory and `CLAUDE.md` for AI ass
 
 ### Current Implementation
 
-The application has two UIs running in parallel:
+Llestrade currently ships a single dashboard workflow launched by `uv run main.py` (or `uv run -m src.app`).
 
-1. **Legacy UI** (default) - Fully functional tab-based interface
-   - Run with: `uv run main.py`
-2. **New UI** (in development) - Modern stage-based workflow
-   - Run with: `uv run main.py --new-ui`
-   - 6 of 7 stages complete:
-     - ✅ Welcome & Project Management
-     - ✅ Project Setup (case information)
-     - ✅ Document Import (drag & drop)
-     - ✅ Document Processing (PDF/Word/Text conversion)
-     - ✅ Analysis (LLM summarization)
-     - ✅ Report Generation (integrated analysis)
-     - ❌ Refinement & Export (not implemented)
+The active workspace flow is:
 
-The new UI addresses memory issues through single-stage architecture and provides a project-based workflow with `.frpd` files.
+1. Welcome / project open-create
+2. Documents (source selection + conversion)
+3. Highlights (PDF-only extraction and tracking)
+4. Bulk Analysis (grouped per-document and combined runs)
+5. Reports (draft + refinement runs)
+
+Legacy transition notes and historical plans live under `docs/archive/` and are not the source of truth for current behavior.
 
 ## Documentation
 
 - `CLAUDE.md` - AI assistant guidance and technical details
-- `docs/progress.md` - Development changelog
-- `docs/roadmap.md` - Future features and development priorities
-- `docs/simplified_workflow.md` - New UI architecture reference
+- `docs/current_behavior.md` - concise current behavior baseline
+- `docs/work_plan.md` - active implementation priorities
+- `docs/progress.md` - dashboard-era milestone summary
+- `docs/placeholder_reference.md` - placeholder behavior and usage

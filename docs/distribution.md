@@ -22,7 +22,7 @@
    - macOS: `./packaging/macos/build_app.sh [--skip-icon] [--fresh-dist]`
    - Windows: `.\packaging\windows\build_app.ps1 [-FreshDist]`
    - Linux: `./packaging/linux/build_app.sh [--fresh-dist]`
-   These wrappers standardise cache locations, support clean rebuilds, and call `uv run pyinstaller --clean --noconfirm scripts/build_dashboard.spec` under the hood. The legacy entrypoints in `scripts/` continue to exist for quick invocations.
+   These wrappers standardise cache locations, support clean rebuilds, and call `uv run pyinstaller --clean --noconfirm scripts/build_dashboard.spec` under the hood. One-off migration utilities are quarantined in `scripts/legacy/`, with compatibility wrappers retained at original script paths.
 3. Extend CI to execute the bundling pipeline per platform and attach artifacts (macOS `.app`/bundle, Windows `.exe`, Linux AppDir/AppImage or tarball).
 
 ## Prompt & Placeholder Packaging

@@ -1,9 +1,9 @@
 #!/bin/bash
-# Run the new simplified UI with Phoenix observability
-echo "🆕 Starting Llestrade (New UI)..."
+# Launch the dashboard UI with Phoenix observability env vars enabled.
+echo "🆕 Starting Llestrade (Dashboard + Phoenix)..."
 echo "================================================"
 echo ""
-echo "This will launch the new simplified interface with Phoenix observability."
+echo "This launches the current dashboard interface with Phoenix observability."
 echo ""
 echo "🔍 Phoenix Observability: ENABLED"
 echo "📊 Phoenix UI will be available at: http://localhost:6006"

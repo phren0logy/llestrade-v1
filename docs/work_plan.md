@@ -50,6 +50,7 @@ Transform the current wizard-style UI into a dashboard-based workflow that suppo
 - [ ] Emit consistent debug logging (job ID + status transitions) across all `DashboardWorker` subclasses.
 - [ ] Keep `observability.py` wiring current and add Phoenix spans that include bulk analysis group context.
 - [ ] Export Phoenix fixtures for deterministic tests.
+- [ ] Document that trace retrieval/export remains limited while `PhoenixObservability.get_traces()` is a stub path.
 
 #### Business Logic Testing
 
@@ -305,7 +306,7 @@ _The wizard-style UI with linear stages has been replaced by the dashboard appro
 ### 5.3 Documentation
 
 - [ ] Update README.md with accurate status
-- [ ] Create user guide for new UI
+- [ ] Create user guide for the dashboard workflow
 - [ ] Document API for developers
 - [ ] Add inline code documentation
 
