@@ -141,10 +141,6 @@ class SimplifiedMainWindow(QMainWindow):
         self._stack.addWidget(self._welcome_stage)
         self._stack.setCurrentWidget(self._welcome_stage)
 
-        missing = [p for p in ("anthropic", "gemini", "azure_openai") if not self.settings.has_api_key(p)]
-        if missing:
-            self.logger.info("Missing API keys for: %s", ", ".join(missing))
-
         # Offer prompt sync on initial setup or when bundled prompts changed
         try:
             self._maybe_offer_resource_sync()
@@ -435,6 +431,8 @@ class SimplifiedMainWindow(QMainWindow):
 
     def _on_settings_changed(self) -> None:
         self.logger.info("Settings updated")
+        if self._welcome_stage is not None:
+            self._welcome_stage.refresh_api_status()
 
     def _show_about(self) -> None:
         QMessageBox.about(

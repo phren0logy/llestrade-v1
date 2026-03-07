@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List
 
-from PySide6.QtCore import Qt, QTimer, Signal, QSize, QUrl
+from PySide6.QtCore import Qt, Signal, QSize, QUrl
 from PySide6.QtGui import QFont, QIcon, QDesktopServices, QShowEvent
 from PySide6.QtWidgets import (
     QFileDialog,
@@ -42,11 +42,8 @@ class WelcomeStage(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.settings = SecureSettings()
-        self.api_timer = QTimer(self)
-        self.api_timer.timeout.connect(self._update_api_status)
         self._build_ui()
         self._update_api_status()
-        self.api_timer.start(5000)
 
     # ------------------------------------------------------------------
     # UI assembly
@@ -402,6 +399,7 @@ class WelcomeStage(QWidget):
     def showEvent(self, event: QShowEvent) -> None:  # pragma: no cover - Qt lifecycle
         super().showEvent(event)
         self._populate_recent_projects()
+        self._update_api_status()
 
     def _update_api_status(self) -> None:
         while self._api_layout.count() > 1:
@@ -416,23 +414,25 @@ class WelcomeStage(QWidget):
             ("gemini", "Google Gemini", "✨"),
             ("azure_openai", "Azure OpenAI", "☁️"),
         ]
-        settings = SecureSettings()
         for provider_id, label, icon in providers:
             if provider_id == "anthropic_bedrock":
                 available = self._is_bedrock_available()
             else:
-                available = settings.has_api_key(provider_id)
+                available = self.settings.has_api_key(provider_id)
             row = QLabel(f"{icon} {label} — {'Configured' if available else 'Missing'}")
             color = "#4caf50" if available else "#f44336"
             row.setStyleSheet(f"color: {color};")
             self._api_layout.insertWidget(self._api_layout.count() - 1, row)
 
+    def refresh_api_status(self) -> None:
+        """Refresh provider status labels without relying on periodic polling."""
+        self._update_api_status()
+
     def get_recent_projects(self) -> List[Dict]:  # pragma: no cover - compatibility shim
         return self.settings.get_recent_projects()
 
     def cleanup(self) -> None:
-        if self.api_timer.isActive():
-            self.api_timer.stop()
+        pass
 
     def _is_bedrock_available(self) -> bool:
         try:
