@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import frontmatter
+import hashlib
 from pathlib import Path
 import pytest
 
@@ -82,13 +84,16 @@ def test_conversion_worker_uses_azure_when_configured(monkeypatch: pytest.Monkey
     job.source_path.write_bytes(b"pdf")
 
     produced_markdown = job.destination_path.parent / "sample.md"
-    produced_json = job.destination_path.parent / ".azure-di" / "sample.json"
+    produced_json = job.destination_path.parent / "sample.json"
+    raw_markdown = job.destination_path.parent / "sample.azure.raw.md"
+    raw_json = job.destination_path.parent / "sample.azure.raw.json"
 
     def fake_process(_self, source_path, output_dir, json_dir, endpoint, key):
-        assert json_dir is None
+        assert json_dir == output_dir
         produced_markdown.parent.mkdir(parents=True, exist_ok=True)
-        produced_markdown.write_text("azure output")
-        return None, str(produced_markdown)
+        produced_markdown.write_text("azure output\n<!-- PageBreak -->\nnext page")
+        produced_json.write_text('{"kind":"raw"}')
+        return str(produced_json), str(produced_markdown)
 
     class StubSettings:
         def __init__(self) -> None:
@@ -114,8 +119,62 @@ def test_conversion_worker_uses_azure_when_configured(monkeypatch: pytest.Monkey
     worker._convert_pdf_with_azure(job)
 
     content = job.destination_path.read_text()
-    assert "azure output" in content
+    assert "<!--- sample.pdf#page=1 --->" in content
+    assert raw_markdown.exists()
+    assert raw_json.exists()
     assert not produced_json.exists()
+
+    post = frontmatter.load(job.destination_path)
+    assert post.metadata["azure_raw_markdown_path"].endswith("/converted/sample.azure.raw.md")
+    assert post.metadata["azure_raw_json_path"].endswith("/converted/sample.azure.raw.json")
+    assert post.metadata["azure_raw_cached"] is False
+
+
+def test_conversion_worker_reuses_cached_raw_azure_output(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    job = ConversionJob(
+        source_path=tmp_path / "sample.pdf",
+        relative_path="sample.pdf",
+        destination_path=tmp_path / "converted" / "sample.md",
+        conversion_type="pdf",
+    )
+    job.source_path.parent.mkdir(parents=True, exist_ok=True)
+    job.source_path.write_bytes(b"pdf")
+    job.destination_path.parent.mkdir(parents=True, exist_ok=True)
+
+    checksum = hashlib.sha256(b"pdf").hexdigest()
+    job.destination_path.write_text(f"---\nsources:\n  - checksum: {checksum}\n---\nold", encoding="utf-8")
+    raw_markdown = job.destination_path.parent / "sample.azure.raw.md"
+    raw_json = job.destination_path.parent / "sample.azure.raw.json"
+    raw_markdown.write_text("cached raw\n<!-- PageBreak -->\npage2", encoding="utf-8")
+    raw_json.write_text('{"cached": true}', encoding="utf-8")
+
+    class StubSettings:
+        def get(self, key, default=None):
+            if key == "azure_di_settings":
+                return {"endpoint": "https://example"}
+            return default
+
+        def get_api_key(self, provider):
+            return "secret" if provider == "azure_di" else None
+
+    called = {"value": False}
+
+    def should_not_run(*_args, **_kwargs):
+        called["value"] = True
+        raise AssertionError("Azure conversion should not run when cache is valid")
+
+    monkeypatch.setattr("src.app.workers.conversion_worker.SecureSettings", StubSettings)
+    monkeypatch.setattr(
+        "src.app.workers.conversion_worker.ConversionWorker._process_with_azure",
+        should_not_run,
+    )
+
+    worker = ConversionWorker([job], helper="azure_di")
+    worker._convert_pdf_with_azure(job)
+
+    assert called["value"] is False
+    post = frontmatter.load(job.destination_path)
+    assert post.metadata["azure_raw_cached"] is True
 
 
 def test_conversion_worker_raises_without_azure_credentials(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

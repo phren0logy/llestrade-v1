@@ -338,7 +338,7 @@ def process_pdf_with_azure(
 
     # If page count exceeds Azure's 1000 page limit, process in ranges with overlap and combine
     if "page_count" in locals() and page_count is not None and page_count > 1000:
-        combined = _azure_markdown_chunked(
+        combined, chunk_json = _azure_markdown_chunked(
             client=document_intelligence_client,
             pdf_path=pdf_path,
             total_pages=page_count,
@@ -350,8 +350,21 @@ def process_pdf_with_azure(
             f.write(f"# {file_name}\n\n")
             f.write(combined)
         print(f"Saved chunked Markdown results to {markdown_path}")
-        # JSON not produced for chunked path; caller does not require it
-        return None, markdown_path
+        if json_path is not None:
+            with open(json_path, "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "mode": "chunked",
+                        "page_count": page_count,
+                        "chunk_size": 1000,
+                        "overlap": 5,
+                        "chunks": chunk_json,
+                    },
+                    f,
+                    indent=2,
+                )
+            print(f"Saved chunked JSON results to {json_path}")
+        return json_path, markdown_path
 
     # Process the file with Azure Document Intelligence (single pass)
     try:
@@ -464,7 +477,7 @@ def _azure_markdown_chunked(
     total_pages: int,
     max_pages: int,
     overlap: int,
-) -> str:
+) -> tuple[str, list[dict]]:
     """Return combined Markdown by analyzing the PDF in page ranges with overlap.
 
     - Uses the `pages` parameter if supported; otherwise falls back to pre-splitting the PDF.
@@ -494,10 +507,12 @@ def _azure_markdown_chunked(
         return [p.strip("\n") for p in parts]
 
     combined_segments: list[str] = []
+    chunk_json_payload: list[dict] = []
     first = True
     for rs, re_ in ranges:
         use_pages_param = True
         content = None
+        result = None
         try:
             with open(pdf_path, "rb") as fh:
                 poller = client.begin_analyze_document(
@@ -545,6 +560,18 @@ def _azure_markdown_chunked(
         if not content:
             continue
 
+        if result is not None:
+            try:
+                chunk_json_payload.append(
+                    {
+                        "range": {"start": rs, "end": re_},
+                        "used_pages_param": use_pages_param,
+                        "analyze_result": result.as_dict(),
+                    }
+                )
+            except Exception:
+                pass
+
         segs = _split_pages(content)
         # Drop first `overlap` pages for subsequent chunks
         if not first:
@@ -566,7 +593,7 @@ def _azure_markdown_chunked(
         first = False
 
     combined = "\n\n".join(combined_segments).strip() + "\n"
-    return combined
+    return combined, chunk_json_payload
 
 
 def process_pdfs_with_azure(pdf_files, output_dir, endpoint=None, key=None):

@@ -14,6 +14,7 @@ from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 import frontmatter
 from PySide6.QtCore import Signal
 
+from src.app.core.azure_artifacts import is_azure_raw_artifact
 from src.app.core.bulk_analysis_groups import BulkAnalysisGroup
 from src.app.core.bulk_analysis_runner import (
     BulkAnalysisCancelled,
@@ -700,12 +701,17 @@ class BulkReduceWorker(DashboardWorker):
             rel = rel.strip("/")
             if not rel:
                 continue
-            items.append(("converted", conv_root / rel, f"converted/{rel}"))
+            candidate = conv_root / rel
+            if is_azure_raw_artifact(candidate):
+                continue
+            items.append(("converted", candidate, f"converted/{rel}"))
         for rel_dir in (self._group.combine_converted_directories or []):
             rel_dir = rel_dir.strip("/")
             base = conv_root / rel_dir
             if base.exists():
                 for f in base.rglob("*.md"):
+                    if is_azure_raw_artifact(f):
+                        continue
                     items.append(("converted", f, f"converted/{f.relative_to(conv_root).as_posix()}"))
 
         # Map outputs under bulk_analysis

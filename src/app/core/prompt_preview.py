@@ -8,6 +8,7 @@ from typing import Iterable, Mapping, Optional, Sequence
 
 import frontmatter
 
+from src.app.core.azure_artifacts import is_azure_raw_artifact
 from src.app.core.bulk_analysis_runner import load_prompts
 from src.app.core.bulk_analysis_runner import _metadata_context  # type: ignore[attr-defined]
 from src.app.core.project_manager import ProjectMetadata
@@ -161,6 +162,8 @@ def _resolve_first_per_document_input(
     file_map = {}
     for path in converted_root.rglob("*"):
         if path.is_file() and path.suffix.lower() in {".md", ".txt"}:
+            if is_azure_raw_artifact(path):
+                continue
             relative = path.relative_to(converted_root).as_posix().strip("/")
             file_map[relative] = path
 
@@ -207,6 +210,8 @@ def _resolve_combined_inputs(project_dir: Path, group: BulkAnalysisGroup, *, lim
     def _add(path: Path) -> None:
         if not path.exists() or not path.is_file():
             return
+        if is_azure_raw_artifact(path):
+            return
         if path in items:
             return
         items.append(path)
@@ -229,6 +234,8 @@ def _resolve_combined_inputs(project_dir: Path, group: BulkAnalysisGroup, *, lim
         if not base.exists():
             continue
         for candidate in sorted(p for p in base.rglob("*.md") if p.is_file()):
+            if is_azure_raw_artifact(candidate):
+                continue
             _add(candidate)
             if limit and len(items) >= limit:
                 return _apply_order(items, group)

@@ -8,13 +8,19 @@ Adds standardised YAML front matter and page markers to PDF/DOCX conversions:
 
 from __future__ import annotations
 
+import json
 import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 
+import frontmatter
 from PySide6.QtCore import Signal
 
+from src.app.core.azure_artifacts import (
+    AZURE_RAW_JSON_SUFFIX,
+    AZURE_RAW_MARKDOWN_SUFFIX,
+)
 from src.common.markdown import (
     SourceReference,
     apply_frontmatter,
@@ -161,54 +167,79 @@ class ConversionWorker(DashboardWorker):
         endpoint, key = self._azure_credentials()
         output_dir = job.destination_path.parent
         output_dir.mkdir(parents=True, exist_ok=True)
-        # NOTE: Azure DI JSON export is temporarily disabled. Keep this block commented so we can
-        #       restore the raw output if downstream tooling needs it again.
-        # json_dir = output_dir / ".azure-di"
-        # json_dir.mkdir(parents=True, exist_ok=True)
-        json_dir = None
-
-        json_path, markdown_path = self._process_with_azure(
-            job.source_path,
-            output_dir,
-            json_dir,
-            endpoint,
-            key,
-        )
-
-        produced = Path(markdown_path)
         final_path = job.destination_path
-        if produced != final_path:
-            if final_path.exists():
-                final_path.unlink()
-            produced.rename(final_path)
+        raw_markdown_path, raw_json_path = self._azure_raw_sidecar_paths(job)
+
+        checksum = compute_file_checksum(job.source_path)
+        cache_hit = False
+        raw_markdown = None
+
+        if self._can_reuse_azure_raw(
+            final_path=final_path,
+            raw_markdown_path=raw_markdown_path,
+            raw_json_path=raw_json_path,
+            source_checksum=checksum,
+        ):
+            cache_hit = True
+            raw_markdown = raw_markdown_path.read_text(encoding="utf-8")
+        else:
+            json_path, markdown_path = self._process_with_azure(
+                job.source_path,
+                output_dir,
+                output_dir,
+                endpoint,
+                key,
+            )
+            if not json_path:
+                raise RuntimeError(
+                    "Azure conversion did not produce a JSON artifact. "
+                    "Raw JSON is required for citation iteration."
+                )
+
+            produced_markdown = Path(markdown_path)
+            produced_json = Path(json_path)
+            raw_markdown = produced_markdown.read_text(encoding="utf-8")
+            raw_json_text = produced_json.read_text(encoding="utf-8")
+            json.loads(raw_json_text)
+
+            raw_markdown_path.write_text(raw_markdown, encoding="utf-8")
+            raw_json_path.write_text(raw_json_text, encoding="utf-8")
+
+            if produced_json != raw_json_path and produced_json.exists():
+                produced_json.unlink()
+
+        if raw_markdown is None:
+            raise RuntimeError("Azure conversion did not produce markdown content")
 
         # Insert page markers by parsing Azure DI markdown, then inject YAML front-matter
-        try:
-            content = final_path.read_text(encoding="utf-8")
-        except Exception as exc:  # pragma: no cover - defensive
-            self.logger.warning("Failed to read Azure DI markdown for page markers: %s", exc)
-            return
         source_rel = self._project_relative(job)
-        content_marked, pages_detected = self._insert_azure_page_markers(content, source_rel)
+        content_marked, pages_detected = self._insert_azure_page_markers(raw_markdown, source_rel)
         try:
             import fitz  # PyMuPDF
             pages_pdf = len(fitz.open(job.source_path))
         except Exception:
             pages_pdf = None
         converter_tag = f"pdf-{self._helper_id.replace('_', '-')}"
+        raw_generated_at = self._iso_file_mtime(raw_markdown_path)
+        project_dir, _ = self._project_context(job)
+        metadata_extra: Dict[str, object] = {
+            "azure_raw_markdown_path": self._metadata_path(raw_markdown_path, project_dir),
+            "azure_raw_json_path": self._metadata_path(raw_json_path, project_dir),
+            "azure_raw_cached": cache_hit,
+            "azure_raw_generated_at": raw_generated_at,
+        }
         metadata = self._conversion_metadata(
             job,
             source_format="pdf",
             pages_detected=pages_detected or None,
             pages_pdf=pages_pdf,
             converter=converter_tag,
+            source_checksum=checksum,
+            extra=metadata_extra,
         )
         updated = apply_frontmatter(content_marked, metadata, merge_existing=True)
         final_path.write_text(updated, encoding="utf-8")
         self._warn_if_page_mismatch(job, pages_detected, pages_pdf)
-
-        if json_path:
-            self.logger.debug("%s Azure DI JSON saved to %s", self.job_tag, json_path)
 
     def _azure_credentials(self) -> tuple[str, str]:
         settings = SecureSettings()
@@ -225,10 +256,10 @@ class ConversionWorker(DashboardWorker):
         self,
         source_path: Path,
         output_dir: Path,
-        json_dir: Path,
+        json_dir: Path | None,
         endpoint: str,
         key: str,
-    ) -> tuple[str, str]:
+    ) -> tuple[str | None, str]:
         try:
             from src.core.pdf_utils import process_pdf_with_azure
         except ImportError as exc:  # pragma: no cover
@@ -245,6 +276,70 @@ class ConversionWorker(DashboardWorker):
             endpoint,
             key,
         )
+
+    def _azure_raw_sidecar_paths(self, job: ConversionJob) -> tuple[Path, Path]:
+        base = job.destination_path
+        raw_markdown = base.with_name(f"{base.stem}{AZURE_RAW_MARKDOWN_SUFFIX}")
+        raw_json = base.with_name(f"{base.stem}{AZURE_RAW_JSON_SUFFIX}")
+        return raw_markdown, raw_json
+
+    def _source_checksum_from_document(self, path: Path) -> str | None:
+        if not path.exists():
+            return None
+        try:
+            post = frontmatter.load(path)
+        except Exception:
+            return None
+        metadata = post.metadata if isinstance(post.metadata, dict) else {}
+        sources = metadata.get("sources", [])
+        if not isinstance(sources, list):
+            return None
+        for entry in sources:
+            if isinstance(entry, dict):
+                checksum = entry.get("checksum")
+                if isinstance(checksum, str) and checksum:
+                    return checksum
+        return None
+
+    def _can_reuse_azure_raw(
+        self,
+        *,
+        final_path: Path,
+        raw_markdown_path: Path,
+        raw_json_path: Path,
+        source_checksum: str | None,
+    ) -> bool:
+        if not source_checksum:
+            return False
+        if not final_path.exists() or not raw_markdown_path.exists() or not raw_json_path.exists():
+            return False
+        existing_checksum = self._source_checksum_from_document(final_path)
+        if existing_checksum != source_checksum:
+            return False
+        try:
+            json.loads(raw_json_path.read_text(encoding="utf-8"))
+        except Exception:
+            self.logger.warning(
+                "%s raw Azure JSON sidecar is invalid and will be regenerated: %s",
+                self.job_tag,
+                raw_json_path,
+            )
+            return False
+        return True
+
+    def _metadata_path(self, artifact: Path, project_dir: Path | None) -> str:
+        if project_dir:
+            try:
+                return artifact.resolve().relative_to(project_dir.resolve()).as_posix()
+            except Exception:
+                pass
+        return artifact.resolve().as_posix()
+
+    def _iso_file_mtime(self, path: Path) -> str | None:
+        try:
+            return datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat()
+        except Exception:
+            return None
 
     def _use_azure(self) -> bool:
         return self._helper_id == "azure_di"
@@ -295,9 +390,11 @@ class ConversionWorker(DashboardWorker):
         pages_detected: int | None,
         pages_pdf: int | None,
         converter: str,
+        source_checksum: str | None = None,
+        extra: Dict[str, object] | None = None,
     ) -> Dict[str, object]:
         project_dir, source_rel = self._project_context(job)
-        checksum = compute_file_checksum(job.source_path)
+        checksum = source_checksum if source_checksum is not None else compute_file_checksum(job.source_path)
         try:
             mtime_int = int(job.source_path.stat().st_mtime)
         except Exception:
@@ -305,13 +402,15 @@ class ConversionWorker(DashboardWorker):
         else:
             mtime = datetime.fromtimestamp(mtime_int, timezone.utc).isoformat()
 
-        extra: Dict[str, object] = {
+        base_extra: Dict[str, object] = {
             "source_format": source_format,
             "source_mtime": mtime,
             "pages_detected": pages_detected,
             "pages_pdf": pages_pdf,
             "converter": converter,
         }
+        if extra:
+            base_extra.update(extra)
 
         metadata = build_document_metadata(
             project_path=project_dir,
@@ -325,7 +424,7 @@ class ConversionWorker(DashboardWorker):
                     checksum=checksum,
                 )
             ],
-            extra=extra,
+            extra=base_extra,
         )
         return metadata
 
@@ -349,7 +448,7 @@ class ConversionWorker(DashboardWorker):
         # **Page N** standalone
         page_pat4 = re.compile(r"^\s*\*\*\s*Page\s+(\d+)\s*\*\*\s*$", re.IGNORECASE)
         # Lines like — Page N — or -- Page N -- using various dashes
-        dash = "\u2012\u2013\u2014\-"  # figure/en/en em dashes and hyphen
+        dash = "-\u2012\u2013\u2014"  # hyphen + figure/en/em dashes
         page_pat5 = re.compile(rf"^[{dash}\s]*Page\s+(\d+)[{dash}\s]*$", re.IGNORECASE)
 
         # Azure default emits explicit page breaks as HTML comments

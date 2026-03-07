@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, TYPE_CHECKING
 
+from src.app.core.azure_artifacts import is_azure_raw_artifact
 from src.app.core.bulk_paths import (
     iter_map_outputs,
     iter_map_outputs_under,
@@ -281,6 +282,8 @@ class FileTracker:
         collected: set[str] = set()
         for path in folder.rglob("*"):
             if path.is_file():
+                if folder_name == "converted_documents" and is_azure_raw_artifact(path):
+                    continue
                 collected.add(path.relative_to(folder).as_posix())
         return collected
 
@@ -510,9 +513,13 @@ def _iter_project_files(root: Path, rel_dirs: Sequence[str]) -> set[str]:
         if not base.exists():
             continue
         if base.is_file():
+            if is_azure_raw_artifact(base):
+                continue
             selected.add(rel)
             continue
         for path in base.rglob("*.md"):
+            if is_azure_raw_artifact(path):
+                continue
             try:
                 selected.add(path.relative_to(root).as_posix())
             except ValueError:

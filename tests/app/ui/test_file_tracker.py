@@ -138,3 +138,15 @@ def test_scan_ignores_bulk_analysis_noise_files(project_root: Path) -> None:
 
     assert snapshot.bulk_analysis_count == 1
     assert snapshot.files["bulk_analysis"] == ["case/doc1_analysis.md"]
+
+
+def test_scan_ignores_azure_raw_sidecars(project_root: Path) -> None:
+    write_file(project_root / "converted_documents", "case/doc1.md")
+    write_file(project_root / "converted_documents", "case/doc1.azure.raw.md")
+    write_file(project_root / "converted_documents", "case/doc1.azure.raw.json", "{}")
+
+    tracker = FileTracker(project_root)
+    snapshot = tracker.scan()
+
+    assert snapshot.imported_count == 1
+    assert snapshot.files["imported"] == ["case/doc1.md"]

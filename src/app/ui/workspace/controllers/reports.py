@@ -11,6 +11,7 @@ from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QFileDialog, QMessageBox, QTreeWidgetItem, QWidget
 
+from src.app.core.azure_artifacts import is_azure_raw_artifact
 from src.app.core.bulk_paths import iter_map_outputs
 from src.app.core.project_manager import ProjectManager, ProjectMetadata
 from src.app.core.prompt_placeholders import format_prompt, placeholder_summary, get_prompt_spec
@@ -366,6 +367,8 @@ class ReportsController:
         if converted_root.exists():
             for path in sorted(converted_root.rglob("*")):
                 if path.is_file() and path.suffix.lower() in {".md", ".txt"}:
+                    if is_azure_raw_artifact(path):
+                        continue
                     add_descriptor(
                         REPORT_CATEGORY_CONVERTED,
                         path,

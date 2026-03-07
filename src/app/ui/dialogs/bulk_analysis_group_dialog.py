@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
 
 from src.config.prompt_store import get_bundled_dir, get_custom_dir
 from src.config.paths import app_resource_root
+from src.app.core.azure_artifacts import is_azure_raw_artifact
 from src.app.core.bulk_paths import iter_map_outputs
 from src.app.core.bulk_analysis_groups import BulkAnalysisGroup
 from src.app.core.project_manager import ProjectMetadata
@@ -219,7 +220,7 @@ class BulkAnalysisGroupDialog(QDialog):
     def _is_allowed_file(self, path: Path) -> bool:
         """Return True if the file should be selectable (only .md or .txt)."""
         try:
-            return path.suffix.lower() in {".md", ".txt"}
+            return path.suffix.lower() in {".md", ".txt"} and not is_azure_raw_artifact(path)
         except Exception:
             return False
 
