@@ -142,7 +142,9 @@ Note: Highlights denominator uses PDFs only (pending/highlights reflect PDF-elig
 
 - Dashboard-era tests live under `tests/app/**` (FileTracker, workspace controllers, worker coordinator, placeholder flows).
 - Legacy UI regression tests remain for reference but are no longer expanded.
-- Coverage reporting is not yet automated; pytest can be run manually with `uv run pytest tests/`.
+- Deterministic PR checks are automated in GitHub Actions (`tests-pr-deterministic.yml`) and publish coverage artifacts.
+- Optional live-provider checks run in a separate workflow (`tests-live-providers.yml`) via manual dispatch or PR label.
+- Local test entrypoints: `scripts/run_pytest.sh`, `scripts/run_pytest_pr.sh`, `scripts/run_pytest_live.sh`.
 
 ### Codebase Health
 

@@ -7,6 +7,8 @@ import logging
 import sys
 from pathlib import Path
 
+import pytest
+
 # Ensure we can import from the parent directory
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -14,6 +16,8 @@ from src.common.llm import create_provider
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+
+pytestmark = [pytest.mark.live_provider, pytest.mark.integration]
 
 def test_gemini_thinking():
     """Test that the Gemini client can use extended thinking."""

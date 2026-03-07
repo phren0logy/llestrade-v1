@@ -37,9 +37,18 @@ dev = [
 ]
 
 [tool.pytest.ini_options]
-addopts = "-ra"
+addopts = "-ra --strict-markers"
 qt_api = "pyside6"
 testpaths = ["tests"]
+markers = [
+    "unit: fast deterministic unit tests",
+    "core: dashboard core/domain tests",
+    "worker: worker and orchestration tests",
+    "ui: Qt UI and controller/widget tests",
+    "integration: multi-module integration tests",
+    "live_provider: tests that call real external LLM providers",
+    "slow: tests that are intentionally long-running",
+]
 filterwarnings = [
     "ignore:'HTTP_422_UNPROCESSABLE_ENTITY' is deprecated:DeprecationWarning:phoenix.server.api.routers",
 ]

@@ -7,12 +7,16 @@ import logging
 import os
 import sys
 
+import pytest
+
 from src.common.llm import create_provider
 from src.common.llm.providers.anthropic import AnthropicProvider
 from src.common.llm.providers.gemini import GeminiProvider
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+
+pytestmark = [pytest.mark.live_provider, pytest.mark.integration]
 
 def test_both_clients():
     """Test initializing and using both Gemini and Anthropic clients."""

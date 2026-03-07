@@ -5,6 +5,12 @@ set -euo pipefail
 # (e.g., phoenix) from spawning background services and hanging test runs.
 export PYTEST_DISABLE_PLUGIN_AUTOLOAD=1
 
-# Explicitly load pytest-qt so fixtures like `qtbot` remain available.
-exec uv run pytest -p pytestqt.plugin "$@"
+# Explicitly load pytest-qt when available so fixtures like `qtbot` are present.
+PYTEST_ARGS=()
+if uv run python -c "import pytestqt.plugin" >/dev/null 2>&1; then
+  PYTEST_ARGS+=(-p pytestqt.plugin)
+else
+  echo "[run_pytest] pytest-qt plugin not installed; Qt fixture tests may skip or fail." >&2
+fi
 
+exec uv run python -m pytest "${PYTEST_ARGS[@]}" "$@"

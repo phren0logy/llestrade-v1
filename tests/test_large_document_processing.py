@@ -13,6 +13,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import psutil
+import pytest
 
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -128,6 +129,8 @@ def test_large_document_chunking():
         logger.info(f"  Memory after cleanup: {memory_cleaned:.1f} MB")
 
 
+@pytest.mark.live_provider
+@pytest.mark.slow
 def test_azure_large_document_processing():
     """Test Azure OpenAI processing of large documents with retry logic."""
     logger.info("\n=== Testing Azure OpenAI Large Document Processing ===")

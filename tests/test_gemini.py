@@ -7,6 +7,8 @@ import os
 import sys
 from pathlib import Path
 
+import pytest
+
 # Configure logging to console
 logging.basicConfig(
     level=logging.INFO,
@@ -27,6 +29,8 @@ try:
     logging.info("Successfully imported google.generativeai package directly")
 except ImportError as e:
     logging.error(f"Error importing google.generativeai: {str(e)}")
+
+pytestmark = [pytest.mark.live_provider, pytest.mark.integration]
 
 
 def test_gemini_client():

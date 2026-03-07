@@ -366,14 +366,17 @@ Crash reports are saved to:
 ### Running Tests
 
 ```bash
-# Run all tests
+# Run the default suite (includes all markers unless filtered)
 scripts/run_pytest.sh tests/
 
-# Run specific test file
-scripts/run_pytest.sh tests/test_gemini.py -v
+# Run deterministic PR-like suite (recommended for daily development)
+scripts/run_pytest_pr.sh
 
-# Run with coverage
-scripts/run_pytest.sh --cov=. tests/
+# Run optional live-provider suite (requires provider API keys)
+scripts/run_pytest_live.sh
+
+# Run a specific test file
+scripts/run_pytest.sh tests/app/ui/test_file_tracker.py -v
 ```
 
 ### Code Style
@@ -460,4 +463,5 @@ Legacy transition notes and historical plans live under `docs/archive/` and are 
 - `docs/current_behavior.md` - concise current behavior baseline
 - `docs/work_plan.md` - active implementation priorities
 - `docs/progress.md` - dashboard-era milestone summary
+- `docs/testing_strategy.md` - marker taxonomy and CI test lanes
 - `docs/placeholder_reference.md` - placeholder behavior and usage

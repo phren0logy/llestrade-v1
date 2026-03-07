@@ -5,13 +5,70 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
-import os
 
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+
+def _env_flag(name: str, *, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _live_provider_enabled() -> bool:
+    return _env_flag("RUN_LIVE_PROVIDER_TESTS", default=False)
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """Apply marker taxonomy and gate live-provider tests by default."""
+
+    run_live = _live_provider_enabled()
+    skip_live = pytest.mark.skip(
+        reason="live provider tests are disabled (set RUN_LIVE_PROVIDER_TESTS=1 to enable)"
+    )
+
+    for item in items:
+        path = Path(str(item.fspath))
+        path_text = path.as_posix()
+        filename = path.name
+
+        if "/tests/unit/" in path_text or "/tests/common/" in path_text:
+            item.add_marker(pytest.mark.unit)
+        if "/tests/app/core/" in path_text:
+            item.add_marker(pytest.mark.core)
+        if "/tests/app/workers/" in path_text:
+            item.add_marker(pytest.mark.worker)
+        if "/tests/app/ui/" in path_text or filename == "test_qt.py":
+            item.add_marker(pytest.mark.ui)
+
+        live_provider_files = {
+            "test_api_keys.py",
+            "test_both_clients.py",
+            "test_gemini.py",
+            "test_extended_thinking.py",
+        }
+        if filename in live_provider_files:
+            item.add_marker(pytest.mark.live_provider)
+            item.add_marker(pytest.mark.integration)
+
+        if filename == "test_large_document_processing.py":
+            item.add_marker(pytest.mark.integration)
+
+        if (
+            filename.startswith("test_")
+            and "app/" not in path_text
+            and "/tests/unit/" not in path_text
+            and "/tests/common/" not in path_text
+        ):
+            item.add_marker(pytest.mark.integration)
+
+        if "live_provider" in item.keywords and not run_live:
+            item.add_marker(skip_live)
 
 
 @pytest.fixture(autouse=True)
@@ -28,9 +85,12 @@ def _isolate_settings_dir(tmp_path, monkeypatch: pytest.MonkeyPatch):
 def _env_keys_from_keychain():
     """Populate API key environment variables from keychain/.env if missing.
 
-    This lets provider tests run using keys stored via SecureSettings without
-    requiring users to export env vars manually.
+    This is only enabled for live-provider runs (RUN_LIVE_PROVIDER_TESTS=1).
     """
+    if not _live_provider_enabled():
+        yield
+        return
+
     # First try to load values from a local .env if present
     try:
         from dotenv import load_dotenv
