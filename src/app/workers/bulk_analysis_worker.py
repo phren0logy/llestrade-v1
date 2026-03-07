@@ -18,7 +18,7 @@ from src.app.core.bulk_analysis_runner import (
     BulkAnalysisCancelled,
     BulkAnalysisDocument,
     PromptBundle,
-    combine_chunk_summaries,
+    combine_chunk_summaries_hierarchical,
     generate_chunks,
     load_prompts,
     prepare_documents,
@@ -32,6 +32,7 @@ from src.app.core.project_manager import ProjectMetadata
 from src.app.core.secure_settings import SecureSettings
 from src.common.llm.base import BaseLLMProvider
 from src.common.llm.factory import create_provider
+from src.common.llm.tokens import TokenCounter
 from src.common.markdown import (
     PromptReference,
     SourceReference,
@@ -55,6 +56,10 @@ class ProviderConfig:
 
 _MANIFEST_VERSION = 2
 _MTIME_TOLERANCE = 1e-6
+_DEFAULT_MAX_OUTPUT_TOKENS = 32_000
+_INPUT_BUDGET_RATIO = 0.85
+_INPUT_BUDGET_BUFFER = 1_000
+_MIN_CHUNK_TOKEN_TARGET = 4_000
 
 _DYNAMIC_GLOBAL_KEYS: frozenset[str] = frozenset(
     {
@@ -487,65 +492,105 @@ class BulkAnalysisWorker(DashboardWorker):
 
         override_window = getattr(self._group, "model_context_window", None)
         if isinstance(override_window, int) and override_window > 0:
-            from src.common.llm.tokens import TokenCounter
-
-            token_info = TokenCounter.count(
+            raw_context_window = int(override_window)
+            body_token_info = TokenCounter.count(
                 text=body,
                 provider=provider_config.provider_id,
                 model=provider_config.model or "",
             )
-            token_count = token_info.get("token_count") if token_info.get("success") else len(body) // 4
-            max_tokens = max(int(override_window * 0.5), 4000)
-            needs_chunking = token_count > max_tokens
+            token_count = int(body_token_info.get("token_count") or 0) if body_token_info.get("success") else max(len(body) // 3, 1)
+            default_chunk_tokens = max(int(raw_context_window * 0.5), _MIN_CHUNK_TOKEN_TARGET)
+            needs_chunking = token_count > default_chunk_tokens
         else:
-            needs_chunking, token_count, max_tokens = should_chunk(
+            needs_chunking, token_count, default_chunk_tokens = should_chunk(
                 body,
                 provider_config.provider_id,
                 provider_config.model,
             )
+            raw_context_window = TokenCounter.get_model_context_window(
+                provider_config.model or provider_config.provider_id,
+                ratio=1.0,
+            )
+
+        input_budget = self._max_input_budget(
+            raw_context_window=raw_context_window,
+            max_output_tokens=_DEFAULT_MAX_OUTPUT_TOKENS,
+        )
+        full_prompt = render_user_prompt(
+            bundle,
+            self._metadata,
+            document.relative_path,
+            body,
+            placeholder_values=doc_placeholders,
+        )
+        full_prompt_tokens = self._count_prompt_tokens(
+            provider,
+            provider_config,
+            system_prompt,
+            full_prompt,
+        )
+        if full_prompt_tokens > input_budget:
+            needs_chunking = True
 
         run_details: Dict[str, object] = {
             "token_count": token_count,
-            "max_tokens": max_tokens,
+            "full_prompt_tokens": full_prompt_tokens,
+            "max_tokens": default_chunk_tokens,
+            "input_budget_tokens": input_budget,
             "chunking": bool(needs_chunking),
         }
 
         self.log_message.emit(
             f"Processing {document.relative_path} ({token_count} tokens, "
-            f"chunking={'yes' if needs_chunking else 'no'})"
+            f"prompt={full_prompt_tokens}, chunking={'yes' if needs_chunking else 'no'})"
         )
         self.logger.debug(
-            "%s processing %s tokens=%s chunking=%s",
+            "%s processing %s tokens=%s prompt_tokens=%s chunking=%s",
             self.job_tag,
             document.relative_path,
             token_count,
+            full_prompt_tokens,
             'yes' if needs_chunking else 'no',
         )
 
         if not needs_chunking:
-            prompt = render_user_prompt(
-                bundle,
-                self._metadata,
-                document.relative_path,
-                body,
-                placeholder_values=doc_placeholders,
-            )
             run_details["chunk_count"] = 1
-            result = self._invoke_provider(provider, provider_config, prompt, system_prompt)
+            result = self._invoke_provider(
+                provider,
+                provider_config,
+                full_prompt,
+                system_prompt,
+                input_budget=input_budget,
+                context_label=f"document '{document.relative_path}'",
+            )
             return result, run_details, doc_placeholders
 
-        chunks = generate_chunks(body, max_tokens)
+        chunk_target_tokens = max(
+            min(default_chunk_tokens, int(input_budget * 0.75)),
+            _MIN_CHUNK_TOKEN_TARGET,
+        )
+        chunks = self._generate_fitting_chunks(
+            provider=provider,
+            provider_config=provider_config,
+            bundle=bundle,
+            system_prompt=system_prompt,
+            document=document,
+            body=body,
+            placeholder_values=doc_placeholders,
+            input_budget=input_budget,
+            initial_chunk_tokens=chunk_target_tokens,
+        )
         if not chunks:
-            prompt = render_user_prompt(
-                bundle,
-                self._metadata,
-                document.relative_path,
-                body,
-                placeholder_values=doc_placeholders,
-            )
             run_details["chunk_count"] = 1
             run_details["chunking"] = False
-            result = self._invoke_provider(provider, provider_config, prompt, system_prompt)
+            result = self._invoke_provider(
+                provider,
+                provider_config,
+                full_prompt,
+                system_prompt,
+                input_budget=input_budget,
+                context_label=f"document '{document.relative_path}'",
+            )
             return result, run_details, doc_placeholders
 
         documents = manifest.setdefault("documents", {})  # type: ignore[assignment]
@@ -609,6 +654,8 @@ class BulkAnalysisWorker(DashboardWorker):
                     provider_config,
                     chunk_prompt,
                     system_prompt,
+                    input_budget=input_budget,
+                    context_label=f"chunk {idx}/{total_chunks} for '{document.relative_path}'",
                 )
                 checkpoint_mgr.save_map_chunk(document.relative_path, idx, summary, chunk_checksum)
 
@@ -624,13 +671,26 @@ class BulkAnalysisWorker(DashboardWorker):
 
             chunk_summaries.append(summary)
 
-        combine_prompt, _ = combine_chunk_summaries(
+        def invoke_combine(prompt: str) -> str:
+            return self._invoke_provider(
+                provider,
+                provider_config,
+                prompt,
+                system_prompt,
+                input_budget=input_budget,
+                context_label=f"combine summary for '{document.relative_path}'",
+            )
+
+        result = combine_chunk_summaries_hierarchical(
             chunk_summaries,
             document_name=document.relative_path,
             metadata=self._metadata,
             placeholder_values=doc_placeholders,
+            provider_id=provider_config.provider_id,
+            model=provider_config.model,
+            invoke_fn=invoke_combine,
+            is_cancelled_fn=self.is_cancelled,
         )
-        result = self._invoke_provider(provider, provider_config, combine_prompt, system_prompt)
         entry["status"] = "complete"
         entry["ran_at"] = datetime.now(timezone.utc).isoformat()
         documents[document.relative_path] = entry
@@ -640,6 +700,102 @@ class BulkAnalysisWorker(DashboardWorker):
             checkpoint_mgr.clear_map_document(document.relative_path)
         return result, run_details, doc_placeholders
 
+    def _max_input_budget(self, *, raw_context_window: int, max_output_tokens: int) -> int:
+        ratio_budget = int(raw_context_window * _INPUT_BUDGET_RATIO)
+        available_budget = raw_context_window - max_output_tokens - _INPUT_BUDGET_BUFFER
+        budget = min(ratio_budget, available_budget)
+        return max(int(budget), _MIN_CHUNK_TOKEN_TARGET)
+
+    def _count_prompt_tokens(
+        self,
+        provider: BaseLLMProvider,
+        provider_config: ProviderConfig,
+        system_prompt: str,
+        user_prompt: str,
+    ) -> int:
+        combined_prompt = f"{system_prompt.strip()}\n\n{user_prompt.strip()}".strip()
+        if not combined_prompt:
+            return 0
+
+        try:
+            provider_tokens = provider.count_tokens(text=combined_prompt)
+            if provider_tokens.get("success"):
+                counted = int(provider_tokens.get("token_count") or 0)
+                if counted > 0:
+                    return counted
+        except Exception:
+            self.logger.debug("Provider token preflight failed; falling back to local estimate", exc_info=True)
+
+        token_info = TokenCounter.count(
+            text=combined_prompt,
+            provider=provider_config.provider_id,
+            model=provider_config.model or "",
+        )
+        if token_info.get("success"):
+            counted = int(token_info.get("token_count") or 0)
+            if provider_config.provider_id in {"anthropic", "anthropic_bedrock"}:
+                return max(counted, max(len(combined_prompt) // 3, 1))
+            if counted > 0:
+                return counted
+        return max(len(combined_prompt) // 3, 1)
+
+    def _generate_fitting_chunks(
+        self,
+        *,
+        provider: BaseLLMProvider,
+        provider_config: ProviderConfig,
+        bundle: PromptBundle,
+        system_prompt: str,
+        document: BulkAnalysisDocument,
+        body: str,
+        placeholder_values: Mapping[str, str],
+        input_budget: int,
+        initial_chunk_tokens: int,
+    ) -> List[str]:
+        chunk_target = max(initial_chunk_tokens, _MIN_CHUNK_TOKEN_TARGET)
+        while True:
+            chunks = generate_chunks(body, chunk_target)
+            if not chunks:
+                return []
+
+            total_chunks = len(chunks)
+            oversized: List[tuple[int, int]] = []
+            for idx, chunk in enumerate(chunks, start=1):
+                prompt = render_user_prompt(
+                    bundle,
+                    self._metadata,
+                    document.relative_path,
+                    chunk,
+                    chunk_index=idx,
+                    chunk_total=total_chunks,
+                    placeholder_values=placeholder_values,
+                )
+                prompt_tokens = self._count_prompt_tokens(
+                    provider,
+                    provider_config,
+                    system_prompt,
+                    prompt,
+                )
+                if prompt_tokens > input_budget:
+                    oversized.append((idx, prompt_tokens))
+
+            if not oversized:
+                return chunks
+
+            if chunk_target <= _MIN_CHUNK_TOKEN_TARGET:
+                worst_chunk, worst_tokens = max(oversized, key=lambda item: item[1])
+                raise RuntimeError(
+                    f"Prompt exceeds model input budget for {document.relative_path} "
+                    f"(chunk {worst_chunk}: {worst_tokens} tokens > {input_budget} budget). "
+                    "Try a model with a larger context window or simplify the prompt template."
+                )
+
+            previous_target = chunk_target
+            chunk_target = max(int(chunk_target * 0.75), _MIN_CHUNK_TOKEN_TARGET)
+            self.log_message.emit(
+                f"Reducing chunk target for {document.relative_path}: {previous_target} -> {chunk_target} tokens"
+            )
+
     def _invoke_provider(
         self,
         provider: BaseLLMProvider,
@@ -648,10 +804,25 @@ class BulkAnalysisWorker(DashboardWorker):
         system_prompt: str,
         *,
         temperature: float = 0.1,
-        max_tokens: int = 32_000,
+        max_tokens: int = _DEFAULT_MAX_OUTPUT_TOKENS,
+        input_budget: Optional[int] = None,
+        context_label: str = "bulk analysis request",
     ) -> str:
         if self._cancel_event.is_set():
             raise BulkAnalysisCancelled
+
+        if input_budget is not None:
+            prompt_tokens = self._count_prompt_tokens(
+                provider,
+                provider_config,
+                system_prompt,
+                prompt,
+            )
+            if prompt_tokens > input_budget:
+                raise RuntimeError(
+                    f"Prompt exceeds model input budget for {context_label}: "
+                    f"{prompt_tokens} tokens > {input_budget} budget"
+                )
 
         response = provider.generate(
             prompt=prompt,

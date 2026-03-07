@@ -178,3 +178,15 @@ def test_combine_chunk_summaries_hierarchical_wraps_errors_with_context() -> Non
     error_msg = str(excinfo.value)
     # During hierarchical batching, errors should be wrapped with context
     assert "Hierarchical reduction failed" in error_msg or ("level" in error_msg.lower() and "batch" in error_msg.lower())
+
+
+def test_generate_chunks_enforces_hard_cap_for_large_sections() -> None:
+    max_tokens = 100
+    large_section = "A" * 5000
+    text = f"# Header\n\n{large_section}"
+
+    chunks = runner.generate_chunks(text, max_tokens=max_tokens)
+
+    assert chunks
+    max_chars = max_tokens * 4
+    assert all(len(chunk) <= max_chars for chunk in chunks)

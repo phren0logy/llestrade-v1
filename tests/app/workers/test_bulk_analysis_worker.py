@@ -22,6 +22,19 @@ from src.app.workers.bulk_analysis_worker import (
 )
 
 
+class _FakeProvider:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def generate(self, *, prompt: str, model=None, system_prompt=None, temperature=0.1, max_tokens=32000):  # noqa: ANN001
+        self.calls.append(prompt)
+        return {"success": True, "content": "summary"}
+
+    def count_tokens(self, text=None, messages=None):  # noqa: ANN001
+        content = text or ""
+        return {"success": True, "token_count": max(len(content) // 4, 1)}
+
+
 def test_should_process_document_handles_skips(tmp_path: Path) -> None:
     entry = {
         "source_mtime": 123.456001,
@@ -193,7 +206,7 @@ def test_bulk_worker_applies_placeholder_values(tmp_path: Path, monkeypatch: pyt
     provider_config = ProviderConfig(provider_id="anthropic", model="model")
     captured: dict[str, list[str]] = {"system": [], "user": []}
 
-    def fake_invoke(self, provider, config, prompt, system_prompt):  # noqa: ANN001
+    def fake_invoke(self, provider, config, prompt, system_prompt, **_kwargs):  # noqa: ANN001
         captured["system"].append(system_prompt)
         captured["user"].append(prompt)
         return "summary"
@@ -229,3 +242,112 @@ def test_bulk_worker_applies_placeholder_values(tmp_path: Path, monkeypatch: pyt
     assert captured["system"][0] == "System for Project XYZ"
     assert "doc.pdf" in captured["user"][0]
     assert "ACME" in captured["user"][0]
+
+
+def test_invoke_provider_rejects_over_budget_prompt(tmp_path: Path) -> None:
+    group = BulkAnalysisGroup.create("Group")
+    worker = BulkAnalysisWorker(
+        project_dir=tmp_path,
+        group=group,
+        files=[],
+        metadata=ProjectMetadata(case_name="Case"),
+        force_rerun=True,
+    )
+
+    provider = _FakeProvider()
+    config = ProviderConfig(provider_id="anthropic", model="claude-sonnet-4-5-20250929")
+
+    def fake_count(*_args, **_kwargs):  # noqa: ANN001
+        return 250_000
+
+    worker._count_prompt_tokens = fake_count  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError, match="Prompt exceeds model input budget"):
+        worker._invoke_provider(
+            provider,  # type: ignore[arg-type]
+            config,
+            "user prompt",
+            "system prompt",
+            input_budget=10_000,
+            context_label="document 'doc.md'",
+        )
+
+
+def test_process_document_forces_chunking_when_full_prompt_exceeds_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_dir = tmp_path
+    converted = project_dir / "converted_documents"
+    converted.mkdir(parents=True, exist_ok=True)
+    source_path = converted / "doc.md"
+    source_path.write_text("Body text", encoding="utf-8")
+
+    output_path = project_dir / "bulk_analysis" / "group" / "doc_analysis.md"
+    metadata = ProjectMetadata(case_name="Case Name")
+    group = BulkAnalysisGroup.create("Group", files=["doc.md"])
+    worker = BulkAnalysisWorker(
+        project_dir=project_dir,
+        group=group,
+        files=["doc.md"],
+        metadata=metadata,
+        force_rerun=True,
+        placeholder_values={},
+        project_name="Project XYZ",
+    )
+
+    bundle = worker_module.PromptBundle(
+        system_template="System for {project_name}",
+        user_template="Analyze {document_content}",
+    )
+    provider_config = ProviderConfig(provider_id="anthropic", model="claude-sonnet-4-5-20250929")
+    provider = _FakeProvider()
+
+    monkeypatch.setattr(worker_module, "should_chunk", lambda *_args, **_kwargs: (False, 100, 130_000))
+    monkeypatch.setattr(worker, "_max_input_budget", lambda **_kwargs: 50_000)
+    monkeypatch.setattr(worker_module, "generate_chunks", lambda *_args, **_kwargs: ["chunk-1", "chunk-2"])
+
+    def fake_count(_provider, _config, _system, prompt):  # noqa: ANN001
+        if "chunk 1 of 2" in prompt:
+            return 8_000
+        if "chunk 2 of 2" in prompt:
+            return 9_000
+        if "Create a unified bulk analysis" in prompt:
+            return 10_000
+        return 80_000  # full prompt triggers forced chunking
+
+    monkeypatch.setattr(worker, "_count_prompt_tokens", fake_count)
+
+    checkpoint_mgr = CheckpointManager(project_dir / "bulk_analysis" / "group" / "map" / "checkpoints")
+    manifest: dict[str, object] = {"version": 2, "signature": {"prompt_hash": "hash", "placeholders": {}}, "documents": {}}
+    prompt_hash = "hash"
+    manifest_path = worker_module._manifest_path(project_dir, group)
+    document = worker_module.BulkAnalysisDocument(
+        source_path=source_path,
+        relative_path="doc.md",
+        output_path=output_path,
+    )
+    global_placeholders = worker._build_placeholder_map()
+    system_prompt = worker_module.render_system_prompt(
+        bundle,
+        metadata,
+        placeholder_values=global_placeholders,
+    )
+
+    summary, run_details, _ = worker._process_document(
+        provider=provider,  # type: ignore[arg-type]
+        provider_config=provider_config,
+        bundle=bundle,
+        system_prompt=system_prompt,
+        document=document,
+        global_placeholders=global_placeholders,
+        checkpoint_mgr=checkpoint_mgr,
+        manifest=manifest,
+        prompt_hash=prompt_hash,
+        manifest_path=manifest_path,
+    )
+
+    assert summary == "summary"
+    assert run_details["chunking"] is True
+    assert run_details["chunk_count"] == 2
+    assert run_details["full_prompt_tokens"] == 80_000

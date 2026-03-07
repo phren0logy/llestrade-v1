@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Mapping, Optional, Sequence
 
+from src.app.core.azure_artifacts import is_azure_raw_artifact
 from src.common.llm.chunking import ChunkingStrategy
 from src.common.llm.tokens import TokenCounter
 from src.config.paths import app_base_dir, app_resource_root
@@ -62,6 +63,9 @@ def prepare_documents(
         # Only process markdown or text files produced by conversion
         if source_path.suffix.lower() not in {".md", ".txt"}:
             LOGGER.warning("Skipping non-markdown file for bulk analysis: %s", source_path)
+            continue
+        if is_azure_raw_artifact(source_path):
+            LOGGER.debug("Skipping Azure raw sidecar for bulk analysis: %s", source_path)
             continue
 
         output_relative = Path(relative).with_suffix("")
@@ -167,7 +171,15 @@ def should_chunk(
     """Return whether chunking is required and the relevant token counts."""
 
     token_info = TokenCounter.count(text=content, provider=provider_id, model=model_name or "")
-    tokens = token_info.get("token_count") if token_info.get("success") else len(content) // 4
+    conservative_estimate = max(len(content) // 3, 1)
+    if token_info.get("success"):
+        counted = int(token_info.get("token_count") or 0)
+        if provider_id in {"anthropic", "anthropic_bedrock"}:
+            tokens = max(counted, conservative_estimate)
+        else:
+            tokens = max(counted, 1)
+    else:
+        tokens = conservative_estimate
     context_window = TokenCounter.get_model_context_window(model_name or provider_id)
     max_tokens_per_chunk = max(context_window, 4000)
     return tokens > max_tokens_per_chunk, tokens, max_tokens_per_chunk
@@ -175,12 +187,42 @@ def should_chunk(
 
 def generate_chunks(content: str, max_tokens: int) -> List[str]:
     """Split the document into manageable chunks."""
-
-    return ChunkingStrategy.markdown_headers(
+    chunks = ChunkingStrategy.markdown_headers(
         text=content,
         max_tokens=max_tokens,
         overlap=2000,
     )
+    if not chunks:
+        return []
+
+    max_chars = max(max_tokens * 4, 1)
+    bounded: List[str] = []
+    for chunk in chunks:
+        chunk_text = chunk.strip()
+        if not chunk_text:
+            continue
+        if len(chunk_text) <= max_chars:
+            bounded.append(chunk_text)
+            continue
+
+        fallback = ChunkingStrategy.simple_overlap(chunk_text, max_tokens=max_tokens, overlap=200)
+        if not fallback:
+            fallback = [chunk_text]
+
+        for piece in fallback:
+            piece_text = piece.strip()
+            if not piece_text:
+                continue
+            if len(piece_text) <= max_chars:
+                bounded.append(piece_text)
+                continue
+            # Hard cap split to guarantee no chunk can exceed downstream prompt limits.
+            for start in range(0, len(piece_text), max_chars):
+                segment = piece_text[start:start + max_chars].strip()
+                if segment:
+                    bounded.append(segment)
+
+    return bounded
 
 
 def combine_chunk_summaries(
@@ -512,7 +554,13 @@ def _batch_checksum(batch: List[str]) -> str:
 def _count_tokens(text: str, provider_id: str, model: Optional[str]) -> int:
     """Return token count for text with a len//4 fallback."""
     token_info = TokenCounter.count(text=text, provider=provider_id, model=model or "")
-    return token_info.get("token_count") if token_info.get("success") else len(text) // 4
+    conservative = max(len(text) // 3, 1)
+    if not token_info.get("success"):
+        return conservative
+    counted = int(token_info.get("token_count") or 0)
+    if provider_id in {"anthropic", "anthropic_bedrock"}:
+        return max(counted, conservative)
+    return max(counted, 1)
 
 
 def _truncate_to_tokens(text: str, max_tokens: int) -> str:
