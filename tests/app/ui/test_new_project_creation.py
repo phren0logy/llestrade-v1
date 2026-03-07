@@ -297,6 +297,65 @@ def test_summary_group_dialog_lists_converted_documents(tmp_path: Path, qt_app: 
         dialog.deleteLater()
 
 
+def test_bulk_group_dialog_requires_selection(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, qt_app: QApplication) -> None:
+    assert qt_app is not None
+    projects_root = tmp_path / "projects"
+    projects_root.mkdir()
+    manager = ProjectManager()
+    manager.create_project(projects_root, ProjectMetadata(case_name="Validation Demo"))
+
+    converted_root = manager.project_dir / "converted_documents" / "folder"
+    converted_root.mkdir(parents=True)
+    (converted_root / "doc.md").write_text("content")
+
+    warnings: list[str] = []
+
+    def fake_warning(_parent, _title, message):
+        warnings.append(message)
+        return QMessageBox.Ok
+
+    monkeypatch.setattr(QMessageBox, "warning", fake_warning)
+
+    dialog = BulkAnalysisGroupDialog(manager.project_dir)
+    try:
+        dialog.name_edit.setText("Empty Group")
+        group = dialog._build_group_instance()
+        assert group is None
+        assert warnings
+        assert "Select at least one converted file or directory" in warnings[-1]
+    finally:
+        dialog.deleteLater()
+
+
+def test_bulk_group_dialog_requires_combined_inputs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, qt_app: QApplication) -> None:
+    assert qt_app is not None
+    projects_root = tmp_path / "projects"
+    projects_root.mkdir()
+    manager = ProjectManager()
+    manager.create_project(projects_root, ProjectMetadata(case_name="Combined Validation"))
+
+    warnings: list[str] = []
+
+    def fake_warning(_parent, _title, message):
+        warnings.append(message)
+        return QMessageBox.Ok
+
+    monkeypatch.setattr(QMessageBox, "warning", fake_warning)
+
+    dialog = BulkAnalysisGroupDialog(manager.project_dir)
+    try:
+        dialog.name_edit.setText("Empty Combined")
+        index = dialog.operation_combo.findData("combined")
+        assert index != -1
+        dialog.operation_combo.setCurrentIndex(index)
+        group = dialog._build_group_instance()
+        assert group is None
+        assert warnings
+        assert "Select at least one converted or map output input" in warnings[-1]
+    finally:
+        dialog.deleteLater()
+
+
 def test_project_metadata_dialog_updates_fields(qt_app: QApplication) -> None:
     assert qt_app is not None
     original = ProjectMetadata(

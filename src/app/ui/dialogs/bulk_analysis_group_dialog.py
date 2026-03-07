@@ -442,19 +442,6 @@ class BulkAnalysisGroupDialog(QDialog):
 
         directories = sorted({self._normalise_directory(path) for path in directories if path})
 
-        combo_data = self.model_combo.currentData()
-        provider_id, model = combo_data if combo_data else ("", "")
-        is_custom_selection = combo_data and combo_data[0] == "custom"
-        if is_custom_selection:
-            provider_id = "anthropic"
-            model = self.custom_model_edit.text().strip()
-            if not model:
-                QMessageBox.warning(self, "Missing Model", "Please enter a model id for the custom option.")
-                return None
-            custom_window = int(self.custom_context_spin.value())
-        else:
-            custom_window = None
-
         description = self.description_edit.toPlainText().strip()
         system_prompt = self._normalise_text(self.system_prompt_edit.text().strip())
         user_prompt = self._normalise_text(self.user_prompt_edit.text().strip())
@@ -487,6 +474,36 @@ class BulkAnalysisGroupDialog(QDialog):
                         map_dirs.append(str(value))
                     elif kind == "map-file":
                         map_files.append(str(value))
+
+        if op == "per_document":
+            if not files and not directories:
+                QMessageBox.warning(
+                    self,
+                    "Missing Inputs",
+                    "Select at least one converted file or directory before creating a per-document group.",
+                )
+                return None
+        else:
+            if not (files or directories or map_files or map_dirs or map_groups):
+                QMessageBox.warning(
+                    self,
+                    "Missing Inputs",
+                    "Select at least one converted or map output input before creating a combined group.",
+                )
+                return None
+
+        combo_data = self.model_combo.currentData()
+        provider_id, model = combo_data if combo_data else ("", "")
+        is_custom_selection = combo_data and combo_data[0] == "custom"
+        if is_custom_selection:
+            provider_id = "anthropic"
+            model = self.custom_model_edit.text().strip()
+            if not model:
+                QMessageBox.warning(self, "Missing Model", "Please enter a model id for the custom option.")
+                return None
+            custom_window = int(self.custom_context_spin.value())
+        else:
+            custom_window = None
 
         group_kwargs = {
             "name": name,
