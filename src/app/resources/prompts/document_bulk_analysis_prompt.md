@@ -29,9 +29,9 @@ Please analyze the document content, wrapped in "document-content" tags, and pro
 - Adverse life events
 - A timeline of events in a markdown table format with columns for Date, Event, and Significance
 
-Include the page number for all extracted items.
-Create a markdown link to [filename.pdf: Page x](./pdfs/<filename.pdf>#page=<page_number>) for each page number referenced.
-When a range of pages is referenced, link the first page but include the range in the text.
+Include citation markers for every factual claim using only IDs from the Citation Evidence Ledger appended below.
+Use the exact format `[CIT:ev_<id>]` and place one or more markers at the end of each claim.
+Never invent IDs. If no supporting evidence exists in the ledger, explicitly say that evidence is unavailable.
 
 ## Timeline Instructions
 
@@ -44,7 +44,7 @@ When a range of pages is referenced, link the first page but include the range i
 
 Keep your analysis focused on factual information directly stated in the document.
 
-Before finalizing results, do a review for accuracy, with attention to exact quotes and markdown links to original PDFs.
+Before finalizing results, do a review for accuracy, with attention to exact quotes and citation marker correctness.
 
 ## Document Content
 

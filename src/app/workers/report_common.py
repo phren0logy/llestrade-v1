@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
+from src.app.core.citations import CitationRecordStats, CitationStore, parse_citation_tokens
 from src.app.core.report_prompt_context import build_report_base_placeholders
 from src.app.core.project_manager import ProjectMetadata
 from src.app.core.report_inputs import category_display_name
@@ -26,6 +28,7 @@ _BEDROCK_MODEL_ALIASES: Dict[str, str] = {
     # Backward compatibility for existing saved selections.
     "claude-opus-4-1-20250805": "anthropic.claude-opus-4-1-20250805-v1:0",
 }
+_CITATION_ID_RE = re.compile(r"^ev_[a-z0-9]{8,64}$")
 
 
 class ReportWorkerBase(DashboardWorker):
@@ -60,6 +63,10 @@ class ReportWorkerBase(DashboardWorker):
         effective_name = project_name or metadata.case_name or project_dir.name
         self._project_name = effective_name
         self._run_timestamp = datetime.now(timezone.utc)
+        try:
+            self._citation_store: CitationStore | None = CitationStore(project_dir)
+        except Exception:
+            self._citation_store = None
 
     # ------------------------------------------------------------------
     # Placeholder helpers
@@ -167,6 +174,100 @@ class ReportWorkerBase(DashboardWorker):
             return path.resolve().relative_to(self._project_dir.resolve()).as_posix()
         except Exception:
             return path.name
+
+    # ------------------------------------------------------------------
+    # Citation helpers
+    # ------------------------------------------------------------------
+    def _append_citation_ledger(self, prompt: str, ledger: str) -> str:
+        if not ledger.strip():
+            return prompt
+        return f"{prompt.rstrip()}\n\n{ledger.rstrip()}\n"
+
+    def _build_report_evidence_ledger(self, inputs_metadata: Sequence[dict]) -> str:
+        sections: list[str] = []
+
+        converted_relatives: list[str] = []
+        existing_ids: list[str] = []
+        seen_ids: set[str] = set()
+
+        for item in inputs_metadata:
+            relative = str(item.get("relative_path") or "")
+            absolute_raw = item.get("absolute_path")
+            if relative.startswith("converted_documents/"):
+                converted_relatives.append(relative[len("converted_documents/"):])
+
+            if not absolute_raw:
+                continue
+            try:
+                text = Path(str(absolute_raw)).read_text(encoding="utf-8")
+            except Exception:
+                continue
+            for token in parse_citation_tokens(text):
+                if token.ev_id in seen_ids or not _CITATION_ID_RE.match(token.ev_id):
+                    continue
+                seen_ids.add(token.ev_id)
+                existing_ids.append(token.ev_id)
+                if len(existing_ids) >= 220:
+                    break
+            if len(existing_ids) >= 220:
+                break
+
+        if self._citation_store is not None and converted_relatives:
+            converted_relatives = list(dict.fromkeys(converted_relatives))
+            try:
+                ledger = self._citation_store.build_evidence_ledger_for_documents(
+                    relative_paths=converted_relatives,
+                    max_per_document=25,
+                    max_total=220,
+                )
+            except Exception:
+                ledger = ""
+            if ledger.strip():
+                sections.append(ledger.strip())
+
+        if existing_ids:
+            lines = [
+                "## Existing Citation IDs",
+                "Reuse these IDs when the claim is supported by already-cited evidence.",
+                "",
+            ]
+            lines.extend(f"- {ev_id}" for ev_id in existing_ids[:220])
+            sections.append("\n".join(lines).strip())
+
+        if not sections:
+            return ""
+        return "\n\n".join(sections).strip() + "\n"
+
+    def _record_output_citations(
+        self,
+        *,
+        output_path: Path,
+        output_text: str,
+        generator: str,
+    ) -> CitationRecordStats | None:
+        if self._citation_store is None:
+            return None
+        try:
+            stats = self._citation_store.record_output_citations(
+                output_path=output_path,
+                output_text=output_text,
+                generator=generator,
+                prompt_hash=None,
+            )
+        except Exception:
+            self.logger.debug("Failed to record report citations for %s", output_path, exc_info=True)
+            return None
+
+        if stats.total > 0 and (stats.warning > 0 or stats.invalid > 0):
+            self.logger.warning(
+                "%s citations for %s: valid=%s warning=%s invalid=%s",
+                self.job_tag,
+                output_path.name,
+                stats.valid,
+                stats.warning,
+                stats.invalid,
+            )
+        return stats
 
     # ------------------------------------------------------------------
     # Provider helpers

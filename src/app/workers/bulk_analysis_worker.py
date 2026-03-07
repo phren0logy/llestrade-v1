@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -26,6 +27,7 @@ from src.app.core.bulk_analysis_runner import (
     render_user_prompt,
     should_chunk,
 )
+from src.app.core.citations import CitationRecordStats, CitationStore
 from src.app.core.bulk_prompt_context import build_bulk_placeholders
 from src.app.core.placeholders.system import SourceFileContext
 from src.app.core.project_manager import ProjectMetadata
@@ -60,6 +62,7 @@ _DEFAULT_MAX_OUTPUT_TOKENS = 32_000
 _INPUT_BUDGET_RATIO = 0.85
 _INPUT_BUDGET_BUFFER = 1_000
 _MIN_CHUNK_TOKEN_TARGET = 4_000
+_PAGE_MARKER_RE = re.compile(r"<!---\\s*.+?#page=(\\d+)\\s*--->")
 
 _DYNAMIC_GLOBAL_KEYS: frozenset[str] = frozenset(
     {
@@ -223,6 +226,10 @@ class BulkAnalysisWorker(DashboardWorker):
         self._base_placeholders = dict(placeholder_values or {})
         self._project_name = project_name
         self._run_timestamp = datetime.now(timezone.utc)
+        try:
+            self._citation_store: CitationStore | None = CitationStore(project_dir)
+        except Exception:
+            self._citation_store = None
 
     # ------------------------------------------------------------------
     # QRunnable API
@@ -421,14 +428,27 @@ class BulkAnalysisWorker(DashboardWorker):
                         self.logger.exception("%s write failed %s", self.job_tag, document.output_path)
                         self.file_failed.emit(document.relative_path, str(exc))
                     else:
+                        citation_stats = self._record_output_citations(
+                            output_path=document.output_path,
+                            output_text=summary,
+                            prompt_hash=prompt_hash,
+                        )
                         successes += 1
                         ran_timestamp = written_at.isoformat()
-                        entries[document.relative_path] = {
+                        entry_payload: Dict[str, object] = {
                             "source_mtime": round(source_mtime, 6),
                             "prompt_hash": prompt_hash,
                             "ran_at": ran_timestamp,
                             "placeholders": self._serialise_placeholders(doc_placeholders),
                         }
+                        if citation_stats is not None:
+                            entry_payload["citations"] = {
+                                "total": citation_stats.total,
+                                "valid": citation_stats.valid,
+                                "warning": citation_stats.warning,
+                                "invalid": citation_stats.invalid,
+                            }
+                        entries[document.relative_path] = entry_payload
 
                 progress_count = successes + failures + skipped
                 self.logger.debug(
@@ -523,6 +543,11 @@ class BulkAnalysisWorker(DashboardWorker):
             body,
             placeholder_values=doc_placeholders,
         )
+        full_ledger = self._build_document_evidence_ledger(
+            relative_path=document.relative_path,
+            content=body,
+        )
+        full_prompt = self._append_citation_ledger(full_prompt, full_ledger)
         full_prompt_tokens = self._count_prompt_tokens(
             provider,
             provider_config,
@@ -649,6 +674,11 @@ class BulkAnalysisWorker(DashboardWorker):
                     chunk_total=total_chunks,
                     placeholder_values=doc_placeholders,
                 )
+                chunk_ledger = self._build_document_evidence_ledger(
+                    relative_path=document.relative_path,
+                    content=chunk,
+                )
+                chunk_prompt = self._append_citation_ledger(chunk_prompt, chunk_ledger)
                 summary = self._invoke_provider(
                     provider,
                     provider_config,
@@ -770,6 +800,11 @@ class BulkAnalysisWorker(DashboardWorker):
                     chunk_total=total_chunks,
                     placeholder_values=placeholder_values,
                 )
+                chunk_ledger = self._build_document_evidence_ledger(
+                    relative_path=document.relative_path,
+                    content=chunk,
+                )
+                prompt = self._append_citation_ledger(prompt, chunk_ledger)
                 prompt_tokens = self._count_prompt_tokens(
                     provider,
                     provider_config,
@@ -962,6 +997,69 @@ class BulkAnalysisWorker(DashboardWorker):
 
     def _serialise_placeholders(self, placeholders: Mapping[str, str]) -> Dict[str, str]:
         return {key: placeholders.get(key, "") for key in sorted(placeholders)}
+
+    def _append_citation_ledger(self, prompt: str, ledger: str) -> str:
+        if not ledger.strip():
+            return prompt
+        return f"{prompt.rstrip()}\\n\\n{ledger.rstrip()}\\n"
+
+    def _build_document_evidence_ledger(self, *, relative_path: str, content: str) -> str:
+        if self._citation_store is None:
+            return ""
+        pages = self._extract_page_numbers(content)
+        try:
+            return self._citation_store.build_evidence_ledger(
+                relative_path=relative_path,
+                page_numbers=pages,
+                max_entries=120,
+            )
+        except Exception:
+            self.logger.debug(
+                "%s failed to build evidence ledger for %s",
+                self.job_tag,
+                relative_path,
+                exc_info=True,
+            )
+            return ""
+
+    def _extract_page_numbers(self, content: str) -> list[int]:
+        pages = [int(match.group(1)) for match in _PAGE_MARKER_RE.finditer(content)]
+        if not pages:
+            return []
+        ordered = list(dict.fromkeys(pages))
+        return ordered[:40]
+
+    def _record_output_citations(
+        self,
+        *,
+        output_path: Path,
+        output_text: str,
+        prompt_hash: str,
+    ) -> CitationRecordStats | None:
+        if self._citation_store is None:
+            return None
+        try:
+            stats = self._citation_store.record_output_citations(
+                output_path=output_path,
+                output_text=output_text,
+                generator="bulk_analysis_worker",
+                prompt_hash=prompt_hash,
+            )
+        except Exception:
+            self.logger.debug(
+                "%s failed to record citations for %s",
+                self.job_tag,
+                output_path,
+                exc_info=True,
+            )
+            return None
+
+        if stats.total > 0 and (stats.warning > 0 or stats.invalid > 0):
+            self.log_message.emit(
+                f"Citations {output_path.name}: valid={stats.valid}, "
+                f"warning={stats.warning}, invalid={stats.invalid}"
+            )
+        return stats
 
     def _prompt_references(self) -> List[PromptReference]:
         references: List[PromptReference] = []

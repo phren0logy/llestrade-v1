@@ -116,6 +116,7 @@ class DraftReportWorker(ReportWorkerBase):
             self.progress.emit(5, "Reading inputs…")
             combined_content, inputs_metadata = self._combine_inputs()
             inputs_metadata = list(inputs_metadata)
+            evidence_ledger = self._build_report_evidence_ledger(inputs_metadata)
             input_sources = self._input_sources(inputs_metadata)
             inputs_payload = build_document_metadata(
                 project_path=self._project_dir,
@@ -169,6 +170,7 @@ class DraftReportWorker(ReportWorkerBase):
                 transcript_text=transcript_text,
                 system_prompt=generation_system_prompt,
                 placeholder_map=placeholder_map,
+                evidence_ledger=evidence_ledger,
             )
 
             draft_content = self._combine_section_outputs(section_outputs)
@@ -206,6 +208,11 @@ class DraftReportWorker(ReportWorkerBase):
             )
             draft_content_prepared = apply_frontmatter(draft_body, draft_payload, merge_existing=True)
             draft_path.write_text(draft_content_prepared, encoding="utf-8")
+            draft_citation_stats = self._record_output_citations(
+                output_path=draft_path,
+                output_text=draft_body,
+                generator="draft_report_worker",
+            )
 
             manifest = self._build_draft_manifest(
                 timestamp=timestamp,
@@ -217,6 +224,7 @@ class DraftReportWorker(ReportWorkerBase):
                 transcript_path=self._transcript_path,
                 generation_user_prompt=self._generation_user_prompt_path,
                 generation_system_prompt=self._generation_system_prompt_path,
+                citation_stats=draft_citation_stats,
             )
             manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
             self.log_message.emit(f"Draft manifest written to {manifest_path.name}.")
@@ -254,6 +262,7 @@ class DraftReportWorker(ReportWorkerBase):
         transcript_text: str,
         system_prompt: str,
         placeholder_map: Mapping[str, str],
+        evidence_ledger: str,
     ) -> List[dict]:
         provider = self._create_provider(system_prompt)
         outputs: List[dict] = []
@@ -268,6 +277,7 @@ class DraftReportWorker(ReportWorkerBase):
                 additional_documents=additional_documents,
             )
             prompt = format_prompt(user_prompt_template, generation_placeholders)
+            prompt = self._append_citation_ledger(prompt, evidence_ledger)
 
             pct = 5 + int(60 * index / max(total, 1))
             self.progress.emit(pct, f"Generating section {index} of {total}: {section.title}")
@@ -329,8 +339,9 @@ class DraftReportWorker(ReportWorkerBase):
         transcript_path: Optional[Path],
         generation_user_prompt: Path,
         generation_system_prompt: Path,
+        citation_stats: object = None,
     ) -> Dict[str, object]:
-        return {
+        manifest: Dict[str, object] = {
             "version": 2,
             "run_type": "draft",
             "timestamp": timestamp.isoformat(),
@@ -353,6 +364,14 @@ class DraftReportWorker(ReportWorkerBase):
                 for payload in sections
             ],
         }
+        if citation_stats is not None:
+            manifest["citations"] = {
+                "total": citation_stats.total,
+                "valid": citation_stats.valid,
+                "warning": citation_stats.warning,
+                "invalid": citation_stats.invalid,
+            }
+        return manifest
 
 
 class ReportRefinementWorker(ReportWorkerBase):
@@ -438,6 +457,7 @@ class ReportRefinementWorker(ReportWorkerBase):
 
             combined_content, inputs_metadata = self._combine_inputs()
             inputs_metadata = list(inputs_metadata)
+            evidence_ledger = self._build_report_evidence_ledger(inputs_metadata)
             input_sources = self._input_sources(inputs_metadata)
             if combined_content:
                 inputs_payload = build_document_metadata(
@@ -499,6 +519,7 @@ class ReportRefinementWorker(ReportWorkerBase):
                 transcript=transcript_raw,
             )
             refine_prompt = format_prompt(refinement_user_prompt, refinement_placeholders)
+            refine_prompt = self._append_citation_ledger(refine_prompt, evidence_ledger)
             refined_content, reasoning_content = self._run_refinement(
                 prompt=refine_prompt,
                 system_prompt=refinement_system_prompt,
@@ -540,6 +561,11 @@ class ReportRefinementWorker(ReportWorkerBase):
             )
             refined_path.write_text(refined_content_prepared, encoding="utf-8")
             refined_checksum = compute_file_checksum(refined_path)
+            refined_citation_stats = self._record_output_citations(
+                output_path=refined_path,
+                output_text=refined_content,
+                generator="report_refinement_worker",
+            )
             self.log_message.emit(f"Refined report saved to {refined_path.name}.")
 
             reasoning_written: Optional[Path] = None
@@ -579,6 +605,7 @@ class ReportRefinementWorker(ReportWorkerBase):
                 transcript_path=self._transcript_path,
                 refinement_user_prompt=self._refinement_user_prompt_path,
                 refinement_system_prompt=self._refinement_system_prompt_path,
+                citation_stats=refined_citation_stats,
             )
             manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
             self.log_message.emit(f"Refinement manifest written to {manifest_path.name}.")
@@ -645,8 +672,9 @@ class ReportRefinementWorker(ReportWorkerBase):
         transcript_path: Optional[Path],
         refinement_user_prompt: Path,
         refinement_system_prompt: Path,
+        citation_stats: object = None,
     ) -> Dict[str, object]:
-        return {
+        manifest: Dict[str, object] = {
             "version": 2,
             "run_type": "refinement",
             "timestamp": timestamp.isoformat(),
@@ -667,6 +695,14 @@ class ReportRefinementWorker(ReportWorkerBase):
                 "refined_tokens": self._refine_usage,
             },
         }
+        if citation_stats is not None:
+            manifest["citations"] = {
+                "total": citation_stats.total,
+                "valid": citation_stats.valid,
+                "warning": citation_stats.warning,
+                "invalid": citation_stats.invalid,
+            }
+        return manifest
 
 
 __all__ = ["DraftReportWorker", "ReportRefinementWorker"]

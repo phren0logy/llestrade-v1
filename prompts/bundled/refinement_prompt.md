@@ -8,7 +8,8 @@ This draft report, wrapped in <draft> </draft> tags, is a rough draft of a foren
 4. Check the report against a transcript, if provided. The transcript is wrapped in <transcript> </transcript> tags. Pay careful attention to direct quotes. Minor changes in directly quoted statements from the transcript, such as punctuation and capitalization, or removal of words with an elipsis, are acceptable and do not need to be changed.
 5. Use the words instead of numerals for one through ten, and numbers for 11 and above. Spell out decades, such as "twenties" instead of 20s.
 6. Some information may not appear in the transcript, such as quotes from other documents or psychometric testing. Do not make changes to this information that does not appear in the transcript. Do make a note of it in your thinking.
-7. Output only the final revised report.
+7. Preserve existing citation markers in the format `[CIT:ev_<id>]`. If you add factual claims, attach valid citation markers using only IDs from the Citation Evidence Ledger.
+8. Output only the final revised report.
 
 ## Prompt
 

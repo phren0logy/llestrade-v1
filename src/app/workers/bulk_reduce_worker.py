@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -27,6 +28,7 @@ from src.app.core.bulk_analysis_runner import (
     render_user_prompt,
     should_chunk,
 )
+from src.app.core.citations import CitationRecordStats, CitationStore
 from src.app.core.bulk_paths import (
     iter_map_outputs,
     iter_map_outputs_under,
@@ -55,6 +57,7 @@ LOGGER = logging.getLogger(__name__)
 
 
 _MANIFEST_VERSION = 2
+_PAGE_MARKER_RE = re.compile(r"<!---\\s*.+?#page=(\\d+)\\s*--->")
 
 _DYNAMIC_REDUCE_KEYS: frozenset[str] = frozenset(
     {
@@ -209,6 +212,10 @@ class BulkReduceWorker(DashboardWorker):
         self._base_placeholders = dict(placeholder_values or {})
         self._project_name = project_name
         self._run_timestamp = datetime.now(timezone.utc)
+        try:
+            self._citation_store: CitationStore | None = CitationStore(project_dir)
+        except Exception:
+            self._citation_store = None
 
     # ------------------------------------------------------------------
     # QRunnable API
@@ -424,6 +431,7 @@ class BulkReduceWorker(DashboardWorker):
                 status_message = f"Reading {total} input files…"
             self.progress.emit(0, 1, status_message)
             combined_content = self._assemble_combined_content(inputs)
+            evidence_ledger = self._build_reduce_evidence_ledger(inputs)
 
             if self.is_cancelled():
                 raise BulkAnalysisCancelled
@@ -462,6 +470,7 @@ class BulkReduceWorker(DashboardWorker):
                     combined_content,
                     placeholder_values=placeholders_global,
                 )
+                prompt = self._append_citation_ledger(prompt, evidence_ledger)
                 result = self._invoke_provider(provider, provider_cfg, prompt, system_prompt)
                 run_details["chunk_count"] = 1
                 chunk_state = current_manifest.get("chunks", {"count": 0, "done": [], "checksums": {}})
@@ -478,6 +487,7 @@ class BulkReduceWorker(DashboardWorker):
                         combined_content,
                         placeholder_values=placeholders_global,
                     )
+                    prompt = self._append_citation_ledger(prompt, evidence_ledger)
                     result = self._invoke_provider(provider, provider_cfg, prompt, system_prompt)
                     run_details["chunk_count"] = 1
                     run_details["chunking"] = False
@@ -517,6 +527,11 @@ class BulkReduceWorker(DashboardWorker):
                                 chunk_total=total_chunks,
                                 placeholder_values=placeholders_global,
                             )
+                            chunk_ledger = self._build_reduce_chunk_ledger(
+                                chunk=chunk,
+                                base_ledger=evidence_ledger,
+                            )
+                            prompt = self._append_citation_ledger(prompt, chunk_ledger)
                             summary = self._invoke_provider(provider, provider_cfg, prompt, system_prompt)
                             checkpoint_mgr.save_reduce_chunk(idx, summary, chunk_checksum)
 
@@ -583,7 +598,17 @@ class BulkReduceWorker(DashboardWorker):
             )
             updated = apply_frontmatter(result, metadata, merge_existing=True)
             output_path.write_text(updated, encoding="utf-8")
-            run_manifest = self._build_run_manifest(inputs, provider_cfg, placeholders_global)
+            citation_stats = self._record_output_citations(
+                output_path=output_path,
+                output_text=result,
+                prompt_hash=prompt_hash,
+            )
+            run_manifest = self._build_run_manifest(
+                inputs,
+                provider_cfg,
+                placeholders_global,
+                citation_stats=citation_stats,
+            )
             run_manifest_path.write_text(json.dumps(run_manifest, indent=2), encoding="utf-8")
             current_manifest["finalized"] = True
             current_manifest["ran_at"] = written_at.isoformat()
@@ -788,6 +813,80 @@ class BulkReduceWorker(DashboardWorker):
             parts.append("<!--- section-end --->\n\n")
         return "".join(parts).rstrip() + "\n"
 
+    def _append_citation_ledger(self, prompt: str, ledger: str) -> str:
+        if not ledger.strip():
+            return prompt
+        return f"{prompt.rstrip()}\n\n{ledger.rstrip()}\n"
+
+    def _build_reduce_evidence_ledger(self, inputs: Sequence[tuple[str, Path, str]]) -> str:
+        if self._citation_store is None:
+            return ""
+        converted_relatives: list[str] = []
+        converted_prefix = "converted/"
+        for kind, _, rel_key in inputs:
+            if kind != "converted":
+                continue
+            if rel_key.startswith(converted_prefix):
+                converted_relatives.append(rel_key[len(converted_prefix):])
+        converted_relatives = list(dict.fromkeys(converted_relatives))
+        if not converted_relatives:
+            return ""
+        try:
+            return self._citation_store.build_evidence_ledger_for_documents(
+                relative_paths=converted_relatives,
+                max_per_document=30,
+                max_total=220,
+            )
+        except Exception:
+            self.logger.debug("Failed to build reduce citation ledger", exc_info=True)
+            return ""
+
+    def _build_reduce_chunk_ledger(self, *, chunk: str, base_ledger: str) -> str:
+        if not base_ledger.strip():
+            return ""
+        pages = {int(match.group(1)) for match in _PAGE_MARKER_RE.finditer(chunk)}
+        if not pages:
+            return base_ledger
+
+        filtered_lines: list[str] = []
+        for line in base_ledger.splitlines():
+            if "|p" not in line:
+                filtered_lines.append(line)
+                continue
+            page_match = re.search(r"\|p(\d+)\]", line)
+            if page_match and int(page_match.group(1)) in pages:
+                filtered_lines.append(line)
+        if len(filtered_lines) < 4:
+            return base_ledger
+        return "\n".join(filtered_lines).strip() + "\n"
+
+    def _record_output_citations(
+        self,
+        *,
+        output_path: Path,
+        output_text: str,
+        prompt_hash: str,
+    ) -> CitationRecordStats | None:
+        if self._citation_store is None:
+            return None
+        try:
+            stats = self._citation_store.record_output_citations(
+                output_path=output_path,
+                output_text=output_text,
+                generator="bulk_reduce_worker",
+                prompt_hash=prompt_hash,
+            )
+        except Exception:
+            self.logger.debug("Failed to record reduce citations", exc_info=True)
+            return None
+
+        if stats.total > 0 and (stats.warning > 0 or stats.invalid > 0):
+            self.log_message.emit(
+                f"Citations {output_path.name}: valid={stats.valid}, "
+                f"warning={stats.warning}, invalid={stats.invalid}"
+            )
+        return stats
+
     def _resolve_provider(self) -> ProviderConfig:
         provider_id = self._group.provider_id or "anthropic"
         model = self._group.model or None
@@ -867,6 +966,8 @@ class BulkReduceWorker(DashboardWorker):
         inputs: Sequence[tuple[str, Path, str]],
         provider_cfg: ProviderConfig,
         placeholders: Mapping[str, str],
+        *,
+        citation_stats: CitationRecordStats | None = None,
     ) -> dict:
         manifest_inputs = []
         for kind, path, rel in inputs:
@@ -877,7 +978,7 @@ class BulkReduceWorker(DashboardWorker):
                 mtime = 0.0
             manifest_inputs.append({"kind": kind, "path": rel, "mtime": round(mtime, 6)})
 
-        return {
+        manifest = {
             "version": 1,
             "group_id": self._group.group_id,
             "group_slug": getattr(self._group, "slug", None) or self._group.folder_name,
@@ -890,3 +991,11 @@ class BulkReduceWorker(DashboardWorker):
             "user_prompt_path": self._group.user_prompt_path,
             "placeholders": self._serialise_placeholders(placeholders),
         }
+        if citation_stats is not None:
+            manifest["citations"] = {
+                "total": citation_stats.total,
+                "valid": citation_stats.valid,
+                "warning": citation_stats.warning,
+                "invalid": citation_stats.invalid,
+            }
+        return manifest
