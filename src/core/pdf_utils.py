@@ -368,80 +368,51 @@ def process_pdf_with_azure(
 
     # Process the file with Azure Document Intelligence (single pass)
     try:
-        # Open the file
-        with open(pdf_path, "rb") as file:
-            # Add retry mechanism for processing operations
-            max_proc_retries = 3
-            proc_retry_delay = 3  # seconds
+        max_proc_retries = 3
 
-            # Process for markdown with retries
-            markdown_result = None
-            for attempt in range(1, max_proc_retries + 1):
-                try:
-                    print(f"Markdown processing attempt {attempt}/{max_proc_retries}")
-                    # Process for markdown
-                    print(
-                        f"Starting Azure Document Intelligence processing for {os.path.basename(pdf_path)} in Markdown format"
-                    )
-                    markdown_poller = (
-                        document_intelligence_client.begin_analyze_document(
-                            "prebuilt-layout",
-                            file,
-                            output_content_format=DocumentContentFormat.MARKDOWN,
-                        )
-                    )
-
-                    # Get the markdown results with timeout handling
-                    print(
-                        f"Waiting for Azure Document Intelligence Markdown results..."
-                    )
-                    markdown_result = markdown_poller.result(
-                        timeout=1800
-                    )  # 30 minute timeout
-                    print(f"Received Azure Document Intelligence Markdown results")
-                    break  # Success, exit the retry loop
-                except Exception as e:
-                    if attempt == max_proc_retries:
-                        raise Exception(
-                            f"Failed to process PDF for Markdown after {max_proc_retries} attempts: {str(e)}"
-                        )
-                    print(
-                        f"Markdown processing attempt {attempt} failed: {str(e)}. Retrying in {proc_retry_delay} seconds..."
-                    )
-                    time.sleep(proc_retry_delay)
-                    proc_retry_delay *= 1.5  # Increase delay for next attempt
-                    file.seek(0)  # Reset file pointer for next attempt
-
-            # Reset file pointer for JSON processing
-            file.seek(0)
-
-        json_result = None
-        if json_path is not None:
+        def _analyze_with_retries(*, label: str, markdown: bool):
             proc_retry_delay = 3
             for attempt in range(1, max_proc_retries + 1):
                 try:
-                    print(f"JSON processing attempt {attempt}/{max_proc_retries}")
+                    print(f"{label} processing attempt {attempt}/{max_proc_retries}")
                     print(
-                        f"Starting Azure Document Intelligence processing for {os.path.basename(pdf_path)} in JSON format"
+                        f"Starting Azure Document Intelligence processing for {os.path.basename(pdf_path)} in {label} format"
                     )
-                    json_poller = document_intelligence_client.begin_analyze_document(
-                        "prebuilt-layout", file
-                    )
-                    print("Waiting for Azure Document Intelligence JSON results...")
-                    json_result = json_poller.result(timeout=1800)
-                    print("Received Azure Document Intelligence JSON results")
-                    break
+                    # Keep the stream alive until poller.result() returns.
+                    with open(pdf_path, "rb") as file_handle:
+                        if markdown:
+                            poller = document_intelligence_client.begin_analyze_document(
+                                "prebuilt-layout",
+                                file_handle,
+                                output_content_format=DocumentContentFormat.MARKDOWN,
+                            )
+                        else:
+                            poller = document_intelligence_client.begin_analyze_document(
+                                "prebuilt-layout",
+                                file_handle,
+                            )
+                        print(
+                            f"Waiting for Azure Document Intelligence {label} results..."
+                        )
+                        result = poller.result(timeout=1800)  # 30 minute timeout
+                    print(f"Received Azure Document Intelligence {label} results")
+                    return result
                 except Exception as e:
                     if attempt == max_proc_retries:
                         raise Exception(
-                            f"Failed to process PDF for JSON after {max_proc_retries} attempts: {str(e)}"
+                            f"Failed to process PDF for {label} after {max_proc_retries} attempts: {str(e)}"
                         )
                     print(
-                        f"JSON processing attempt {attempt} failed: {str(e)}. Retrying in {proc_retry_delay} seconds..."
+                        f"{label} processing attempt {attempt} failed: {str(e)}. Retrying in {proc_retry_delay} seconds..."
                     )
                     time.sleep(proc_retry_delay)
                     proc_retry_delay *= 1.5
-                    file.seek(0)
+            return None
+
+        markdown_result = _analyze_with_retries(label="Markdown", markdown=True)
+        json_result = None
+        if json_path is not None:
+            json_result = _analyze_with_retries(label="JSON", markdown=False)
 
         if not markdown_result:
             raise Exception("Failed to get Markdown results from Azure")
