@@ -1,0 +1,38 @@
+from __future__ import annotations
+
+from src.config.observability import PhoenixObservability
+
+
+class _FakeSpan:
+    def __init__(self):
+        self.attributes = {}
+
+    def set_attribute(self, key, value):
+        self.attributes[key] = value
+
+
+def test_record_result_attributes_with_dict_usage() -> None:
+    obs = PhoenixObservability()
+    span = _FakeSpan()
+
+    obs._record_result_attributes(
+        span,
+        {
+            "content": "response text",
+            "usage": {"input_tokens": 11, "output_tokens": 7, "total_tokens": 18},
+        },
+    )
+
+    assert span.attributes["llm.output_messages"] == "response text"
+    assert span.attributes["llm.token_count.prompt"] == 11
+    assert span.attributes["llm.token_count.completion"] == 7
+    assert span.attributes["llm.token_count.total"] == 18
+
+
+def test_detect_provider_from_module_name() -> None:
+    obs = PhoenixObservability()
+
+    assert obs._detect_provider("src.common.llm.providers.anthropic") == "anthropic"
+    assert obs._detect_provider("src.common.llm.providers.azure_openai") == "openai"
+    assert obs._detect_provider("src.common.llm.providers.gemini") == "google"
+    assert obs._detect_provider("src.something.else") == "unknown"

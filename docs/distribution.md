@@ -14,7 +14,7 @@
 - `PySide6` requires its Qt plugin folders (`platforms`, `imageformats`, `styles`) and an accompanying `qt.conf`. Configure the PyInstaller spec to collect these directories via `PySide6.QtCore.QLibraryInfo`.
 - `pypandoc-binary` embeds Pandoc; ensure `PYPANDOC_PANDOC` is discovered or copy the binary into the bundle with `--add-binary` if detection fails.
 - `keyring` backends vary per OS. The frozen build should include the default backend for each target platform; add optional backends as needed.
-- Network SDKs (`anthropic`, `openai`, `google-generativeai`, `azure-ai-documentintelligence`) are heavyweight; keep them but consider conditional loading in the UI if footprint becomes an issue.
+- Network SDKs (`anthropic`, `openai`, `google-genai`, `azure-ai-documentintelligence`) are heavyweight; keep them but consider conditional loading in the UI if footprint becomes an issue.
 
 ## Build Next Steps
 1. Use the PyInstaller spec at `scripts/build_dashboard.spec`, which now stages Qt plugins/resources automatically and writes to `dist/<platform>/`.

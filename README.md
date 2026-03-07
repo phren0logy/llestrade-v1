@@ -402,7 +402,7 @@ Key dependencies:
 
 - PySide6 (Qt for Python)
 - anthropic (Claude API)
-- google-generativeai (Gemini API)
+- google-genai (Gemini API)
 - openai (Azure OpenAI)
 - pypdf (PDF processing)
 - pdfplumber (PDF text extraction)

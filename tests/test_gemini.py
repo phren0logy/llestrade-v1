@@ -23,12 +23,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from src.common.llm import create_provider
 from src.common.llm.providers.gemini import GeminiProvider
 
-# Test direct Google Generative AI import
+# Test direct Google Gen AI import
 try:
-    import google.generativeai as genai
-    logging.info("Successfully imported google.generativeai package directly")
+    from google import genai
+    logging.info("Successfully imported google.genai package directly")
 except ImportError as e:
-    logging.error(f"Error importing google.generativeai: {str(e)}")
+    logging.error(f"Error importing google.genai: {str(e)}")
 
 pytestmark = [pytest.mark.live_provider, pytest.mark.integration]
 
