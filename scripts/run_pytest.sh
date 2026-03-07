@@ -13,4 +13,11 @@ else
   echo "[run_pytest] pytest-qt plugin not installed; Qt fixture tests may skip or fail." >&2
 fi
 
+# Explicitly load pytest-cov when available since plugin autoload is disabled.
+if uv run python -c "import pytest_cov.plugin" >/dev/null 2>&1; then
+  PYTEST_ARGS+=(-p pytest_cov.plugin)
+else
+  echo "[run_pytest] pytest-cov plugin not installed; --cov options will fail." >&2
+fi
+
 exec uv run python -m pytest "${PYTEST_ARGS[@]}" "$@"
