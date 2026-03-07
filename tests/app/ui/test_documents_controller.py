@@ -12,6 +12,8 @@ from PySide6.QtWidgets import QApplication, QMessageBox, QWidget
 _ = PySide6
 
 from src.app.core.conversion_manager import ConversionJob
+from src.app.core.conversion_manager import ConversionPlan
+from src.app.core.conversion_manager import DuplicateSource
 from src.app.ui.workspace.controllers.documents import DocumentsController
 from src.app.ui.workspace.documents_tab import DocumentsTab
 
@@ -108,5 +110,44 @@ def test_trigger_conversion_shows_info_when_no_jobs(monkeypatch: pytest.MonkeyPa
 
     assert captured_runs == []
     assert notices == ["No new files detected."]
+
+    workspace.deleteLater()
+
+
+def test_collect_conversion_jobs_filters_inflight_and_preserves_duplicates(
+    monkeypatch: pytest.MonkeyPatch,
+    qt_app: QApplication,
+    tmp_path: Path,
+) -> None:
+    assert qt_app is not None
+    workspace, controller, _captured_runs = _build_controller()
+
+    first = ConversionJob(
+        source_path=tmp_path / "a.pdf",
+        relative_path="a.pdf",
+        destination_path=tmp_path / "converted" / "a.md",
+        conversion_type="pdf",
+    )
+    second = ConversionJob(
+        source_path=tmp_path / "b.pdf",
+        relative_path="b.pdf",
+        destination_path=tmp_path / "converted" / "b.md",
+        conversion_type="pdf",
+    )
+    duplicate = DuplicateSource(
+        digest="abc123",
+        primary_relative="a.pdf",
+        duplicate_relative="b.pdf",
+    )
+
+    monkeypatch.setattr(
+        "src.app.ui.workspace.controllers.documents.build_conversion_jobs",
+        lambda _pm: ConversionPlan(jobs=(first, second), duplicates=(duplicate,)),
+    )
+
+    jobs, duplicates = controller.collect_conversion_jobs({second.source_path})
+
+    assert jobs == [first]
+    assert list(duplicates) == [duplicate]
 
     workspace.deleteLater()
