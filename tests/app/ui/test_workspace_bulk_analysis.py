@@ -88,7 +88,7 @@ def test_workspace_run_executes_worker_and_updates_ui(tmp_path: Path, qt_app: QA
     monkeypatch.setattr(
         bulk_analysis_worker.BulkAnalysisWorker,
         "_invoke_provider",
-        lambda self, provider, config, prompt, system_prompt, temperature=0.1, max_tokens=32000: "Summary output",
+        lambda self, provider, config, prompt, system_prompt, temperature=0.1, max_tokens=32000, **kwargs: "Summary output",
     )
     monkeypatch.setattr(
         bulk_analysis_worker,

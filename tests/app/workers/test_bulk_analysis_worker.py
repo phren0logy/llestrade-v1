@@ -273,6 +273,41 @@ def test_invoke_provider_rejects_over_budget_prompt(tmp_path: Path) -> None:
         )
 
 
+def test_invoke_provider_compat_supports_legacy_override_signature(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    group = BulkAnalysisGroup.create("Group")
+    worker = BulkAnalysisWorker(
+        project_dir=tmp_path,
+        group=group,
+        files=[],
+        metadata=ProjectMetadata(case_name="Case"),
+        force_rerun=True,
+    )
+    config = ProviderConfig(provider_id="anthropic", model="claude")
+
+    def legacy_invoke(self, provider, provider_config, prompt, system_prompt):  # noqa: ANN001
+        return "summary"
+
+    monkeypatch.setattr(BulkAnalysisWorker, "_invoke_provider", legacy_invoke)
+    caplog.clear()
+    caplog.set_level("WARNING")
+
+    result = worker._invoke_provider_compat(
+        object(),  # type: ignore[arg-type]
+        config,
+        "prompt",
+        "system",
+        input_budget=5_000,
+        context_label="legacy-override",
+    )
+
+    assert result == "summary"
+    assert any("dropped unsupported kwargs" in rec.message for rec in caplog.records)
+
+
 def test_process_document_forces_chunking_when_full_prompt_exceeds_budget(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
