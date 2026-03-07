@@ -31,6 +31,8 @@ debug_summarization_*.log
 
 # pytest
 .pytest_cache/
+.coverage
+coverage.xml
 
 .crush/
 .uv_cache/
