@@ -21,6 +21,7 @@ from src.app.core.azure_artifacts import (
     AZURE_RAW_JSON_SUFFIX,
     AZURE_RAW_MARKDOWN_SUFFIX,
 )
+from src.app.core.citations import CitationStore
 from src.common.markdown import (
     SourceReference,
     apply_frontmatter,
@@ -106,6 +107,7 @@ class ConversionWorker(DashboardWorker):
 
     def _copy_markdown(self, job: ConversionJob) -> None:
         copy_existing_markdown(job.source_path, job.destination_path)
+        self._index_citations_for_output(job, job.destination_path)
 
     def _convert_docx(self, job: ConversionJob) -> None:
         job.destination_path.parent.mkdir(parents=True, exist_ok=True)
@@ -132,6 +134,7 @@ class ConversionWorker(DashboardWorker):
         )
         updated = apply_frontmatter(content, metadata, merge_existing=True)
         final_path.write_text(updated, encoding="utf-8")
+        self._index_citations_for_output(job, final_path, metadata=metadata)
 
     def _convert_pdf_locally(self, job: ConversionJob) -> None:
         job.destination_path.parent.mkdir(parents=True, exist_ok=True)
@@ -162,6 +165,7 @@ class ConversionWorker(DashboardWorker):
         self._warn_if_page_mismatch(job, pages_detected, pages_pdf)
         updated = apply_frontmatter(content, metadata, merge_existing=True)
         write_file_content(str(job.destination_path), updated)
+        self._index_citations_for_output(job, job.destination_path, metadata=metadata)
 
     def _convert_pdf_with_azure(self, job: ConversionJob) -> None:
         endpoint, key = self._azure_credentials()
@@ -240,6 +244,12 @@ class ConversionWorker(DashboardWorker):
         updated = apply_frontmatter(content_marked, metadata, merge_existing=True)
         final_path.write_text(updated, encoding="utf-8")
         self._warn_if_page_mismatch(job, pages_detected, pages_pdf)
+        self._index_citations_for_output(
+            job,
+            final_path,
+            metadata=metadata,
+            raw_json_path=raw_json_path,
+        )
 
     def _azure_credentials(self) -> tuple[str, str]:
         settings = SecureSettings()
@@ -482,4 +492,84 @@ class ConversionWorker(DashboardWorker):
                 job.source_path.name,
                 pages_detected,
                 pages_pdf,
+            )
+
+    def _index_citations_for_output(
+        self,
+        job: ConversionJob,
+        final_path: Path,
+        *,
+        metadata: Dict[str, object] | None = None,
+        raw_json_path: Path | None = None,
+    ) -> None:
+        project_dir, _ = self._project_context(job)
+        if project_dir is None:
+            return
+
+        converted_root = (project_dir / "converted_documents").resolve()
+        try:
+            relative_path = final_path.resolve().relative_to(converted_root).as_posix()
+        except Exception:
+            return
+
+        try:
+            post = frontmatter.load(final_path)
+            content = post.content or ""
+            metadata_map = dict(post.metadata or {})
+        except Exception:
+            content = final_path.read_text(encoding="utf-8")
+            metadata_map = {}
+
+        if metadata:
+            metadata_map.update(metadata)
+
+        source_checksum: str | None = None
+        sources = metadata_map.get("sources")
+        if isinstance(sources, list):
+            for source in sources:
+                if not isinstance(source, dict):
+                    continue
+                checksum = source.get("checksum")
+                if isinstance(checksum, str) and checksum:
+                    source_checksum = checksum
+                    break
+        if not source_checksum:
+            source_checksum = compute_file_checksum(job.source_path)
+
+        if raw_json_path is None:
+            raw_json_value = metadata_map.get("azure_raw_json_path")
+            if isinstance(raw_json_value, str) and raw_json_value:
+                candidate = Path(raw_json_value).expanduser()
+                if not candidate.is_absolute():
+                    candidate = (project_dir / candidate).resolve()
+                raw_json_path = candidate
+
+        pages_pdf = metadata_map.get("pages_pdf")
+        pages_detected = metadata_map.get("pages_detected")
+        pages_pdf_val = int(pages_pdf) if isinstance(pages_pdf, int) else None
+        pages_detected_val = int(pages_detected) if isinstance(pages_detected, int) else None
+
+        try:
+            store = CitationStore(project_dir)
+            stats = store.index_converted_document(
+                relative_path=relative_path,
+                markdown_text=content,
+                source_checksum=source_checksum,
+                azure_raw_json_path=raw_json_path,
+                pages_pdf=pages_pdf_val,
+                pages_detected=pages_detected_val,
+            )
+            self.logger.info(
+                "%s indexed citation evidence for %s (segments=%s, geometry=%s)",
+                self.job_tag,
+                relative_path,
+                stats.segments_indexed,
+                stats.geometry_spans_indexed,
+            )
+        except Exception as exc:
+            self.logger.warning(
+                "%s failed to index citation evidence for %s: %s",
+                self.job_tag,
+                relative_path,
+                exc,
             )

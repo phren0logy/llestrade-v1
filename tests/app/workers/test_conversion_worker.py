@@ -9,6 +9,7 @@ import pytest
 PySide6 = pytest.importorskip("PySide6")
 from PySide6.QtWidgets import QApplication
 
+from src.app.core.citations import CitationStore
 from src.app.core.conversion_manager import ConversionJob
 from src.app.workers.conversion_worker import ConversionWorker
 
@@ -124,3 +125,43 @@ def test_convert_pdf_with_azure_reprocesses_when_raw_json_invalid(
     assert post.metadata["azure_raw_cached"] is False
     assert raw_json.exists()
     assert "fresh" in raw_json.read_text(encoding="utf-8")
+
+
+def test_index_citations_for_output_creates_project_db(
+    qt_app: QApplication,
+    tmp_path: Path,
+) -> None:
+    assert qt_app is not None
+
+    project_dir = tmp_path / "project"
+    source_pdf = project_dir / "source.pdf"
+    source_pdf.parent.mkdir(parents=True, exist_ok=True)
+    source_pdf.write_bytes(b"pdf")
+
+    destination = project_dir / "converted_documents" / "case" / "source.md"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(
+        "---\n"
+        "sources:\n"
+        "  - checksum: abc123\n"
+        "pages_detected: 1\n"
+        "pages_pdf: 1\n"
+        "---\n"
+        "<!--- case/source.pdf#page=1 --->\n"
+        "Patient reported insomnia and anxiety.\n",
+        encoding="utf-8",
+    )
+
+    job = ConversionJob(
+        source_path=source_pdf,
+        relative_path="case/source.pdf",
+        destination_path=destination,
+        conversion_type="pdf",
+    )
+
+    worker = ConversionWorker([], helper="azure_di")
+    worker._index_citations_for_output(job, destination)
+
+    store = CitationStore(project_dir)
+    ids = store.list_evidence_ids_for_documents(relative_paths=["case/source.md"])
+    assert ids
