@@ -35,7 +35,7 @@ from PySide6.QtWidgets import (
 from src.config.prompt_store import get_bundled_dir, get_custom_dir
 from src.config.paths import app_resource_root
 from src.app.core.azure_artifacts import is_azure_raw_artifact
-from src.app.core.bulk_paths import iter_map_outputs
+from src.app.core.bulk_paths import iter_map_outputs, iter_map_outputs_under, resolve_map_output_path
 from src.app.core.bulk_analysis_groups import BulkAnalysisGroup
 from src.app.core.project_manager import ProjectMetadata
 from src.app.core.placeholders.analyzer import find_placeholders
@@ -124,13 +124,23 @@ class BulkAnalysisGroupDialog(QDialog):
         self.map_tree.setUniformRowHeights(True)
         self.map_tree.itemChanged.connect(self._on_map_tree_item_changed)
         map_layout.addWidget(self.map_tree)
+        self.map_dynamic_note = QLabel(
+            "Selecting a group or folder is dynamic and includes newly generated per-document outputs."
+        )
+        self.map_dynamic_note.setStyleSheet("color: #666; font-size: 11px;")
+        self.map_dynamic_note.setWordWrap(True)
+        map_layout.addWidget(self.map_dynamic_note)
         form.addRow(self.map_tree_group)
 
         self.manual_files_label = QLabel("Extra Files")
         self.manual_files_edit = QPlainTextEdit()
         self.manual_files_edit.setPlaceholderText("Additional files (one per line, optional)")
         self.manual_files_edit.setMinimumHeight(60)
+        self.manual_files_edit.textChanged.connect(self._refresh_combined_input_summary)
         form.addRow(self.manual_files_label, self.manual_files_edit)
+        self.combined_inputs_label = QLabel("Effective inputs: 0 (converted 0, map 0)")
+        self.combined_inputs_label.setStyleSheet("color: #666; font-size: 11px;")
+        form.addRow("Effective Inputs", self.combined_inputs_label)
 
         self.system_prompt_edit = QLineEdit()
         self.system_prompt_edit.setToolTip(
@@ -387,7 +397,9 @@ class BulkAnalysisGroupDialog(QDialog):
         # Show Extra Files only for Combined
         self.manual_files_label.setVisible(combined)
         self.manual_files_edit.setVisible(combined)
+        self.combined_inputs_label.setVisible(combined)
         self._refresh_placeholder_requirements()
+        self._refresh_combined_input_summary()
 
     def _on_map_tree_item_changed(self, item: QTreeWidgetItem, column: int) -> None:
         # Mirror tri-state behavior used in the converted-docs tree
@@ -403,6 +415,7 @@ class BulkAnalysisGroupDialog(QDialog):
                 child.setCheckState(0, state)
         # Update ancestors' partial/checked state
         self._sync_parent_state(item.parent())
+        self._refresh_combined_input_summary()
         return
 
     # ------------------------------------------------------------------
@@ -421,26 +434,7 @@ class BulkAnalysisGroupDialog(QDialog):
             QMessageBox.warning(self, "Missing Name", "Please provide a name for the bulk analysis group.")
             return None
 
-        tree_files, directories = self._collect_selection()
-        manual_files_all = [
-            self._normalise_text(line.strip())
-            for line in self.manual_files_edit.toPlainText().splitlines()
-            if line.strip()
-        ]
-        files_set = set()
-        for path in tree_files:
-            if not path:
-                continue
-            if Path(path).suffix.lower() in {".md", ".txt"}:
-                files_set.add(self._normalise_text(path))
-        for path in manual_files_all:
-            if not path:
-                continue
-            if Path(path).suffix.lower() in {".md", ".txt"}:
-                files_set.add(self._normalise_text(path))
-        files = sorted(files_set)
-
-        directories = sorted({self._normalise_directory(path) for path in directories if path})
+        files, directories = self._collect_combined_converted_selection()
 
         description = self.description_edit.toPlainText().strip()
         system_prompt = self._normalise_text(self.system_prompt_edit.text().strip())
@@ -455,25 +449,8 @@ class BulkAnalysisGroupDialog(QDialog):
         map_dirs: list[str] = []
         map_files: list[str] = []
         if op == "combined":
-            root = self.map_tree.invisibleRootItem()
-            nodes = [root]
-            while nodes:
-                node = nodes.pop()
-                for i in range(node.childCount()):
-                    child = node.child(i)
-                    nodes.append(child)
-                    data = child.data(0, Qt.UserRole)
-                    if not data:
-                        continue
-                    kind, value = data
-                    if child.checkState(0) != Qt.Checked:
-                        continue
-                    if kind == "map-group":
-                        map_groups.append(str(value))
-                    elif kind == "map-dir":
-                        map_dirs.append(str(value))
-                    elif kind == "map-file":
-                        map_files.append(str(value))
+            raw_groups, raw_dirs, raw_files = self._collect_map_selection()
+            map_groups, map_dirs, map_files = self._canonicalize_map_selection(raw_groups, raw_dirs, raw_files)
 
         if op == "per_document":
             if not files and not directories:
@@ -634,6 +611,7 @@ class BulkAnalysisGroupDialog(QDialog):
             self._add_path_to_tree(path)
         self.file_tree.expandAll()
         self._block_tree_signal = False
+        self._refresh_combined_input_summary()
 
     def _populate_map_outputs_tree(self) -> None:
         self.map_tree.clear()
@@ -676,6 +654,7 @@ class BulkAnalysisGroupDialog(QDialog):
             info = QTreeWidgetItem(["No per-document outputs found."])
             info.setFlags(Qt.NoItemFlags)
             self.map_tree.addTopLevelItem(info)
+        self._refresh_combined_input_summary()
 
     def _apply_initial_group_state(self) -> None:
         group = self._existing_group
@@ -720,6 +699,7 @@ class BulkAnalysisGroupDialog(QDialog):
             self.custom_context_spin.setValue(int(group.model_context_window))
 
         self._refresh_placeholder_requirements()
+        self._refresh_combined_input_summary()
 
     def _apply_model_selection(self, group: BulkAnalysisGroup) -> None:
         provider = group.provider_id or ""
@@ -796,6 +776,7 @@ class BulkAnalysisGroupDialog(QDialog):
                 self._sync_parent_state(item.parent())
 
         self.map_tree.blockSignals(False)
+        self._refresh_combined_input_summary()
 
     def _set_map_item_state(self, item: QTreeWidgetItem, state: Qt.CheckState) -> None:
         item.setCheckState(0, state)
@@ -877,6 +858,7 @@ class BulkAnalysisGroupDialog(QDialog):
 
         self._sync_parent_state(item.parent())
         self._block_tree_signal = False
+        self._refresh_combined_input_summary()
 
     def _sync_parent_state(self, parent: Optional[QTreeWidgetItem]) -> None:
         while parent is not None:
@@ -922,6 +904,165 @@ class BulkAnalysisGroupDialog(QDialog):
 
         for index in range(item.childCount()):
             self._collect_from_item(item.child(index), files, directories)
+
+    def _collect_combined_converted_selection(self) -> tuple[List[str], List[str]]:
+        tree_files, directories = self._collect_selection()
+        manual_files = [
+            self._normalise_text(line.strip())
+            for line in self.manual_files_edit.toPlainText().splitlines()
+            if line.strip()
+        ]
+
+        files_set: set[str] = set()
+        for path in tree_files:
+            if path and Path(path).suffix.lower() in {".md", ".txt"}:
+                files_set.add(self._normalise_text(path))
+        for path in manual_files:
+            if path and Path(path).suffix.lower() in {".md", ".txt"}:
+                files_set.add(self._normalise_text(path))
+
+        normalized_dirs = sorted({self._normalise_directory(path) for path in directories if path})
+        return sorted(files_set), normalized_dirs
+
+    def _collect_map_selection(self) -> tuple[list[str], list[str], list[str]]:
+        map_groups: list[str] = []
+        map_dirs: list[str] = []
+        map_files: list[str] = []
+        root = self.map_tree.invisibleRootItem()
+        nodes = [root]
+        while nodes:
+            node = nodes.pop()
+            for i in range(node.childCount()):
+                child = node.child(i)
+                nodes.append(child)
+                data = child.data(0, Qt.UserRole)
+                if not data:
+                    continue
+                kind, value = data
+                if child.checkState(0) != Qt.Checked:
+                    continue
+                if kind == "map-group":
+                    map_groups.append(str(value))
+                elif kind == "map-dir":
+                    map_dirs.append(str(value))
+                elif kind == "map-file":
+                    map_files.append(str(value))
+        return map_groups, map_dirs, map_files
+
+    def _canonicalize_map_selection(
+        self,
+        map_groups: list[str],
+        map_dirs: list[str],
+        map_files: list[str],
+    ) -> tuple[list[str], list[str], list[str]]:
+        group_set = {entry.strip("/") for entry in map_groups if entry and entry.strip("/")}
+        dir_candidates = {entry.strip("/") for entry in map_dirs if entry and entry.strip("/")}
+        file_candidates = {entry.strip("/") for entry in map_files if entry and entry.strip("/")}
+
+        selected_dirs: list[str] = []
+        selected_dir_parts: dict[str, list[str]] = {}
+        for entry in sorted(dir_candidates, key=lambda value: (value.split("/", 1)[0], value.count("/"), value)):
+            parts = entry.split("/", 1)
+            if len(parts) != 2:
+                continue
+            slug, remainder = parts
+            remainder = remainder.strip("/")
+            if not slug or not remainder:
+                continue
+            if slug in group_set:
+                continue
+            covered = False
+            for parent in selected_dir_parts.get(slug, []):
+                if remainder == parent or remainder.startswith(parent + "/"):
+                    covered = True
+                    break
+            if covered:
+                continue
+            selected_dirs.append(f"{slug}/{remainder}")
+            selected_dir_parts.setdefault(slug, []).append(remainder)
+
+        selected_files: list[str] = []
+        for entry in sorted(file_candidates):
+            parts = entry.split("/", 1)
+            if len(parts) != 2:
+                continue
+            slug, remainder = parts
+            remainder = remainder.strip("/")
+            if not slug or not remainder:
+                continue
+            if slug in group_set:
+                continue
+            covered_by_directory = False
+            for parent in selected_dir_parts.get(slug, []):
+                if remainder == parent or remainder.startswith(parent + "/"):
+                    covered_by_directory = True
+                    break
+            if covered_by_directory:
+                continue
+            selected_files.append(f"{slug}/{remainder}")
+
+        return sorted(group_set), selected_dirs, selected_files
+
+    def _resolve_combined_input_counts(self) -> tuple[int, int, int]:
+        converted_count = 0
+        map_count = 0
+        if not self._project_dir:
+            return 0, 0, 0
+
+        files, directories = self._collect_combined_converted_selection()
+        converted_root = self._project_dir / "converted_documents"
+        converted_paths: set[Path] = set()
+        for rel in files:
+            candidate = converted_root / rel
+            if candidate.exists() and candidate.is_file() and not is_azure_raw_artifact(candidate):
+                converted_paths.add(candidate.resolve())
+        for rel_dir in directories:
+            base = converted_root / rel_dir
+            if not base.exists() or not base.is_dir():
+                continue
+            for path in base.rglob("*.md"):
+                if is_azure_raw_artifact(path):
+                    continue
+                converted_paths.add(path.resolve())
+        converted_count = len(converted_paths)
+
+        raw_groups, raw_dirs, raw_files = self._collect_map_selection()
+        map_groups, map_dirs, map_files = self._canonicalize_map_selection(raw_groups, raw_dirs, raw_files)
+        map_paths: set[Path] = set()
+        for slug in map_groups:
+            for path, _ in iter_map_outputs(self._project_dir, slug):
+                map_paths.add(path.resolve())
+        for rel_dir in map_dirs:
+            parts = rel_dir.split("/", 1)
+            if len(parts) != 2:
+                continue
+            slug, remainder = parts
+            for path, _ in iter_map_outputs_under(self._project_dir, slug, remainder):
+                map_paths.add(path.resolve())
+        for rel_file in map_files:
+            parts = rel_file.split("/", 1)
+            if len(parts) != 2:
+                continue
+            slug, remainder = parts
+            path = resolve_map_output_path(self._project_dir, slug, remainder)
+            if path.exists() and path.is_file():
+                map_paths.add(path.resolve())
+        map_count = len(map_paths)
+
+        return converted_count + map_count, converted_count, map_count
+
+    def _refresh_combined_input_summary(self) -> None:
+        if self.operation_combo.currentData() != "combined":
+            self.combined_inputs_label.setText("Effective inputs: 0 (converted 0, map 0)")
+            return
+        try:
+            total, converted_count, map_count = self._resolve_combined_input_counts()
+        except Exception:
+            total, converted_count, map_count = 0, 0, 0
+        self.combined_inputs_label.setText(
+            f"Effective inputs: {total} (converted {converted_count}, map {map_count})"
+        )
+
     def _normalise_text(self, text: str) -> str:
         if not text:
             return ""

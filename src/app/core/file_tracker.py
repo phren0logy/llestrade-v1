@@ -375,6 +375,7 @@ class WorkspaceGroupMetrics:
     combined_latest_path: str | None = None
     combined_latest_at: datetime | None = None
     combined_is_stale: bool = False
+    combined_last_run_input_count: int | None = None
 
     def to_dict(self) -> Dict[str, object]:
         return {
@@ -391,6 +392,7 @@ class WorkspaceGroupMetrics:
             "combined_latest_path": self.combined_latest_path,
             "combined_latest_at": self.combined_latest_at.isoformat() if self.combined_latest_at else None,
             "combined_is_stale": self.combined_is_stale,
+            "combined_last_run_input_count": self.combined_last_run_input_count,
         }
 
 
@@ -473,10 +475,17 @@ def build_workspace_metrics(
         combined_latest_path: str | None = None
         combined_latest_at: datetime | None = None
         combined_is_stale = False
+        combined_last_run_input_count: int | None = None
 
         # If the group represents a combined operation, compute inputs and status.
         if op_type == "combined" and project_dir is not None:
-            combined_input_count, combined_latest_path, combined_latest_at, combined_is_stale = (
+            (
+                combined_input_count,
+                combined_latest_path,
+                combined_latest_at,
+                combined_is_stale,
+                combined_last_run_input_count,
+            ) = (
                 _compute_combined_status(project_dir, group)
             )
 
@@ -494,6 +503,7 @@ def build_workspace_metrics(
             combined_latest_path=combined_latest_path,
             combined_latest_at=combined_latest_at,
             combined_is_stale=combined_is_stale,
+            combined_last_run_input_count=combined_last_run_input_count,
         )
         group_metrics[group.group_id] = metrics
 
@@ -528,7 +538,10 @@ def _iter_project_files(root: Path, rel_dirs: Sequence[str]) -> set[str]:
     return selected
 
 
-def _compute_combined_status(project_dir: Path, group: "BulkAnalysisGroup") -> tuple[int, str | None, datetime | None, bool]:
+def _compute_combined_status(
+    project_dir: Path,
+    group: "BulkAnalysisGroup",
+) -> tuple[int, str | None, datetime | None, bool, int | None]:
     # Build selection from converted_documents
     conv_root = project_dir / "converted_documents"
     converted_selected: set[str] = set()
@@ -614,18 +627,22 @@ def _compute_combined_status(project_dir: Path, group: "BulkAnalysisGroup") -> t
     # Staleness: if no artifact and there are inputs → stale
     inputs_count = len(converted_selected) + len(map_selected)
     if inputs_count == 0:
-        return 0, latest_rel, latest_ts, False
+        return 0, latest_rel, latest_ts, False, None
     if latest_path is None:
-        return inputs_count, latest_rel, latest_ts, True
+        return inputs_count, latest_rel, latest_ts, True, None
 
     # Compare mtimes with manifest if present; else fallback to simple mtime comparison
     manifest = latest_path.with_suffix(".manifest.json")
     recorded: dict[str, float] = {}
     high_precision: set[str] = set()
+    last_run_input_count: int | None = None
     if manifest.exists():
         try:
             payload = json.loads(manifest.read_text())
-            for entry in payload.get("inputs", []):
+            manifest_inputs = payload.get("inputs", [])
+            if isinstance(manifest_inputs, list):
+                last_run_input_count = len(manifest_inputs)
+            for entry in manifest_inputs:
                 path = entry.get("path")
                 mtime_ns = entry.get("mtime_ns")
                 mtime = entry.get("mtime")
@@ -681,7 +698,7 @@ def _compute_combined_status(project_dir: Path, group: "BulkAnalysisGroup") -> t
                 stale = True
                 break
 
-    return inputs_count, latest_rel, latest_ts, stale
+    return inputs_count, latest_rel, latest_ts, stale, last_run_input_count
 
 
 def _resolve_group_converted_paths(

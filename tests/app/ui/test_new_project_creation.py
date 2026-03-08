@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 PySide6 = pytest.importorskip("PySide6")
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 _ = PySide6
@@ -352,6 +353,77 @@ def test_bulk_group_dialog_requires_combined_inputs(monkeypatch: pytest.MonkeyPa
         assert group is None
         assert warnings
         assert "Select at least one converted or map output input" in warnings[-1]
+    finally:
+        dialog.deleteLater()
+
+
+def test_bulk_group_dialog_canonicalizes_map_group_selection(tmp_path: Path, qt_app: QApplication) -> None:
+    assert qt_app is not None
+    projects_root = tmp_path / "projects"
+    projects_root.mkdir()
+    manager = ProjectManager()
+    manager.create_project(projects_root, ProjectMetadata(case_name="Combined Canonical"))
+
+    map_dir = manager.project_dir / "bulk_analysis" / "per-document-summaries" / "Conner"
+    map_dir.mkdir(parents=True, exist_ok=True)
+    (map_dir / "doc1_analysis.md").write_text("analysis one", encoding="utf-8")
+    (map_dir / "doc2_analysis.md").write_text("analysis two", encoding="utf-8")
+
+    dialog = BulkAnalysisGroupDialog(manager.project_dir)
+    try:
+        dialog.name_edit.setText("Canonical Combined")
+        dialog.model_combo.setCurrentIndex(1)
+        index = dialog.operation_combo.findData("combined")
+        assert index != -1
+        dialog.operation_combo.setCurrentIndex(index)
+
+        map_group_item = dialog.map_tree.topLevelItem(0)
+        assert map_group_item is not None
+        assert map_group_item.text(0) == "per-document-summaries"
+        map_group_item.setCheckState(0, Qt.Checked)
+
+        group = dialog._build_group_instance()
+        assert group is not None
+        assert group.combine_map_groups == ["per-document-summaries"]
+        assert group.combine_map_directories == []
+        assert group.combine_map_files == []
+    finally:
+        dialog.deleteLater()
+
+
+def test_bulk_group_dialog_shows_effective_combined_input_counts(tmp_path: Path, qt_app: QApplication) -> None:
+    assert qt_app is not None
+    projects_root = tmp_path / "projects"
+    projects_root.mkdir()
+    manager = ProjectManager()
+    manager.create_project(projects_root, ProjectMetadata(case_name="Combined Counts"))
+
+    converted_dir = manager.project_dir / "converted_documents" / "folder"
+    converted_dir.mkdir(parents=True, exist_ok=True)
+    (converted_dir / "doc.md").write_text("converted", encoding="utf-8")
+
+    map_dir = manager.project_dir / "bulk_analysis" / "per-document-summaries" / "folder"
+    map_dir.mkdir(parents=True, exist_ok=True)
+    (map_dir / "doc_analysis.md").write_text("analysis", encoding="utf-8")
+
+    dialog = BulkAnalysisGroupDialog(manager.project_dir)
+    try:
+        index = dialog.operation_combo.findData("combined")
+        assert index != -1
+        dialog.operation_combo.setCurrentIndex(index)
+
+        folder_item = dialog.file_tree.topLevelItem(0)
+        assert folder_item is not None
+        converted_item = folder_item.child(0)
+        assert converted_item is not None
+        converted_item.setCheckState(0, Qt.Checked)
+
+        map_group_item = dialog.map_tree.topLevelItem(0)
+        assert map_group_item is not None
+        map_group_item.setCheckState(0, Qt.Checked)
+
+        qt_app.processEvents()
+        assert dialog.combined_inputs_label.text() == "Effective inputs: 2 (converted 1, map 1)"
     finally:
         dialog.deleteLater()
 

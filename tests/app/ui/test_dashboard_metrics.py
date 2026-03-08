@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -127,6 +128,52 @@ def test_workspace_metrics_include_group_coverage(tmp_path: Path, qt_app: QAppli
     assert group_metrics.bulk_analysis_total == 1
     assert group_metrics.pending_bulk_analysis == 1
     assert set(group_metrics.converted_files) == {"folder/doc1.md", "folder/doc2.md"}
+
+
+def test_workspace_metrics_include_combined_last_run_input_count(tmp_path: Path, qt_app: QApplication) -> None:
+    assert qt_app is not None
+    manager = ProjectManager()
+    manager.create_project(tmp_path, ProjectMetadata(case_name="Workspace Combined"))
+
+    map_dir = manager.project_dir / "bulk_analysis" / "per-document-summaries" / "Conner"
+    map_dir.mkdir(parents=True, exist_ok=True)
+    first_map = map_dir / "doc1_analysis.md"
+    second_map = map_dir / "doc2_analysis.md"
+    first_map.write_text("analysis one", encoding="utf-8")
+    second_map.write_text("analysis two", encoding="utf-8")
+
+    combined = BulkAnalysisGroup.create(name="Comprehensive Summary")
+    combined.operation = "combined"
+    combined.combine_map_groups = ["per-document-summaries"]
+    combined_saved = manager.save_bulk_analysis_group(combined)
+
+    reduce_dir = manager.project_dir / "bulk_analysis" / combined_saved.slug / "reduce"
+    reduce_dir.mkdir(parents=True, exist_ok=True)
+    combined_md = reduce_dir / "combined_20260307-1010.md"
+    combined_md.write_text("combined output", encoding="utf-8")
+    combined_manifest = combined_md.with_suffix(".manifest.json")
+    combined_manifest.write_text(
+        json.dumps(
+            {
+                "inputs": [
+                    {
+                        "kind": "map",
+                        "path": "map/per-document-summaries/Conner/doc1_analysis.md",
+                        "mtime": first_map.stat().st_mtime,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    metrics = manager.get_workspace_metrics(refresh=True)
+
+    group_metrics = metrics.groups[combined_saved.group_id]
+    assert group_metrics.operation == "combined"
+    assert group_metrics.combined_input_count == 2
+    assert group_metrics.combined_last_run_input_count == 1
+    assert group_metrics.combined_is_stale is True
 
 
 def test_welcome_stage_uses_persisted_metrics(

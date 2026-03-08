@@ -186,7 +186,10 @@ class BulkAnalysisController:
         converted_count = metrics.converted_count if metrics else 0
         if op_type == "combined":
             input_count = getattr(metrics, "combined_input_count", 0) if metrics else 0
+            last_run_count = getattr(metrics, "combined_last_run_input_count", None) if metrics else None
             coverage_text = f"Combined — Inputs: {input_count}"
+            if isinstance(last_run_count, int):
+                coverage_text += f" (last run: {last_run_count})"
         else:
             coverage_text = f"{converted_count} of {total_docs}" if total_docs else str(converted_count)
         coverage_item = QTableWidgetItem(coverage_text)
@@ -246,6 +249,11 @@ class BulkAnalysisController:
             tooltip_lines.append(
                 "Converted files (" + str(metrics.converted_count) + "): " + ", ".join(metrics.converted_files)
             )
+        if op_type == "combined" and metrics:
+            if metrics.combined_latest_path:
+                tooltip_lines.append("Latest combined: " + metrics.combined_latest_path)
+            if metrics.combined_last_run_input_count is not None:
+                tooltip_lines.append("Last run input count: " + str(metrics.combined_last_run_input_count))
         if tooltip_lines:
             name_item.setToolTip("\n".join(tooltip_lines))
 
@@ -570,6 +578,43 @@ class BulkAnalysisController:
                 f"Combined operation for '{group.name}' is already in progress.",
             )
             return
+
+        metrics = self._resolve_group_metrics(gid)
+        if not metrics:
+            QMessageBox.warning(
+                self._workspace,
+                "Bulk Analysis",
+                "Project metrics are unavailable. Refresh groups before running combined analysis.",
+            )
+            self._on_refresh_groups()
+            return
+
+        input_count = getattr(metrics, "combined_input_count", 0)
+        if input_count <= 0:
+            QMessageBox.warning(
+                self._workspace,
+                "No Inputs",
+                "This combined group does not currently resolve any inputs.",
+            )
+            return
+
+        if not force_rerun and getattr(metrics, "combined_is_stale", False):
+            last_run_count = getattr(metrics, "combined_last_run_input_count", None)
+            summary = "Inputs have changed since the latest combined output."
+            if isinstance(last_run_count, int):
+                summary += (
+                    f"\n\nCurrent resolved inputs: {input_count}\n"
+                    f"Last run input count: {last_run_count}"
+                )
+            reply = QMessageBox.question(
+                self._workspace,
+                "Stale Combined Inputs",
+                summary + "\n\nContinue with the run?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                return
 
         if force_rerun:
             confirm = QMessageBox.question(

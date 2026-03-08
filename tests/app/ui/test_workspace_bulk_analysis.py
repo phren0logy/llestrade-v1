@@ -5,11 +5,11 @@ from __future__ import annotations
 from pathlib import Path
 import pytest
 from PySide6.QtCore import QCoreApplication, QObject, QRunnable, Signal
-from PySide6.QtWidgets import QApplication, QPushButton
+from PySide6.QtWidgets import QApplication, QPushButton, QMessageBox
 
 from src.app.core.bulk_analysis_runner import PromptBundle
 
-from src.app.core.file_tracker import FileTracker
+from src.app.core.file_tracker import FileTracker, WorkspaceGroupMetrics
 from src.app.core.project_manager import ProjectManager, ProjectMetadata
 from src.app.core.bulk_analysis_groups import BulkAnalysisGroup
 from src.app.ui.stages import project_workspace
@@ -61,6 +61,25 @@ def _create_project_with_group(tmp_path: Path) -> tuple[ProjectManager, BulkAnal
     FileTracker(manager.project_dir).scan()
 
     group = BulkAnalysisGroup.create(name="Demo Group", files=["folder/record.md"])
+    saved = manager.save_bulk_analysis_group(group)
+    return manager, saved
+
+
+def _create_project_with_combined_group(tmp_path: Path) -> tuple[ProjectManager, BulkAnalysisGroup]:
+    projects_root = tmp_path / "projects"
+    projects_root.mkdir()
+
+    manager = ProjectManager()
+    manager.create_project(projects_root, ProjectMetadata(case_name="Combined Demo"))
+
+    converted_doc = manager.project_dir / "converted_documents" / "folder" / "record.md"
+    converted_doc.parent.mkdir(parents=True, exist_ok=True)
+    converted_doc.write_text("# Heading\nBody", encoding="utf-8")
+    FileTracker(manager.project_dir).scan()
+
+    group = BulkAnalysisGroup.create(name="Combined Demo")
+    group.operation = "combined"
+    group.combine_converted_files = ["folder/record.md"]
     saved = manager.save_bulk_analysis_group(group)
     return manager, saved
 
@@ -263,5 +282,67 @@ def test_placeholder_analysis_includes_metadata_values(
     assert "subject_dob" not in missing_optional
     assert "case_info" not in missing_optional
     assert "document_name" not in missing_optional
+
+    workspace.deleteLater()
+
+
+def test_combined_run_prompts_when_inputs_are_stale(
+    tmp_path: Path,
+    qt_app: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert qt_app is not None
+
+    manager, group = _create_project_with_combined_group(tmp_path)
+
+    workspace = ProjectWorkspace()
+    workspace.set_project(manager)
+    QCoreApplication.processEvents()
+
+    controller = workspace.bulk_controller
+    assert controller is not None
+
+    metrics = WorkspaceGroupMetrics(
+        group_id=group.group_id,
+        name=group.name,
+        slug=group.slug or group.folder_name,
+        converted_files=(),
+        converted_count=0,
+        bulk_analysis_total=0,
+        pending_bulk_analysis=0,
+        pending_files=(),
+        operation="combined",
+        combined_input_count=6,
+        combined_latest_path="bulk_analysis/combined-demo/reduce/combined_20260307-1010.md",
+        combined_latest_at=None,
+        combined_is_stale=True,
+        combined_last_run_input_count=4,
+    )
+
+    monkeypatch.setattr(controller, "_resolve_group_metrics", lambda _group_id: metrics)
+    monkeypatch.setattr(controller, "_analyse_placeholders", lambda _group: (None, set(), set()))
+
+    prompts: list[tuple[str, str]] = []
+
+    def fake_question(_parent, title, text, *_args, **_kwargs):
+        prompts.append((title, text))
+        return QMessageBox.No
+
+    run_called = {"value": False}
+
+    def fake_run_combined(**_kwargs):  # noqa: ANN003
+        run_called["value"] = True
+        return True
+
+    monkeypatch.setattr(QMessageBox, "question", fake_question)
+    monkeypatch.setattr(controller._service, "run_combined", fake_run_combined)
+
+    controller.start_combined_run(group, force_rerun=False)
+
+    assert run_called["value"] is False
+    assert prompts
+    assert prompts[0][0] == "Stale Combined Inputs"
+    assert "Current resolved inputs: 6" in prompts[0][1]
+    assert "Last run input count: 4" in prompts[0][1]
 
     workspace.deleteLater()
