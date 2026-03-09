@@ -264,3 +264,86 @@ def test_bulk_reduce_invoke_provider_raises_for_failed_or_empty_backend_result(
             prompt="Prompt",
             system_prompt="System",
         )
+
+
+def test_bulk_reduce_invoke_provider_raises_cancelled_when_worker_cancelled(tmp_path: Path) -> None:
+    group = BulkAnalysisGroup.create("Group")
+    worker = BulkReduceWorker(
+        project_dir=tmp_path,
+        group=group,
+        metadata=ProjectMetadata(case_name="Case"),
+        force_rerun=False,
+    )
+    worker.cancel()
+
+    with pytest.raises(reduce_module.BulkAnalysisCancelled):
+        worker._invoke_provider(
+            provider=object(),
+            provider_cfg=ProviderConfig(provider_id="anthropic", model="claude", temperature=0.1),
+            prompt="Prompt",
+            system_prompt="System",
+        )
+
+
+def test_bulk_reduce_worker_surfaces_gateway_timeout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_dir = tmp_path
+    converted = project_dir / "converted_documents"
+    converted.mkdir(parents=True, exist_ok=True)
+    converted_doc = converted / "doc.md"
+    converted_doc.write_text("content", encoding="utf-8")
+
+    group = BulkAnalysisGroup.create("Group")
+    group.combine_converted_files = ["doc.md"]
+    metadata = ProjectMetadata(case_name="Case")
+
+    monkeypatch.setattr(
+        reduce_module,
+        "load_prompts",
+        lambda *_args, **_kwargs: reduce_module.PromptBundle("System", "User {document_content}"),
+    )
+    monkeypatch.setattr(
+        BulkReduceWorker,
+        "_resolve_provider",
+        lambda self: ProviderConfig(provider_id="anthropic", model="claude", temperature=0.1),
+    )
+    monkeypatch.setattr(
+        BulkReduceWorker,
+        "_create_provider",
+        lambda self, *_: object(),
+    )
+    monkeypatch.setattr(
+        reduce_module,
+        "should_chunk",
+        lambda *_args, **_kwargs: (False, 100, 2000),
+    )
+
+    worker = BulkReduceWorker(
+        project_dir=project_dir,
+        group=group,
+        metadata=metadata,
+        force_rerun=True,
+        llm_backend=_ResultBackend(
+            LLMInvocationResult(
+                success=False,
+                content="",
+                error="Gateway timeout",
+                usage={},
+                provider="gateway/anthropic",
+                model="claude",
+                raw={},
+            )
+        ),
+    )
+
+    finished: list[tuple[int, int]] = []
+    logs: list[str] = []
+    worker.finished.connect(lambda successes, failures: finished.append((successes, failures)))
+    worker.log_message.connect(logs.append)
+
+    worker._run()
+
+    assert finished == [(0, 1)]
+    assert any("Gateway timeout" in message for message in logs)

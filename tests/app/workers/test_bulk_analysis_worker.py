@@ -199,6 +199,26 @@ def test_bulk_map_invoke_provider_raises_for_failed_or_empty_backend_result(
         )
 
 
+def test_bulk_map_invoke_provider_raises_cancelled_when_worker_cancelled(tmp_path: Path) -> None:
+    group = BulkAnalysisGroup.create("Group")
+    worker = BulkAnalysisWorker(
+        project_dir=tmp_path,
+        group=group,
+        files=[],
+        metadata=ProjectMetadata(case_name="Case"),
+        force_rerun=False,
+    )
+    worker.cancel()
+
+    with pytest.raises(worker_module.BulkAnalysisCancelled):
+        worker._invoke_provider(
+            provider=object(),
+            provider_config=ProviderConfig(provider_id="anthropic", model="claude"),
+            prompt="Prompt",
+            system_prompt="System",
+        )
+
+
 def test_bulk_worker_force_rerun_reprocesses(tmp_path: Path, qtbot, monkeypatch: pytest.MonkeyPatch) -> None:
     _ = qtbot
     project_dir = tmp_path
@@ -495,3 +515,62 @@ def test_process_document_forces_chunking_when_full_prompt_exceeds_budget(
     assert run_details["chunking"] is True
     assert run_details["chunk_count"] == 2
     assert run_details["full_prompt_tokens"] == 80_000
+
+
+def test_bulk_worker_surfaces_gateway_spend_limit_rejection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_dir = tmp_path
+    converted = project_dir / "converted_documents"
+    converted.mkdir(parents=True, exist_ok=True)
+    source_path = converted / "doc.md"
+    source_path.write_text("Body text", encoding="utf-8")
+
+    group = BulkAnalysisGroup.create("Group", files=["doc.md"])
+    metadata = ProjectMetadata(case_name="Case")
+
+    monkeypatch.setattr(
+        worker_module,
+        "load_prompts",
+        lambda *_args, **_kwargs: PromptBundle("System", "Analyze {document_content}"),
+    )
+    monkeypatch.setattr(
+        BulkAnalysisWorker,
+        "_resolve_provider",
+        lambda self: ProviderConfig(provider_id="anthropic", model="claude"),
+    )
+    monkeypatch.setattr(
+        BulkAnalysisWorker,
+        "_create_provider",
+        lambda self, *_: object(),
+    )
+
+    worker = BulkAnalysisWorker(
+        project_dir=project_dir,
+        group=group,
+        files=["doc.md"],
+        metadata=metadata,
+        force_rerun=True,
+        llm_backend=_ResultBackend(
+            LLMInvocationResult(
+                success=False,
+                content="",
+                error="Gateway spend limit exceeded",
+                usage={},
+                provider="gateway/anthropic",
+                model="claude",
+                raw={},
+            )
+        ),
+    )
+
+    failures: list[tuple[str, str]] = []
+    finished: list[tuple[int, int]] = []
+    worker.file_failed.connect(lambda path, error: failures.append((path, error)))
+    worker.finished.connect(lambda successes, failure_count: finished.append((successes, failure_count)))
+
+    worker._run()
+
+    assert failures == [("doc.md", "Gateway spend limit exceeded")]
+    assert finished == [(0, 1)]

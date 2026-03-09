@@ -555,9 +555,11 @@ def test_gateway_backend_path_skips_native_provider_initialization(
     assert provider.default_model == "claude-sonnet-4-5"
 
 
+@pytest.mark.parametrize("message", ["Gateway timeout", "Gateway spend limit exceeded"])
 def test_draft_worker_emits_failure_when_backend_returns_error(
     tmp_path: Path,
     qt_app: QApplication,
+    message: str,
 ) -> None:
     assert qt_app is not None
     (common_paths, _refinement_system_prompt_path) = _prepare_common_files(tmp_path)
@@ -584,7 +586,7 @@ def test_draft_worker_emits_failure_when_backend_returns_error(
             LLMInvocationResult(
                 success=False,
                 content="",
-                error="Gateway timeout",
+                error=message,
                 usage={},
                 provider="gateway/anthropic",
                 model="claude-sonnet-4-5",
@@ -599,7 +601,7 @@ def test_draft_worker_emits_failure_when_backend_returns_error(
     worker.run()
 
     assert failures
-    assert "Gateway timeout" in failures[0]
+    assert message in failures[0]
 
 
 def test_refinement_worker_emits_failure_when_backend_returns_empty_output(
