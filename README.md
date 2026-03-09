@@ -270,19 +270,24 @@ The application stores settings in `var/app_settings.json` (created on first run
 }
 ```
 
-### Experimental: Pydantic AI Gateway (Report + Bulk Workflows)
+### Pydantic AI Gateway (Default Report + Bulk Path)
 
-Report draft/refinement and bulk map/reduce can be routed through a Gateway-backed execution backend behind a feature flag.
+Report draft/refinement and bulk map/reduce use a Gateway-backed execution backend by default.
 
-- Enable the path:
-  - `FRD_ENABLE_PYDANTIC_AI_GATEWAY=true`
-- Required auth:
+- Required auth for Gateway mode:
   - `PYDANTIC_AI_GATEWAY_API_KEY=<your key>` (or `PAIG_API_KEY`)
+- Managed Gateway:
+  - no additional endpoint configuration required
 - Optional custom endpoint (self-hosted Gateway):
   - `PYDANTIC_AI_GATEWAY_BASE_URL=<gateway base url>` (or `PAIG_BASE_URL`)
   - `PYDANTIC_AI_GATEWAY_ROUTE=<route override>`
+- Fallback switch (force legacy native provider clients):
+  - `FRD_ENABLE_PYDANTIC_AI_GATEWAY=false`
 
-If the flag is disabled (default), workers use the existing native provider clients.
+Gateway backend fallback behavior:
+
+- Unsupported provider IDs automatically use the legacy backend implementation.
+- Runtime Gateway errors are surfaced to workers with existing stage-level failure handling.
 
 ### AWS Bedrock Credentials
 

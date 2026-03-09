@@ -23,3 +23,9 @@ For historical transition notes (legacy UI split/new-ui migration plans), see `d
   - Added `LLMExecutionBackend` + legacy adapter, and routed worker invocation through the backend seam.
   - Added focused tests for backend contracts and stage-to-trace mapping.
 - Updated `docs/work_plan.md` with explicit milestones for report pilot, bulk expansion, cutover gates, and Qt 6.11 parallel validation.
+
+## 2026-03-09 - Gateway Bulk Expansion + Default-On Cutover
+- Routed bulk map/reduce workers through the same `LLMExecutionBackend` seam used by reports.
+- Added no-native-provider creation paths for bulk and report workers using shared provider metadata, enabling Gateway execution without native SDK bootstrap.
+- Validated deterministic pytest lane with Gateway explicitly enabled: `FRD_ENABLE_PYDANTIC_AI_GATEWAY=true ./scripts/run_pytest_pr.sh` passed.
+- Switched the feature-flag default to Gateway-on and documented the managed/self-host configuration plus explicit opt-out switch.

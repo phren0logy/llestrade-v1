@@ -166,22 +166,25 @@ Note: Highlights denominator uses PDFs only (pending/highlights reflect PDF-elig
 ### Execution Milestones
 
 - [x] Foundation: decompose large controllers and introduce worker-stage contracts plus `LLMExecutionBackend`.
-- [ ] Report pilot: implement a report-only Pydantic AI Gateway backend behind a feature flag.
-- [ ] Bulk expansion: extend the Gateway backend to bulk map/reduce with parity on cancellation, checkpointing, and retry semantics.
-- [ ] Cutover: make Gateway the default path for report and bulk workflows after parity tests pass.
+- [x] Report pilot: implement a report-only Pydantic AI Gateway backend behind a feature flag.
+- [x] Bulk expansion: extend the Gateway backend to bulk map/reduce with parity on cancellation, checkpointing, and retry semantics.
+- [x] Cutover: make Gateway the default path for report and bulk workflows after parity tests pass.
 - [ ] Cleanup: remove dead/duplicate orchestration paths and consolidate remaining provider wiring.
 
 ### Rollout Gates
 
-- [ ] Deterministic test lane passes with Gateway enabled (`scripts/run_pytest_pr.sh`).
+- [x] Deterministic test lane passes with Gateway enabled (`scripts/run_pytest_pr.sh`).
 - [ ] Failure semantics match current behavior (timeouts, empty output, cancellation, provider errors).
 - [ ] Observability emits stable stage/job/group trace attributes in both legacy and Gateway paths.
-- [ ] Document managed vs self-host Gateway operational requirements and fallback switches.
+- [x] Document managed vs self-host Gateway operational requirements and fallback switches.
 
 ### Qt 6.11 Track (Parallel)
 
 - [ ] Validate PySide/Qt 6.11 compatibility and enumerate required code/test updates.
 - [ ] Land compatibility fixes and pin final version after deterministic suite passes.
+
+Notes:
+- As of 2026-03-08, the latest PyPI `PySide6` release remains `6.10.2`; compatibility execution against `6.11` is blocked until wheels are published.
 
 
 ## Deferred Backlog
