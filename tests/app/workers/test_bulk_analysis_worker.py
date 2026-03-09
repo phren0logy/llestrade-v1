@@ -52,6 +52,18 @@ class _NoNativeBackend(LLMExecutionBackend):
         )
 
 
+class _ResultBackend(LLMExecutionBackend):
+    def __init__(self, result: LLMInvocationResult) -> None:
+        self._result = result
+
+    def requires_native_provider(self) -> bool:
+        return False
+
+    def invoke(self, provider, request: LLMInvocationRequest) -> LLMInvocationResult:  # noqa: ANN001
+        _ = provider, request
+        return self._result
+
+
 def test_should_process_document_handles_skips(tmp_path: Path) -> None:
     entry = {
         "source_mtime": 123.456001,
@@ -132,6 +144,59 @@ def test_bulk_map_create_provider_skips_native_bootstrap_for_no_native_backend(
 
     assert provider.provider_name == "anthropic"
     assert provider.default_model
+
+
+@pytest.mark.parametrize(
+    ("result", "message"),
+    [
+        (
+            LLMInvocationResult(
+                success=False,
+                content="",
+                error="Gateway timeout",
+                usage={},
+                provider="gateway/anthropic",
+                model="claude",
+                raw={},
+            ),
+            "Gateway timeout",
+        ),
+        (
+            LLMInvocationResult(
+                success=True,
+                content="   ",
+                error=None,
+                usage={},
+                provider="gateway/anthropic",
+                model="claude",
+                raw={},
+            ),
+            "LLM returned empty response",
+        ),
+    ],
+)
+def test_bulk_map_invoke_provider_raises_for_failed_or_empty_backend_result(
+    tmp_path: Path,
+    result: LLMInvocationResult,
+    message: str,
+) -> None:
+    group = BulkAnalysisGroup.create("Group")
+    worker = BulkAnalysisWorker(
+        project_dir=tmp_path,
+        group=group,
+        files=[],
+        metadata=ProjectMetadata(case_name="Case"),
+        force_rerun=False,
+        llm_backend=_ResultBackend(result),
+    )
+
+    with pytest.raises(RuntimeError, match=message):
+        worker._invoke_provider(
+            provider=object(),
+            provider_config=ProviderConfig(provider_id="anthropic", model="claude"),
+            prompt="Prompt",
+            system_prompt="System",
+        )
 
 
 def test_bulk_worker_force_rerun_reprocesses(tmp_path: Path, qtbot, monkeypatch: pytest.MonkeyPatch) -> None:

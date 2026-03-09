@@ -27,6 +27,18 @@ class _NoNativeBackend(LLMExecutionBackend):
         )
 
 
+class _ResultBackend(LLMExecutionBackend):
+    def __init__(self, result: LLMInvocationResult) -> None:
+        self._result = result
+
+    def requires_native_provider(self) -> bool:
+        return False
+
+    def invoke(self, provider, request: LLMInvocationRequest) -> LLMInvocationResult:  # noqa: ANN001
+        _ = provider, request
+        return self._result
+
+
 def test_bulk_reduce_worker_force_rerun(tmp_path: Path, qtbot, monkeypatch: pytest.MonkeyPatch) -> None:
     _ = qtbot
     project_dir = tmp_path
@@ -200,3 +212,55 @@ def test_bulk_reduce_create_provider_skips_native_bootstrap_for_no_native_backen
 
     assert provider.provider_name == "anthropic"
     assert provider.default_model
+
+
+@pytest.mark.parametrize(
+    ("result", "message"),
+    [
+        (
+            LLMInvocationResult(
+                success=False,
+                content="",
+                error="Gateway provider rejected request",
+                usage={},
+                provider="gateway/anthropic",
+                model="claude",
+                raw={},
+            ),
+            "Gateway provider rejected request",
+        ),
+        (
+            LLMInvocationResult(
+                success=True,
+                content=" ",
+                error=None,
+                usage={},
+                provider="gateway/anthropic",
+                model="claude",
+                raw={},
+            ),
+            "LLM returned empty response",
+        ),
+    ],
+)
+def test_bulk_reduce_invoke_provider_raises_for_failed_or_empty_backend_result(
+    tmp_path: Path,
+    result: LLMInvocationResult,
+    message: str,
+) -> None:
+    group = BulkAnalysisGroup.create("Group")
+    worker = BulkReduceWorker(
+        project_dir=tmp_path,
+        group=group,
+        metadata=ProjectMetadata(case_name="Case"),
+        force_rerun=False,
+        llm_backend=_ResultBackend(result),
+    )
+
+    with pytest.raises(RuntimeError, match=message):
+        worker._invoke_provider(
+            provider=object(),
+            provider_cfg=ProviderConfig(provider_id="anthropic", model="claude", temperature=0.1),
+            prompt="Prompt",
+            system_prompt="System",
+        )

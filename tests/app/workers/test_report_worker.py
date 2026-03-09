@@ -99,6 +99,18 @@ class _NoNativeBackend(LLMExecutionBackend):
         )
 
 
+class _ResultBackend(LLMExecutionBackend):
+    def __init__(self, result: LLMInvocationResult) -> None:
+        self._result = result
+
+    def requires_native_provider(self) -> bool:
+        return False
+
+    def invoke(self, provider, request: LLMInvocationRequest) -> LLMInvocationResult:  # noqa: ANN001
+        _ = provider, request
+        return self._result
+
+
 def _write_generation_user_prompt(path: Path) -> None:
     path.write_text(
         (
@@ -541,3 +553,121 @@ def test_gateway_backend_path_skips_native_provider_initialization(
     provider = worker._create_provider("system prompt")
     assert provider.provider_name == "anthropic"
     assert provider.default_model == "claude-sonnet-4-5"
+
+
+def test_draft_worker_emits_failure_when_backend_returns_error(
+    tmp_path: Path,
+    qt_app: QApplication,
+) -> None:
+    assert qt_app is not None
+    (common_paths, _refinement_system_prompt_path) = _prepare_common_files(tmp_path)
+    (
+        template_path,
+        generation_user_prompt_path,
+        _refinement_user_prompt_path,
+        generation_system_prompt_path,
+    ) = common_paths
+
+    worker = DraftReportWorker(
+        project_dir=tmp_path,
+        inputs=[(REPORT_CATEGORY_CONVERTED, "converted_documents/doc.md")],
+        provider_id="anthropic",
+        model="claude-sonnet-4-5",
+        custom_model=None,
+        context_window=None,
+        template_path=template_path,
+        transcript_path=None,
+        generation_user_prompt_path=generation_user_prompt_path,
+        generation_system_prompt_path=generation_system_prompt_path,
+        metadata=ProjectMetadata(case_name="Case"),
+        llm_backend=_ResultBackend(
+            LLMInvocationResult(
+                success=False,
+                content="",
+                error="Gateway timeout",
+                usage={},
+                provider="gateway/anthropic",
+                model="claude-sonnet-4-5",
+                raw={},
+            )
+        ),
+    )
+
+    failures: list[str] = []
+    worker.failed.connect(failures.append)
+
+    worker.run()
+
+    assert failures
+    assert "Gateway timeout" in failures[0]
+
+
+def test_refinement_worker_emits_failure_when_backend_returns_empty_output(
+    tmp_path: Path,
+    qt_app: QApplication,
+) -> None:
+    assert qt_app is not None
+    (common_paths, refinement_system_prompt_path) = _prepare_common_files(tmp_path)
+    (
+        template_path,
+        generation_user_prompt_path,
+        refinement_user_prompt_path,
+        generation_system_prompt_path,
+    ) = common_paths
+
+    draft_worker = DraftReportWorker(
+        project_dir=tmp_path,
+        inputs=[(REPORT_CATEGORY_CONVERTED, "converted_documents/doc.md")],
+        provider_id="anthropic",
+        model="claude-sonnet-4-5",
+        custom_model=None,
+        context_window=None,
+        template_path=template_path,
+        transcript_path=None,
+        generation_user_prompt_path=generation_user_prompt_path,
+        generation_system_prompt_path=generation_system_prompt_path,
+        metadata=ProjectMetadata(case_name="Case"),
+        llm_backend=_NoNativeBackend(),
+    )
+    draft_failures: list[str] = []
+    draft_results: list[dict] = []
+    draft_worker.failed.connect(draft_failures.append)
+    draft_worker.finished.connect(lambda payload: draft_results.append(payload))
+    draft_worker.run()
+    assert not draft_failures
+    assert draft_results
+    draft_path = Path(draft_results[0]["draft_path"])
+
+    refine_worker = ReportRefinementWorker(
+        project_dir=tmp_path,
+        draft_path=draft_path,
+        inputs=[(REPORT_CATEGORY_CONVERTED, "converted_documents/doc.md")],
+        provider_id="anthropic",
+        model="claude-sonnet-4-5",
+        custom_model=None,
+        context_window=None,
+        template_path=template_path,
+        transcript_path=None,
+        refinement_user_prompt_path=refinement_user_prompt_path,
+        refinement_system_prompt_path=refinement_system_prompt_path,
+        metadata=ProjectMetadata(case_name="Case"),
+        llm_backend=_ResultBackend(
+            LLMInvocationResult(
+                success=True,
+                content="   ",
+                error=None,
+                usage={},
+                provider="gateway/anthropic",
+                model="claude-sonnet-4-5",
+                raw={},
+            )
+        ),
+    )
+
+    failures: list[str] = []
+    refine_worker.failed.connect(failures.append)
+
+    refine_worker.run()
+
+    assert failures
+    assert "Refinement step returned empty content" in failures[0]

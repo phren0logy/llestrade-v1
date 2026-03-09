@@ -274,3 +274,72 @@ def test_gateway_backend_can_fallback_on_error_when_enabled(
     assert result.success is True
     assert result.content == "legacy fallback"
     assert result.provider == "legacy"
+
+
+def test_gateway_backend_reports_empty_output_as_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Usage:
+        requests = 1
+        input_tokens = 20
+        output_tokens = 0
+        details = {}
+
+    class _RunResult:
+        output = "   "
+        run_id = "run-empty"
+
+        @staticmethod
+        def usage() -> _Usage:
+            return _Usage()
+
+    class _FakeAgent:
+        def __init__(self, *, model: Any, system_prompt: str, retries: int) -> None:  # noqa: ARG002
+            pass
+
+        def run_sync(self, prompt: str, *, model_settings: Dict[str, Any]) -> _RunResult:  # noqa: ARG002
+            return _RunResult()
+
+    import pydantic_ai
+
+    monkeypatch.setattr(pydantic_ai, "Agent", _FakeAgent, raising=True)
+    backend = PydanticAIGatewayBackend(api_key="pylf_test_key")
+    monkeypatch.setattr(
+        backend,
+        "_build_model",
+        lambda **kwargs: {"provider_id": kwargs["provider_id"], "model_name": kwargs["model_name"]},
+        raising=True,
+    )
+
+    result = backend.invoke(
+        _ProviderMeta("anthropic"),
+        LLMInvocationRequest(
+            prompt="Summarize this",
+            system_prompt="System prompt",
+            model="claude-sonnet-4-5",
+            temperature=0.2,
+            max_tokens=4096,
+        ),
+    )
+
+    assert result.success is False
+    assert result.error == "LLM returned empty response"
+    assert result.provider == "gateway/anthropic"
+
+
+def test_gateway_backend_returns_error_when_provider_metadata_is_missing() -> None:
+    backend = PydanticAIGatewayBackend(api_key="pylf_test_key")
+
+    result = backend.invoke(
+        object(),
+        LLMInvocationRequest(
+            prompt="Summarize this",
+            system_prompt="System prompt",
+            model="claude-sonnet-4-5",
+            temperature=0.2,
+            max_tokens=4096,
+        ),
+    )
+
+    assert result.success is False
+    assert result.error == "Unable to resolve provider ID for Gateway backend"
