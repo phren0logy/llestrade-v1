@@ -11,6 +11,7 @@ from src.app.workers.llm_backend import (
     LLMInvocationResult,
     LegacyProviderBackend,
     PydanticAIGatewayBackend,
+    ProviderMetadata,
 )
 
 
@@ -212,6 +213,29 @@ def test_gateway_backend_uses_fallback_for_unsupported_provider() -> None:
     assert result.provider == "legacy"
 
 
+def test_gateway_backend_does_not_call_legacy_fallback_with_metadata_only_provider() -> None:
+    backend = PydanticAIGatewayBackend(
+        api_key="pylf_test_key",
+        fallback_backend=LegacyProviderBackend(),
+    )
+
+    result = backend.invoke(
+        ProviderMetadata(provider_name="unsupported_provider", default_model="custom-model"),
+        LLMInvocationRequest(
+            prompt="test",
+            system_prompt="sys",
+            model=None,
+            temperature=0.1,
+            max_tokens=128,
+        ),
+    )
+
+    assert result.success is False
+    assert result.content == ""
+    assert result.error is not None
+    assert "not supported by Pydantic AI Gateway backend" in result.error
+
+
 def test_gateway_backend_reports_configuration_error_without_key(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -274,6 +298,35 @@ def test_gateway_backend_can_fallback_on_error_when_enabled(
     assert result.success is True
     assert result.content == "legacy fallback"
     assert result.provider == "legacy"
+
+
+def test_gateway_backend_does_not_call_legacy_fallback_on_error_with_metadata_only_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("PYDANTIC_AI_GATEWAY_API_KEY", raising=False)
+    monkeypatch.delenv("PAIG_API_KEY", raising=False)
+
+    backend = PydanticAIGatewayBackend(
+        api_key=None,
+        base_url=None,
+        fallback_backend=LegacyProviderBackend(),
+        fallback_on_error=True,
+    )
+
+    result = backend.invoke(
+        ProviderMetadata(provider_name="anthropic", default_model="claude-sonnet-4-5"),
+        LLMInvocationRequest(
+            prompt="Summarize this",
+            system_prompt="System",
+            model="claude-sonnet-4-5",
+            temperature=0.2,
+            max_tokens=512,
+        ),
+    )
+
+    assert result.success is False
+    assert result.error is not None
+    assert "Gateway invocation failed" in result.error
 
 
 def test_gateway_backend_reports_empty_output_as_failure(

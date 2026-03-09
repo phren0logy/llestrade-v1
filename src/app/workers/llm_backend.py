@@ -266,7 +266,11 @@ class PydanticAIGatewayBackend:
         reason: str,
         fallback_on_error: bool = False,
     ) -> LLMInvocationResult:
-        if self._fallback_backend and (not fallback_on_error or self._fallback_on_error):
+        if (
+            self._fallback_backend
+            and (not fallback_on_error or self._fallback_on_error)
+            and self._can_use_fallback_backend(provider)
+        ):
             return self._fallback_backend.invoke(provider, request)
         return LLMInvocationResult(
             success=False,
@@ -301,6 +305,14 @@ class PydanticAIGatewayBackend:
         if not value:
             return None
         return str(value)
+
+    def _can_use_fallback_backend(self, provider: Any) -> bool:
+        if not self._fallback_backend:
+            return False
+        if not isinstance(self._fallback_backend, LegacyProviderBackend):
+            return True
+        generate = getattr(provider, "generate", None)
+        return callable(generate)
 
 
 __all__ = [
