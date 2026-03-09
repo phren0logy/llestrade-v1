@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -37,6 +38,18 @@ class _ResultBackend(LLMExecutionBackend):
     def invoke(self, provider, request: LLMInvocationRequest) -> LLMInvocationResult:  # noqa: ANN001
         _ = provider, request
         return self._result
+
+
+def _capture_traces(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, dict[str, object] | None]]:
+    recorded: list[tuple[str, dict[str, object] | None]] = []
+
+    @contextmanager
+    def _fake_trace_operation(name: str, attributes=None):  # noqa: ANN001
+        recorded.append((name, dict(attributes) if attributes is not None else None))
+        yield None
+
+    monkeypatch.setattr(reduce_module, "trace_operation", _fake_trace_operation)
+    return recorded
 
 
 def test_bulk_reduce_worker_force_rerun(tmp_path: Path, qtbot, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -283,6 +296,78 @@ def test_bulk_reduce_invoke_provider_raises_cancelled_when_worker_cancelled(tmp_
             prompt="Prompt",
             system_prompt="System",
         )
+
+
+def test_bulk_reduce_trace_attributes_match_between_legacy_and_gateway(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    group = BulkAnalysisGroup.create("Group")
+    group.slug = "group-slug"
+    config = ProviderConfig(provider_id="anthropic", model="claude", temperature=0.1)
+
+    class _LegacyProvider:
+        def generate(self, **kwargs):  # noqa: ANN003, ANN001
+            _ = kwargs
+            return {"success": True, "content": "summary"}
+
+    legacy_worker = BulkReduceWorker(
+        project_dir=tmp_path,
+        group=group,
+        metadata=ProjectMetadata(case_name="Case"),
+        force_rerun=False,
+    )
+    legacy_traces = _capture_traces(monkeypatch)
+    legacy_result = legacy_worker._invoke_provider(
+        provider=_LegacyProvider(),
+        provider_cfg=config,
+        prompt="Prompt",
+        system_prompt="System",
+    )
+
+    gateway_worker = BulkReduceWorker(
+        project_dir=tmp_path,
+        group=group,
+        metadata=ProjectMetadata(case_name="Case"),
+        force_rerun=False,
+        llm_backend=_ResultBackend(
+            LLMInvocationResult(
+                success=True,
+                content="summary",
+                error=None,
+                usage={"output_tokens": 1},
+                provider="gateway/anthropic",
+                model="claude",
+                raw={},
+            )
+        ),
+    )
+    gateway_traces = _capture_traces(monkeypatch)
+    gateway_result = gateway_worker._invoke_provider(
+        provider=object(),
+        provider_cfg=config,
+        prompt="Prompt",
+        system_prompt="System",
+    )
+
+    assert legacy_result == "summary"
+    assert gateway_result == "summary"
+    assert legacy_traces == gateway_traces == [
+        (
+            "bulk_reduce.invoke_llm",
+            {
+                "llestrade.provider_id": "anthropic",
+                "llestrade.model": "claude",
+                "llestrade.max_tokens": 32000,
+                "llestrade.temperature": 0.1,
+                "llestrade.worker": "bulk_reduce",
+                "llestrade.stage": "bulk_reduce",
+                "llestrade.group_id": group.group_id,
+                "llestrade.group_name": "Group",
+                "llestrade.group_slug": "group-slug",
+            },
+        )
+    ]
 
 
 def test_bulk_reduce_worker_surfaces_gateway_timeout(

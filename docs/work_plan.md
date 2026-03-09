@@ -175,7 +175,7 @@ Note: Highlights denominator uses PDFs only (pending/highlights reflect PDF-elig
 
 - [x] Deterministic test lane passes with Gateway enabled (`scripts/run_pytest_pr.sh`).
 - [ ] Failure semantics match current behavior (timeouts, empty output, cancellation, provider errors).
-- [ ] Observability emits stable stage/job/group trace attributes in both legacy and Gateway paths.
+- [x] Observability emits stable stage/job/group trace attributes in both legacy and Gateway paths.
 - [x] Document managed vs self-host Gateway operational requirements and fallback switches.
 
 ### Qt 6.11 Track (Parallel)

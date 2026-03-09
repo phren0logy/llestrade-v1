@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Sequence
 
@@ -62,6 +63,18 @@ class _ResultBackend(LLMExecutionBackend):
     def invoke(self, provider, request: LLMInvocationRequest) -> LLMInvocationResult:  # noqa: ANN001
         _ = provider, request
         return self._result
+
+
+def _capture_traces(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, dict[str, object] | None]]:
+    recorded: list[tuple[str, dict[str, object] | None]] = []
+
+    @contextmanager
+    def _fake_trace_operation(name: str, attributes=None):  # noqa: ANN001
+        recorded.append((name, dict(attributes) if attributes is not None else None))
+        yield None
+
+    monkeypatch.setattr(worker_module, "trace_operation", _fake_trace_operation)
+    return recorded
 
 
 def test_should_process_document_handles_skips(tmp_path: Path) -> None:
@@ -217,6 +230,78 @@ def test_bulk_map_invoke_provider_raises_cancelled_when_worker_cancelled(tmp_pat
             prompt="Prompt",
             system_prompt="System",
         )
+
+
+def test_bulk_map_trace_attributes_match_between_legacy_and_gateway(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    group = BulkAnalysisGroup.create("Group")
+    group.slug = "group-slug"
+    config = ProviderConfig(provider_id="anthropic", model="claude")
+
+    legacy_worker = BulkAnalysisWorker(
+        project_dir=tmp_path,
+        group=group,
+        files=[],
+        metadata=ProjectMetadata(case_name="Case"),
+        force_rerun=False,
+    )
+    legacy_traces = _capture_traces(monkeypatch)
+    legacy_result = legacy_worker._invoke_provider(
+        provider=_FakeProvider(),
+        provider_config=config,
+        prompt="Prompt",
+        system_prompt="System",
+        context_label="document 'doc.md'",
+    )
+
+    gateway_worker = BulkAnalysisWorker(
+        project_dir=tmp_path,
+        group=group,
+        files=[],
+        metadata=ProjectMetadata(case_name="Case"),
+        force_rerun=False,
+        llm_backend=_ResultBackend(
+            LLMInvocationResult(
+                success=True,
+                content="summary",
+                error=None,
+                usage={"output_tokens": 1},
+                provider="gateway/anthropic",
+                model="claude",
+                raw={},
+            )
+        ),
+    )
+    gateway_traces = _capture_traces(monkeypatch)
+    gateway_result = gateway_worker._invoke_provider(
+        provider=object(),
+        provider_config=config,
+        prompt="Prompt",
+        system_prompt="System",
+        context_label="document 'doc.md'",
+    )
+
+    assert legacy_result == "summary"
+    assert gateway_result == "summary"
+    assert legacy_traces == gateway_traces == [
+        (
+            "bulk_analysis.invoke_llm",
+            {
+                "llestrade.provider_id": "anthropic",
+                "llestrade.model": "claude",
+                "llestrade.max_tokens": 32000,
+                "llestrade.temperature": 0.1,
+                "llestrade.worker": "bulk_analysis",
+                "llestrade.stage": "bulk_map",
+                "llestrade.group_id": group.group_id,
+                "llestrade.group_name": "Group",
+                "llestrade.group_slug": "group-slug",
+                "llestrade.context_label": "document 'doc.md'",
+            },
+        )
+    ]
 
 
 def test_bulk_worker_force_rerun_reprocesses(tmp_path: Path, qtbot, monkeypatch: pytest.MonkeyPatch) -> None:

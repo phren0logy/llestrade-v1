@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import json
 from pathlib import Path
 from textwrap import dedent
@@ -15,6 +16,7 @@ _ = PySide6
 
 from src.app.core.project_manager import ProjectMetadata
 from src.app.core.report_inputs import REPORT_CATEGORY_CONVERTED
+from src.app.core.report_template_sections import TemplateSection
 from src.app.workers import report_worker
 from src.app.workers.llm_backend import LLMExecutionBackend, LLMInvocationRequest, LLMInvocationResult
 from src.app.workers.report_worker import DraftReportWorker, ReportRefinementWorker
@@ -109,6 +111,18 @@ class _ResultBackend(LLMExecutionBackend):
     def invoke(self, provider, request: LLMInvocationRequest) -> LLMInvocationResult:  # noqa: ANN001
         _ = provider, request
         return self._result
+
+
+def _capture_traces(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, dict[str, object] | None]]:
+    recorded: list[tuple[str, dict[str, object] | None]] = []
+
+    @contextmanager
+    def _fake_trace_operation(name: str, attributes=None):  # noqa: ANN001
+        recorded.append((name, dict(attributes) if attributes is not None else None))
+        yield None
+
+    monkeypatch.setattr(report_worker, "trace_operation", _fake_trace_operation)
+    return recorded
 
 
 def _write_generation_user_prompt(path: Path) -> None:
@@ -553,6 +567,189 @@ def test_gateway_backend_path_skips_native_provider_initialization(
     provider = worker._create_provider("system prompt")
     assert provider.provider_name == "anthropic"
     assert provider.default_model == "claude-sonnet-4-5"
+
+
+def test_report_draft_trace_attributes_match_between_legacy_and_gateway(
+    tmp_path: Path,
+    qt_app: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert qt_app is not None
+    (common_paths, _refinement_system_prompt_path) = _prepare_common_files(tmp_path)
+    (
+        template_path,
+        generation_user_prompt_path,
+        _refinement_user_prompt_path,
+        generation_system_prompt_path,
+    ) = common_paths
+    section = TemplateSection(title="Section One", body="# Section One\n\nBody")
+
+    legacy_worker = DraftReportWorker(
+        project_dir=tmp_path,
+        inputs=[(REPORT_CATEGORY_CONVERTED, "converted_documents/doc.md")],
+        provider_id="anthropic",
+        model="claude-sonnet-4-5",
+        custom_model=None,
+        context_window=None,
+        template_path=template_path,
+        transcript_path=None,
+        generation_user_prompt_path=generation_user_prompt_path,
+        generation_system_prompt_path=generation_system_prompt_path,
+        metadata=ProjectMetadata(case_name="Case"),
+    )
+    monkeypatch.setattr(legacy_worker, "_create_provider", lambda _system_prompt: _StubProvider())
+    legacy_traces = _capture_traces(monkeypatch)
+    legacy_outputs = legacy_worker._generate_section_outputs(
+        sections=[section],
+        user_prompt_template="Write {template_section}\n\n{additional_documents}",
+        additional_documents="Documents",
+        transcript_text="",
+        system_prompt="System prompt",
+        placeholder_map={},
+        evidence_ledger="",
+    )
+
+    gateway_worker = DraftReportWorker(
+        project_dir=tmp_path,
+        inputs=[(REPORT_CATEGORY_CONVERTED, "converted_documents/doc.md")],
+        provider_id="anthropic",
+        model="claude-sonnet-4-5",
+        custom_model=None,
+        context_window=None,
+        template_path=template_path,
+        transcript_path=None,
+        generation_user_prompt_path=generation_user_prompt_path,
+        generation_system_prompt_path=generation_system_prompt_path,
+        metadata=ProjectMetadata(case_name="Case"),
+        llm_backend=_ResultBackend(
+            LLMInvocationResult(
+                success=True,
+                content="stub output",
+                error=None,
+                usage={"output_tokens": 1},
+                provider="gateway/anthropic",
+                model="claude-sonnet-4-5",
+                raw={},
+            )
+        ),
+    )
+    monkeypatch.setattr(gateway_worker, "_create_provider", lambda _system_prompt: object())
+    gateway_traces = _capture_traces(monkeypatch)
+    gateway_outputs = gateway_worker._generate_section_outputs(
+        sections=[section],
+        user_prompt_template="Write {template_section}\n\n{additional_documents}",
+        additional_documents="Documents",
+        transcript_text="",
+        system_prompt="System prompt",
+        placeholder_map={},
+        evidence_ledger="",
+    )
+
+    assert legacy_outputs[0]["title"] == "Section One"
+    assert gateway_outputs[0]["title"] == "Section One"
+    assert legacy_traces == gateway_traces == [
+        (
+            "report_draft.invoke_llm",
+            {
+                "llestrade.provider_id": "anthropic",
+                "llestrade.model": "claude-sonnet-4-5",
+                "llestrade.max_tokens": 60000,
+                "llestrade.temperature": 0.2,
+                "llestrade.worker": "report_draft",
+                "llestrade.stage": "report_draft",
+                "llestrade.section_index": 1,
+                "llestrade.section_total": 1,
+                "llestrade.section_title": "Section One",
+            },
+        )
+    ]
+
+
+def test_report_refine_trace_attributes_match_between_legacy_and_gateway(
+    tmp_path: Path,
+    qt_app: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert qt_app is not None
+    (common_paths, refinement_system_prompt_path) = _prepare_common_files(tmp_path)
+    (
+        template_path,
+        generation_user_prompt_path,
+        refinement_user_prompt_path,
+        generation_system_prompt_path,
+    ) = common_paths
+    draft_path = tmp_path / "reports" / "draft.md"
+    draft_path.parent.mkdir(parents=True, exist_ok=True)
+    draft_path.write_text("---\n---\nDraft content", encoding="utf-8")
+
+    legacy_worker = ReportRefinementWorker(
+        project_dir=tmp_path,
+        draft_path=draft_path,
+        inputs=[(REPORT_CATEGORY_CONVERTED, "converted_documents/doc.md")],
+        provider_id="anthropic",
+        model="claude-sonnet-4-5",
+        custom_model=None,
+        context_window=None,
+        template_path=template_path,
+        transcript_path=None,
+        refinement_user_prompt_path=refinement_user_prompt_path,
+        refinement_system_prompt_path=refinement_system_prompt_path,
+        metadata=ProjectMetadata(case_name="Case"),
+    )
+    monkeypatch.setattr(legacy_worker, "_create_provider", lambda _system_prompt: _StubProvider())
+    legacy_traces = _capture_traces(monkeypatch)
+    legacy_result = legacy_worker._run_refinement(
+        prompt="Prompt",
+        system_prompt="System prompt",
+    )
+
+    gateway_worker = ReportRefinementWorker(
+        project_dir=tmp_path,
+        draft_path=draft_path,
+        inputs=[(REPORT_CATEGORY_CONVERTED, "converted_documents/doc.md")],
+        provider_id="anthropic",
+        model="claude-sonnet-4-5",
+        custom_model=None,
+        context_window=None,
+        template_path=template_path,
+        transcript_path=None,
+        refinement_user_prompt_path=refinement_user_prompt_path,
+        refinement_system_prompt_path=refinement_system_prompt_path,
+        metadata=ProjectMetadata(case_name="Case"),
+        llm_backend=_ResultBackend(
+            LLMInvocationResult(
+                success=True,
+                content="stub output",
+                error=None,
+                usage={"output_tokens": 1},
+                provider="gateway/anthropic",
+                model="claude-sonnet-4-5",
+                raw={},
+            )
+        ),
+    )
+    monkeypatch.setattr(gateway_worker, "_create_provider", lambda _system_prompt: object())
+    gateway_traces = _capture_traces(monkeypatch)
+    gateway_result = gateway_worker._run_refinement(
+        prompt="Prompt",
+        system_prompt="System prompt",
+    )
+
+    assert legacy_result[0].strip()
+    assert gateway_result[0].strip() == "stub output"
+    assert legacy_traces == gateway_traces == [
+        (
+            "report_refine.invoke_llm",
+            {
+                "llestrade.provider_id": "anthropic",
+                "llestrade.model": "claude-sonnet-4-5",
+                "llestrade.max_tokens": 60000,
+                "llestrade.temperature": 0.2,
+                "llestrade.worker": "report_refine",
+                "llestrade.stage": "report_refine",
+            },
+        )
+    ]
 
 
 @pytest.mark.parametrize("message", ["Gateway timeout", "Gateway spend limit exceeded"])
