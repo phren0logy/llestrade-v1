@@ -7,7 +7,24 @@ import pytest
 from src.app.core.project_manager import ProjectMetadata
 from src.app.core.bulk_analysis_groups import BulkAnalysisGroup
 from src.app.workers import bulk_reduce_worker as reduce_module
+from src.app.workers.llm_backend import LLMExecutionBackend, LLMInvocationRequest, LLMInvocationResult
 from src.app.workers.bulk_reduce_worker import BulkReduceWorker, ProviderConfig
+
+
+class _NoNativeBackend(LLMExecutionBackend):
+    def requires_native_provider(self) -> bool:
+        return False
+
+    def invoke(self, provider, request: LLMInvocationRequest) -> LLMInvocationResult:  # noqa: ANN001
+        return LLMInvocationResult(
+            success=True,
+            content="summary",
+            error=None,
+            usage={"output_tokens": 1},
+            provider="gateway/anthropic",
+            model=request.model,
+            raw={},
+        )
 
 
 def test_bulk_reduce_worker_force_rerun(tmp_path: Path, qtbot, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -157,3 +174,29 @@ def test_bulk_reduce_worker_applies_placeholder_values(tmp_path: Path, monkeypat
 
     expected_url = quote(pdf_path.resolve().as_posix(), safe="/:")
     assert expected_url in user_prompt
+
+
+def test_bulk_reduce_create_provider_skips_native_bootstrap_for_no_native_backend(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    group = BulkAnalysisGroup.create("Group")
+    worker = BulkReduceWorker(
+        project_dir=tmp_path,
+        group=group,
+        metadata=ProjectMetadata(case_name="Case"),
+        force_rerun=False,
+        llm_backend=_NoNativeBackend(),
+    )
+
+    def _fail_create_provider(**_kwargs):  # noqa: ANN001
+        raise AssertionError("create_provider should not be called for no-native backend")
+
+    monkeypatch.setattr(reduce_module, "create_provider", _fail_create_provider, raising=False)
+    provider = worker._create_provider(
+        ProviderConfig(provider_id="anthropic", model=None, temperature=0.1),
+        "system prompt",
+    )
+
+    assert provider.provider_name == "anthropic"
+    assert provider.default_model

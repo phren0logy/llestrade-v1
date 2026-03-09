@@ -270,9 +270,9 @@ The application stores settings in `var/app_settings.json` (created on first run
 }
 ```
 
-### Experimental: Pydantic AI Gateway (Report Workflows)
+### Experimental: Pydantic AI Gateway (Report + Bulk Workflows)
 
-Report draft/refinement can be routed through a Gateway-backed execution backend behind a feature flag.
+Report draft/refinement and bulk map/reduce can be routed through a Gateway-backed execution backend behind a feature flag.
 
 - Enable the path:
   - `FRD_ENABLE_PYDANTIC_AI_GATEWAY=true`

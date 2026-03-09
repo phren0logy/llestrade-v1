@@ -53,7 +53,13 @@ from src.common.markdown import (
 
 from .base import DashboardWorker
 from .checkpoint_manager import CheckpointManager, _sha256
-from .llm_backend import LLMExecutionBackend, LLMInvocationRequest, LegacyProviderBackend
+from .llm_backend import (
+    LLMExecutionBackend,
+    LLMInvocationRequest,
+    LegacyProviderBackend,
+    ProviderMetadata,
+    default_model_for_provider,
+)
 from .stage_contracts import BulkReduceStageInput, stage_trace_attributes
 
 LOGGER = logging.getLogger(__name__)
@@ -903,7 +909,13 @@ class BulkReduceWorker(DashboardWorker):
                 temperature = 1.0
         return ProviderConfig(provider_id=provider_id, model=model, temperature=temperature)
 
-    def _create_provider(self, config: ProviderConfig, system_prompt: str) -> Optional[BaseLLMProvider]:
+    def _create_provider(self, config: ProviderConfig, system_prompt: str) -> object:
+        if not self._llm_backend.requires_native_provider():
+            return ProviderMetadata(
+                provider_name=config.provider_id,
+                default_model=config.model or default_model_for_provider(config.provider_id),
+            )
+
         settings = SecureSettings()
         api_key = settings.get_api_key(config.provider_id)
         kwargs = {

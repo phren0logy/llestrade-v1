@@ -48,7 +48,13 @@ from src.common.markdown import (
 
 from .base import DashboardWorker
 from .checkpoint_manager import CheckpointManager, _sha256
-from .llm_backend import LLMExecutionBackend, LLMInvocationRequest, LegacyProviderBackend
+from .llm_backend import (
+    LLMExecutionBackend,
+    LLMInvocationRequest,
+    LegacyProviderBackend,
+    ProviderMetadata,
+    default_model_for_provider,
+)
 from .stage_contracts import BulkMapStageInput, stage_trace_attributes
 
 
@@ -958,7 +964,13 @@ class BulkAnalysisWorker(DashboardWorker):
         self,
         config: ProviderConfig,
         system_prompt: str,
-    ) -> Optional[BaseLLMProvider]:
+    ) -> object:
+        if not self._llm_backend.requires_native_provider():
+            return ProviderMetadata(
+                provider_name=config.provider_id,
+                default_model=config.model or default_model_for_provider(config.provider_id),
+            )
+
         settings = SecureSettings()
         api_key = settings.get_api_key(config.provider_id)
         kwargs = {

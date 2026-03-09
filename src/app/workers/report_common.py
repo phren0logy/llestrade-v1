@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 import re
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
@@ -19,7 +18,12 @@ from src.common.llm.tokens import TokenCounter
 from src.common.markdown import PromptReference, SourceReference, compute_file_checksum
 
 from .base import DashboardWorker
-from .llm_backend import LegacyProviderBackend, LLMExecutionBackend
+from .llm_backend import (
+    LegacyProviderBackend,
+    LLMExecutionBackend,
+    ProviderMetadata,
+    default_model_for_provider,
+)
 
 # Mapping of Anthropic cloud model slugs to their AWS Bedrock equivalents.
 # Reference: https://docs.claude.com/en/api/claude-on-amazon-bedrock
@@ -31,12 +35,6 @@ _BEDROCK_MODEL_ALIASES: Dict[str, str] = {
     "claude-opus-4-1-20250805": "anthropic.claude-opus-4-1-20250805-v1:0",
 }
 _CITATION_ID_RE = re.compile(r"^ev_[a-z0-9]{8,64}$")
-
-
-@dataclass(frozen=True, slots=True)
-class _ProviderMetadata:
-    provider_name: str
-    default_model: str
 
 
 class ReportWorkerBase(DashboardWorker):
@@ -284,9 +282,13 @@ class ReportWorkerBase(DashboardWorker):
     # ------------------------------------------------------------------
     def _create_provider(self, system_prompt: str):
         if not self._llm_backend.requires_native_provider():
-            return _ProviderMetadata(
+            return ProviderMetadata(
                 provider_name=self._provider_id,
-                default_model=self._custom_model or self._model or "",
+                default_model=(
+                    self._custom_model
+                    or self._model
+                    or default_model_for_provider(self._provider_id)
+                ),
             )
 
         settings = SecureSettings()

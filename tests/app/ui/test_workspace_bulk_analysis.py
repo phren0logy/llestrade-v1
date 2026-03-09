@@ -220,6 +220,7 @@ class _StubBulkAnalysisWorker(QObject, QRunnable):
         force_rerun: bool = False,
         placeholder_values: dict[str, str] | None = None,
         project_name: str = "",
+        llm_backend=None,  # noqa: ANN001
     ) -> None:
         QObject.__init__(self)
         QRunnable.__init__(self)

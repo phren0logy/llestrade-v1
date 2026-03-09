@@ -97,15 +97,15 @@ class ProjectWorkspace(QWidget):
         self._reports_controller: ReportsController | None = None
 
         self._documents_controller: DocumentsController | None = None
-        self._bulk_service = BulkAnalysisService(self._workers)
         self._highlight_service = HighlightsService(self._workers)
         if self._feature_flags.pydantic_ai_gateway_enabled:
-            reports_backend = PydanticAIGatewayBackend(
+            llm_backend = PydanticAIGatewayBackend(
                 fallback_backend=LegacyProviderBackend(),
             )
         else:
-            reports_backend = LegacyProviderBackend()
-        self._reports_service = ReportsService(self._workers, llm_backend=reports_backend)
+            llm_backend = LegacyProviderBackend()
+        self._bulk_service = BulkAnalysisService(self._workers, llm_backend=llm_backend)
+        self._reports_service = ReportsService(self._workers, llm_backend=llm_backend)
         self._build_ui()
         if project_manager:
             self.set_project(project_manager)

@@ -20,6 +20,7 @@ from src.app.workers.bulk_analysis_worker import (
     _save_manifest,
     _should_process_document,
 )
+from src.app.workers.llm_backend import LLMExecutionBackend, LLMInvocationRequest, LLMInvocationResult
 
 
 class _FakeProvider:
@@ -33,6 +34,22 @@ class _FakeProvider:
     def count_tokens(self, text=None, messages=None):  # noqa: ANN001
         content = text or ""
         return {"success": True, "token_count": max(len(content) // 4, 1)}
+
+
+class _NoNativeBackend(LLMExecutionBackend):
+    def requires_native_provider(self) -> bool:
+        return False
+
+    def invoke(self, provider, request: LLMInvocationRequest) -> LLMInvocationResult:  # noqa: ANN001
+        return LLMInvocationResult(
+            success=True,
+            content="summary",
+            error=None,
+            usage={"output_tokens": 1},
+            provider="gateway/anthropic",
+            model=request.model,
+            raw={},
+        )
 
 
 def test_should_process_document_handles_skips(tmp_path: Path) -> None:
@@ -88,6 +105,33 @@ def test_compute_prompt_hash_changes_on_prompt_and_settings() -> None:
     metadata.case_name = "Case B"
     fourth = _compute_prompt_hash(bundle, config_alt, group, metadata)
     assert third != fourth
+
+
+def test_bulk_map_create_provider_skips_native_bootstrap_for_no_native_backend(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    group = BulkAnalysisGroup.create("Group")
+    worker = BulkAnalysisWorker(
+        project_dir=tmp_path,
+        group=group,
+        files=[],
+        metadata=ProjectMetadata(case_name="Case"),
+        force_rerun=False,
+        llm_backend=_NoNativeBackend(),
+    )
+
+    def _fail_create_provider(**_kwargs):  # noqa: ANN001
+        raise AssertionError("create_provider should not be called for no-native backend")
+
+    monkeypatch.setattr(worker_module, "create_provider", _fail_create_provider, raising=False)
+    provider = worker._create_provider(
+        ProviderConfig(provider_id="anthropic", model=None),
+        "system prompt",
+    )
+
+    assert provider.provider_name == "anthropic"
+    assert provider.default_model
 
 
 def test_bulk_worker_force_rerun_reprocesses(tmp_path: Path, qtbot, monkeypatch: pytest.MonkeyPatch) -> None:

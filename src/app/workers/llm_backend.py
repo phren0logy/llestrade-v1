@@ -47,6 +47,26 @@ class LLMInvocationResult:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class ProviderMetadata:
+    """Lightweight provider metadata used when no native client is required."""
+
+    provider_name: str
+    default_model: str
+
+
+def default_model_for_provider(provider_id: str) -> str:
+    """Return a stable fallback model when native providers are not initialized."""
+    defaults = {
+        "anthropic": os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-5"),
+        "anthropic_bedrock": os.getenv("BEDROCK_ANTHROPIC_MODEL", "anthropic.claude-sonnet-4-5-v1"),
+        "azure_openai": os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4.1"),
+        "openai": os.getenv("OPENAI_MODEL", "gpt-4.1"),
+        "gemini": os.getenv("GEMINI_MODEL", "gemini-2.5-pro"),
+    }
+    return defaults.get(provider_id, "")
+
+
 class LLMExecutionBackend(Protocol):
     """Contract for pluggable LLM execution backends."""
 
@@ -284,9 +304,11 @@ class PydanticAIGatewayBackend:
 
 
 __all__ = [
+    "ProviderMetadata",
     "LLMExecutionBackend",
     "LLMInvocationRequest",
     "LLMInvocationResult",
     "LegacyProviderBackend",
     "PydanticAIGatewayBackend",
+    "default_model_for_provider",
 ]
