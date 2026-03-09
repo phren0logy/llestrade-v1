@@ -428,6 +428,119 @@ def test_bulk_group_dialog_shows_effective_combined_input_counts(tmp_path: Path,
         dialog.deleteLater()
 
 
+def test_bulk_group_dialog_rejects_duplicate_name(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    qt_app: QApplication,
+) -> None:
+    assert qt_app is not None
+    projects_root = tmp_path / "projects"
+    projects_root.mkdir()
+    manager = ProjectManager()
+    manager.create_project(projects_root, ProjectMetadata(case_name="Duplicate Name Validation"))
+
+    warnings: list[str] = []
+
+    def fake_warning(_parent, _title, message):
+        warnings.append(message)
+        return QMessageBox.Ok
+
+    monkeypatch.setattr(QMessageBox, "warning", fake_warning)
+
+    dialog = BulkAnalysisGroupDialog(
+        manager.project_dir,
+        existing_names=["Clinical Records"],
+    )
+    try:
+        dialog.name_edit.setText("clinical records")
+        group = dialog._build_group_instance()
+        assert group is None
+        assert warnings
+        assert "already exists" in warnings[-1]
+    finally:
+        dialog.deleteLater()
+
+
+def test_workspace_scan_on_open_checks_for_new_documents(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    qt_app: QApplication,
+) -> None:
+    assert qt_app is not None
+    projects_root = tmp_path / "projects"
+    projects_root.mkdir()
+    manager = ProjectManager()
+    manager.create_project(projects_root, ProjectMetadata(case_name="Scan On Open"))
+
+    source_root = tmp_path / "sources"
+    source_root.mkdir(parents=True, exist_ok=True)
+    manager.update_source_state(
+        root=source_root.as_posix(),
+        selected_folders=[],
+        warnings=[],
+        last_scan="2026-03-08T12:00:00",
+    )
+
+    calls: list[tuple[bool, bool]] = []
+
+    monkeypatch.setattr(
+        "src.app.ui.stages.project_workspace.QTimer.singleShot",
+        staticmethod(lambda _delay, fn: fn()),
+    )
+
+    workspace = ProjectWorkspace()
+    monkeypatch.setattr(
+        workspace,
+        "_trigger_conversion",
+        lambda auto_run, show_no_new_notice=True: calls.append((auto_run, show_no_new_notice)),
+    )
+
+    workspace.set_project(manager)
+
+    assert calls == [(False, False)]
+    workspace.deleteLater()
+
+
+def test_workspace_scan_on_open_skips_when_no_last_scan(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    qt_app: QApplication,
+) -> None:
+    assert qt_app is not None
+    projects_root = tmp_path / "projects"
+    projects_root.mkdir()
+    manager = ProjectManager()
+    manager.create_project(projects_root, ProjectMetadata(case_name="No Scan On Open"))
+
+    source_root = tmp_path / "sources"
+    source_root.mkdir(parents=True, exist_ok=True)
+    manager.update_source_state(
+        root=source_root.as_posix(),
+        selected_folders=[],
+        warnings=[],
+        last_scan=None,
+    )
+
+    calls: list[tuple[bool, bool]] = []
+
+    monkeypatch.setattr(
+        "src.app.ui.stages.project_workspace.QTimer.singleShot",
+        staticmethod(lambda _delay, fn: fn()),
+    )
+
+    workspace = ProjectWorkspace()
+    monkeypatch.setattr(
+        workspace,
+        "_trigger_conversion",
+        lambda auto_run, show_no_new_notice=True: calls.append((auto_run, show_no_new_notice)),
+    )
+
+    workspace.set_project(manager)
+
+    assert calls == []
+    workspace.deleteLater()
+
+
 def test_project_metadata_dialog_updates_fields(qt_app: QApplication) -> None:
     assert qt_app is not None
     original = ProjectMetadata(

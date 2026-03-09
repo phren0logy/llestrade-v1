@@ -9,6 +9,7 @@ from typing import Callable, Mapping, Optional, Sequence
 from shiboken6 import isValid
 
 from src.app.core.project_manager import ProjectMetadata
+from src.app.workers.llm_backend import LLMExecutionBackend
 from src.app.workers import WorkerCoordinator
 from src.app.workers.report_worker import DraftReportWorker, ReportRefinementWorker
 
@@ -60,8 +61,14 @@ class ReportsService:
     _DRAFT_KEY = "report:draft"
     _REFINE_KEY = "report:refine"
 
-    def __init__(self, workers: WorkerCoordinator) -> None:
+    def __init__(
+        self,
+        workers: WorkerCoordinator,
+        *,
+        llm_backend: LLMExecutionBackend | None = None,
+    ) -> None:
         self._workers = workers
+        self._llm_backend = llm_backend
 
     # ------------------------------------------------------------------
     # Introspection
@@ -103,6 +110,7 @@ class ReportsService:
             max_report_tokens=config.max_report_tokens,
             placeholder_values=config.placeholder_values,
             project_name=config.project_name,
+            llm_backend=self._llm_backend,
         )
 
         return self._start_worker(
@@ -147,6 +155,7 @@ class ReportsService:
             max_report_tokens=config.max_report_tokens,
             placeholder_values=config.placeholder_values,
             project_name=config.project_name,
+            llm_backend=self._llm_backend,
         )
 
         return self._start_worker(

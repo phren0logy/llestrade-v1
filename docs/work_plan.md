@@ -155,6 +155,34 @@ Note: Highlights denominator uses PDFs only (pending/highlights reflect PDF-elig
   - `src/app/ui/workspace/controllers/bulk.py` (~755 lines)
   - `src/app/ui/workspace/controllers/reports.py` (~1,400 lines)
 
+## LLM Platform Plan (Gateway-First, 2026-03-08)
+
+### Decision
+
+- Pydantic AI Gateway is the target provider layer for new LLM execution work.
+- Existing provider integrations remain available as fallback during rollout.
+- Breaking changes are allowed while the app is pre-release.
+
+### Execution Milestones
+
+- [x] Foundation: decompose large controllers and introduce worker-stage contracts plus `LLMExecutionBackend`.
+- [ ] Report pilot: implement a report-only Pydantic AI Gateway backend behind a feature flag.
+- [ ] Bulk expansion: extend the Gateway backend to bulk map/reduce with parity on cancellation, checkpointing, and retry semantics.
+- [ ] Cutover: make Gateway the default path for report and bulk workflows after parity tests pass.
+- [ ] Cleanup: remove dead/duplicate orchestration paths and consolidate remaining provider wiring.
+
+### Rollout Gates
+
+- [ ] Deterministic test lane passes with Gateway enabled (`scripts/run_pytest_pr.sh`).
+- [ ] Failure semantics match current behavior (timeouts, empty output, cancellation, provider errors).
+- [ ] Observability emits stable stage/job/group trace attributes in both legacy and Gateway paths.
+- [ ] Document managed vs self-host Gateway operational requirements and fallback switches.
+
+### Qt 6.11 Track (Parallel)
+
+- [ ] Validate PySide/Qt 6.11 compatibility and enumerate required code/test updates.
+- [ ] Land compatibility fixes and pin final version after deterministic suite passes.
+
 
 ## Deferred Backlog
 

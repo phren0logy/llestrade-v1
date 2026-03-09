@@ -23,11 +23,18 @@ from src.app.core.report_prompt_context import (
     build_report_generation_placeholders,
     build_report_refinement_placeholders,
 )
+from src.config.observability import trace_operation
 from src.common.markdown import (
     PromptReference,
     apply_frontmatter,
     build_document_metadata,
     compute_file_checksum,
+)
+from .llm_backend import LLMExecutionBackend, LLMInvocationRequest
+from .stage_contracts import (
+    ReportDraftStageInput,
+    ReportRefineStageInput,
+    stage_trace_attributes,
 )
 
 from .report_common import ReportWorkerBase
@@ -58,6 +65,7 @@ class DraftReportWorker(ReportWorkerBase):
         max_report_tokens: int = 60_000,
         placeholder_values: Mapping[str, str] | None = None,
         project_name: str = "",
+        llm_backend: LLMExecutionBackend | None = None,
     ) -> None:
         super().__init__(
             worker_name="report-draft",
@@ -71,6 +79,7 @@ class DraftReportWorker(ReportWorkerBase):
             placeholder_values=placeholder_values,
             project_name=project_name,
             max_report_tokens=max_report_tokens,
+            llm_backend=llm_backend,
         )
         self._template_path = Path(template_path)
         self._transcript_path = Path(transcript_path) if transcript_path else None
@@ -281,18 +290,32 @@ class DraftReportWorker(ReportWorkerBase):
 
             pct = 5 + int(60 * index / max(total, 1))
             self.progress.emit(pct, f"Generating section {index} of {total}: {section.title}")
-            response = provider.generate(
-                prompt=prompt,
-                system_prompt=system_prompt,
+            stage_input = ReportDraftStageInput(
+                section_index=index,
+                section_total=total,
+                section_title=section.title,
+                provider_id=self._provider_id,
                 model=self._custom_model or self._model,
-                temperature=0.2,
                 max_tokens=self._max_report_tokens,
+                temperature=0.2,
             )
-            if not response.get("success"):
-                raise RuntimeError(
-                    response.get("error", f"Failed to generate section: {section.title}")
+            trace_attributes = stage_trace_attributes(stage_input)
+            with trace_operation("report_draft.invoke_llm", trace_attributes):
+                response = self._llm_backend.invoke(
+                    provider,
+                    LLMInvocationRequest(
+                        prompt=prompt,
+                        system_prompt=system_prompt,
+                        model=self._custom_model or self._model,
+                        temperature=0.2,
+                        max_tokens=self._max_report_tokens,
+                    ),
                 )
-            content = (response.get("content") or "").strip()
+            if not response.success:
+                raise RuntimeError(
+                    response.error or f"Failed to generate section: {section.title}"
+                )
+            content = response.content.strip()
             if not content:
                 raise RuntimeError(f"Generated section is empty: {section.title}")
             outputs.append(
@@ -400,6 +423,7 @@ class ReportRefinementWorker(ReportWorkerBase):
         max_report_tokens: int = 60_000,
         placeholder_values: Mapping[str, str] | None = None,
         project_name: str = "",
+        llm_backend: LLMExecutionBackend | None = None,
     ) -> None:
         super().__init__(
             worker_name="report-refine",
@@ -413,6 +437,7 @@ class ReportRefinementWorker(ReportWorkerBase):
             placeholder_values=placeholder_values,
             project_name=project_name,
             max_report_tokens=max_report_tokens,
+            llm_backend=llm_backend,
         )
         self._draft_path = Path(draft_path)
         self._template_path = Path(template_path) if template_path else None
@@ -643,20 +668,31 @@ class ReportRefinementWorker(ReportWorkerBase):
         system_prompt: str,
     ) -> tuple[str, Optional[str]]:
         provider = self._create_provider(system_prompt)
-        response = provider.generate(
-            prompt=prompt,
+        stage_input = ReportRefineStageInput(
+            provider_id=self._provider_id,
             model=self._custom_model or self._model,
-            system_prompt=system_prompt,
-            temperature=0.2,
             max_tokens=self._max_report_tokens,
+            temperature=0.2,
         )
-        if not response.get("success"):
-            raise RuntimeError(response.get("error", "Unknown error during refinement"))
-        content = (response.get("content") or "").strip()
+        trace_attributes = stage_trace_attributes(stage_input)
+        with trace_operation("report_refine.invoke_llm", trace_attributes):
+            response = self._llm_backend.invoke(
+                provider,
+                LLMInvocationRequest(
+                    prompt=prompt,
+                    system_prompt=system_prompt,
+                    model=self._custom_model or self._model,
+                    temperature=0.2,
+                    max_tokens=self._max_report_tokens,
+                ),
+            )
+        if not response.success:
+            raise RuntimeError(response.error or "Unknown error during refinement")
+        content = response.content.strip()
         if not content:
             raise RuntimeError("Refinement step returned empty content")
-        reasoning = response.get("reasoning") or response.get("thinking")
-        self._refine_usage = response.get("usage", {}).get("output_tokens")
+        reasoning = response.raw.get("reasoning") or response.raw.get("thinking")
+        self._refine_usage = response.usage.get("output_tokens")
         return content + "\n", reasoning
 
     def _build_refinement_manifest(

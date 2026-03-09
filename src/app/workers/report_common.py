@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
@@ -18,6 +19,7 @@ from src.common.llm.tokens import TokenCounter
 from src.common.markdown import PromptReference, SourceReference, compute_file_checksum
 
 from .base import DashboardWorker
+from .llm_backend import LegacyProviderBackend, LLMExecutionBackend
 
 # Mapping of Anthropic cloud model slugs to their AWS Bedrock equivalents.
 # Reference: https://docs.claude.com/en/api/claude-on-amazon-bedrock
@@ -29,6 +31,12 @@ _BEDROCK_MODEL_ALIASES: Dict[str, str] = {
     "claude-opus-4-1-20250805": "anthropic.claude-opus-4-1-20250805-v1:0",
 }
 _CITATION_ID_RE = re.compile(r"^ev_[a-z0-9]{8,64}$")
+
+
+@dataclass(frozen=True, slots=True)
+class _ProviderMetadata:
+    provider_name: str
+    default_model: str
 
 
 class ReportWorkerBase(DashboardWorker):
@@ -48,6 +56,7 @@ class ReportWorkerBase(DashboardWorker):
         placeholder_values: Mapping[str, str] | None,
         project_name: str,
         max_report_tokens: int,
+        llm_backend: LLMExecutionBackend | None = None,
     ) -> None:
         super().__init__(worker_name=worker_name)
         self._project_dir = project_dir
@@ -63,6 +72,7 @@ class ReportWorkerBase(DashboardWorker):
         effective_name = project_name or metadata.case_name or project_dir.name
         self._project_name = effective_name
         self._run_timestamp = datetime.now(timezone.utc)
+        self._llm_backend: LLMExecutionBackend = llm_backend or LegacyProviderBackend()
         try:
             self._citation_store: CitationStore | None = CitationStore(project_dir)
         except Exception:
@@ -273,6 +283,12 @@ class ReportWorkerBase(DashboardWorker):
     # Provider helpers
     # ------------------------------------------------------------------
     def _create_provider(self, system_prompt: str):
+        if not self._llm_backend.requires_native_provider():
+            return _ProviderMetadata(
+                provider_name=self._provider_id,
+                default_model=self._custom_model or self._model or "",
+            )
+
         settings = SecureSettings()
         api_key = settings.get_api_key(self._provider_id)
         kwargs = {

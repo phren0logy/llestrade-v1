@@ -176,6 +176,37 @@ def test_workspace_metrics_include_combined_last_run_input_count(tmp_path: Path,
     assert group_metrics.combined_is_stale is True
 
 
+def test_overlapping_groups_keep_pending_counts_isolated(tmp_path: Path, qt_app: QApplication) -> None:
+    assert qt_app is not None
+    manager = ProjectManager()
+    manager.create_project(tmp_path, ProjectMetadata(case_name="Overlap Metrics"))
+
+    converted = manager.project_dir / "converted_documents" / "folder"
+    converted.mkdir(parents=True, exist_ok=True)
+    (converted / "doc1.md").write_text("converted 1", encoding="utf-8")
+    (converted / "doc2.md").write_text("converted 2", encoding="utf-8")
+
+    group_all = manager.save_bulk_analysis_group(
+        BulkAnalysisGroup.create(name="All Docs", directories=["folder"])
+    )
+    group_single = manager.save_bulk_analysis_group(
+        BulkAnalysisGroup.create(name="Single Doc", files=["folder/doc1.md"])
+    )
+
+    outputs_dir = manager.project_dir / "bulk_analysis" / group_all.slug / "folder"
+    outputs_dir.mkdir(parents=True, exist_ok=True)
+    (outputs_dir / "doc1_analysis.md").write_text("analysis 1", encoding="utf-8")
+    (outputs_dir / "doc2_analysis.md").write_text("analysis 2", encoding="utf-8")
+
+    metrics = manager.get_workspace_metrics(refresh=True)
+    all_metrics = metrics.groups[group_all.group_id]
+    single_metrics = metrics.groups[group_single.group_id]
+
+    assert all_metrics.pending_bulk_analysis == 0
+    assert single_metrics.pending_bulk_analysis == 1
+    assert single_metrics.pending_files == ("folder/doc1.md",)
+
+
 def test_welcome_stage_uses_persisted_metrics(
     tmp_path: Path, qt_app: QApplication, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -244,6 +275,58 @@ def test_welcome_stage_refreshes_on_show_event(
         assert updated_label is not None
         updated_text = updated_label.text()
         assert "Bulk analysis: 1 of 1" in updated_text
+    finally:
+        stage.deleteLater()
+
+
+def test_welcome_stage_bedrock_status_uses_profile_hint(
+    tmp_path: Path,
+    qt_app: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert qt_app is not None
+    monkeypatch.setenv("FRD_SETTINGS_DIR", str(tmp_path / "settings_bedrock_profile"))
+    monkeypatch.setattr("src.app.ui.stages.welcome_stage.Path.home", staticmethod(lambda: tmp_path))
+    monkeypatch.delenv("AWS_PROFILE", raising=False)
+    monkeypatch.delenv("AWS_DEFAULT_PROFILE", raising=False)
+    monkeypatch.delenv("AWS_ACCESS_KEY_ID", raising=False)
+    monkeypatch.delenv("AWS_WEB_IDENTITY_TOKEN_FILE", raising=False)
+    monkeypatch.delenv("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI", raising=False)
+    monkeypatch.delenv("AWS_CONTAINER_CREDENTIALS_FULL_URI", raising=False)
+
+    stage = WelcomeStage()
+    try:
+        stage.settings.set(
+            "aws_bedrock_settings",
+            {"profile": "default", "region": None, "preferred_model": None},
+        )
+        assert stage._is_bedrock_available() is True
+    finally:
+        stage.deleteLater()
+
+
+def test_welcome_stage_bedrock_status_false_without_hints(
+    tmp_path: Path,
+    qt_app: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert qt_app is not None
+    monkeypatch.setenv("FRD_SETTINGS_DIR", str(tmp_path / "settings_bedrock_empty"))
+    monkeypatch.setattr("src.app.ui.stages.welcome_stage.Path.home", staticmethod(lambda: tmp_path))
+    monkeypatch.delenv("AWS_PROFILE", raising=False)
+    monkeypatch.delenv("AWS_DEFAULT_PROFILE", raising=False)
+    monkeypatch.delenv("AWS_ACCESS_KEY_ID", raising=False)
+    monkeypatch.delenv("AWS_WEB_IDENTITY_TOKEN_FILE", raising=False)
+    monkeypatch.delenv("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI", raising=False)
+    monkeypatch.delenv("AWS_CONTAINER_CREDENTIALS_FULL_URI", raising=False)
+
+    stage = WelcomeStage()
+    try:
+        stage.settings.set(
+            "aws_bedrock_settings",
+            {"profile": None, "region": None, "preferred_model": None},
+        )
+        assert stage._is_bedrock_available() is False
     finally:
         stage.deleteLater()
 

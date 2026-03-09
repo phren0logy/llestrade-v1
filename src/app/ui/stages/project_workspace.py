@@ -55,6 +55,7 @@ from src.app.ui.workspace.services import (
 )
 from src.app.workers import ConversionWorker, WorkerCoordinator, get_worker_pool
 from src.app.workers.highlight_worker import HighlightExtractionSummary
+from src.app.workers.llm_backend import LegacyProviderBackend, PydanticAIGatewayBackend
 from src.app.core.prompt_preview import generate_prompt_preview, PromptPreviewError
 from src.app.ui.widgets import BannerAction, SmartBanner
 
@@ -98,7 +99,13 @@ class ProjectWorkspace(QWidget):
         self._documents_controller: DocumentsController | None = None
         self._bulk_service = BulkAnalysisService(self._workers)
         self._highlight_service = HighlightsService(self._workers)
-        self._reports_service = ReportsService(self._workers)
+        if self._feature_flags.pydantic_ai_gateway_enabled:
+            reports_backend = PydanticAIGatewayBackend(
+                fallback_backend=LegacyProviderBackend(),
+            )
+        else:
+            reports_backend = LegacyProviderBackend()
+        self._reports_service = ReportsService(self._workers, llm_backend=reports_backend)
         self._build_ui()
         if project_manager:
             self.set_project(project_manager)
@@ -158,7 +165,9 @@ class ProjectWorkspace(QWidget):
         self._highlights_banner = tab.highlights_banner
         self._bulk_banner = tab.bulk_banner
 
-        self._rescan_button.clicked.connect(lambda: self._trigger_conversion(auto_run=False))
+        self._rescan_button.clicked.connect(
+            lambda: self._trigger_conversion(auto_run=False, show_no_new_notice=True)
+        )
         self._source_tree.itemChanged.connect(self._on_source_item_changed)
         return tab
 
@@ -198,6 +207,7 @@ class ProjectWorkspace(QWidget):
 
     def set_project(self, project_manager: ProjectManager) -> None:
         """Attach the workspace to a project manager."""
+        had_prior_scan = bool(project_manager.source_state.last_scan)
         self._project_manager = project_manager
         self._documents_controller.set_project(project_manager)
         if self._bulk_controller:
@@ -218,6 +228,12 @@ class ProjectWorkspace(QWidget):
             self._edit_metadata_button.setEnabled(True)
         self._update_metadata_label()
         self.refresh()
+        self._maybe_focus_bulk_tab_on_open()
+        if self._project_manager and had_prior_scan:
+            QTimer.singleShot(
+                0,
+                lambda: self._trigger_conversion(auto_run=False, show_no_new_notice=False),
+            )
 
     def project_manager(self) -> Optional[ProjectManager]:
         return self._project_manager
@@ -290,7 +306,7 @@ class ProjectWorkspace(QWidget):
     def begin_initial_conversion(self) -> None:
         """Trigger an initial scan/conversion after project creation."""
         if self._feature_flags.auto_run_conversion_on_create:
-            self._trigger_conversion(auto_run=True)
+            self._trigger_conversion(auto_run=True, show_no_new_notice=False)
 
     def _refresh_file_tracker(self) -> None:
         if self._documents_controller:
@@ -460,12 +476,29 @@ class ProjectWorkspace(QWidget):
     # ------------------------------------------------------------------
     # Source tree helpers
     # ------------------------------------------------------------------
-    def _trigger_conversion(self, auto_run: bool) -> None:
+    def _trigger_conversion(
+        self,
+        auto_run: bool,
+        *,
+        show_no_new_notice: bool = True,
+    ) -> None:
         if self._documents_controller:
-            self._documents_controller.trigger_conversion(auto_run)
+            self._documents_controller.trigger_conversion(
+                auto_run,
+                show_no_new_notice=show_no_new_notice,
+            )
 
     def _handle_rescan_clicked(self) -> None:
-        self._trigger_conversion(auto_run=False)
+        self._trigger_conversion(auto_run=False, show_no_new_notice=True)
+
+    def _maybe_focus_bulk_tab_on_open(self) -> None:
+        if not self._bulk_analysis_tab or not self._workspace_metrics:
+            return
+        if self._workspace_metrics.dashboard.imported_total <= 0:
+            return
+        index = self._tabs.indexOf(self._bulk_analysis_tab)
+        if index != -1:
+            self._tabs.setCurrentIndex(index)
 
     def _select_source_root(self) -> None:
         if not self._project_manager or not self._project_manager.project_dir:
@@ -734,7 +767,7 @@ class ProjectWorkspace(QWidget):
         for job in jobs:
             self._inflight_sources.discard(job.source_path)
 
-        timestamp = datetime.utcnow().isoformat()
+        timestamp = datetime.now(timezone.utc).isoformat()
         warnings = self._documents_controller.current_warnings if self._documents_controller else []
         self._project_manager.update_source_state(last_scan=timestamp, warnings=warnings)
         self._update_last_scan_label()
@@ -745,6 +778,9 @@ class ProjectWorkspace(QWidget):
             self._highlights_controller.set_conversion_running(False)
         self._refresh_file_tracker()
         self._refresh_highlights_view()
+        if self._feature_flags.bulk_analysis_groups_enabled:
+            self._refresh_bulk_analysis_groups()
+            self._auto_run_pending_bulk_groups()
         if failures:
             error_text = "\n".join(self._conversion_errors) or "Unknown errors"
             QMessageBox.warning(
@@ -752,6 +788,18 @@ class ProjectWorkspace(QWidget):
                 "Conversion Issues",
                 "Some documents failed to convert:\n\n" + error_text,
             )
+
+    def _auto_run_pending_bulk_groups(self) -> None:
+        if not self._bulk_controller or not self._project_manager:
+            return
+        try:
+            groups = self._project_manager.list_bulk_analysis_groups()
+        except Exception:
+            LOGGER.exception("Failed to list bulk analysis groups for auto-run")
+            return
+        started = self._bulk_controller.auto_run_pending_groups(groups)
+        if started:
+            LOGGER.info("Auto-started pending bulk runs for %s group(s)", started)
 
     # ------------------------------------------------------------------
     # Highlight extraction helpers
@@ -780,12 +828,18 @@ class ProjectWorkspace(QWidget):
         manager = self._project_manager
         if not manager or not manager.project_dir:
             return
+        existing_names = [
+            candidate.name
+            for candidate in manager.list_bulk_analysis_groups()
+            if candidate.group_id != group.group_id
+        ]
         dialog = BulkAnalysisGroupDialog(
             manager.project_dir,
             self,
             metadata=manager.metadata,
             placeholder_values=manager.placeholder_mapping(),
             existing_group=group,
+            existing_names=existing_names,
         )
         if dialog.exec() == QDialog.Accepted:
             try:
@@ -801,11 +855,13 @@ class ProjectWorkspace(QWidget):
             return
         if not self._project_manager or not self._project_manager.project_dir:
             return
+        existing_names = [group.name for group in self._project_manager.list_bulk_analysis_groups()]
         dialog = BulkAnalysisGroupDialog(
             self._project_manager.project_dir,
             self,
             metadata=self._project_manager.metadata,
             placeholder_values=self._project_manager.placeholder_mapping(),
+            existing_names=existing_names,
         )
         if dialog.exec() == QDialog.Accepted:
             group = dialog.build_group()

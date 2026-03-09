@@ -41,6 +41,7 @@ from src.app.core.project_manager import ProjectMetadata
 from src.app.core.secure_settings import SecureSettings
 from src.common.llm.base import BaseLLMProvider
 from src.common.llm.factory import create_provider
+from src.config.observability import trace_operation
 from src.common.markdown import (
     PromptReference,
     SourceReference,
@@ -52,6 +53,8 @@ from src.common.markdown import (
 
 from .base import DashboardWorker
 from .checkpoint_manager import CheckpointManager, _sha256
+from .llm_backend import LLMExecutionBackend, LLMInvocationRequest, LegacyProviderBackend
+from .stage_contracts import BulkReduceStageInput, stage_trace_attributes
 
 LOGGER = logging.getLogger(__name__)
 
@@ -203,6 +206,7 @@ class BulkReduceWorker(DashboardWorker):
         force_rerun: bool = False,
         placeholder_values: Mapping[str, str] | None = None,
         project_name: str = "",
+        llm_backend: LLMExecutionBackend | None = None,
     ) -> None:
         super().__init__(worker_name="bulk_reduce")
         self._project_dir = project_dir
@@ -212,6 +216,7 @@ class BulkReduceWorker(DashboardWorker):
         self._base_placeholders = dict(placeholder_values or {})
         self._project_name = project_name
         self._run_timestamp = datetime.now(timezone.utc)
+        self._llm_backend: LLMExecutionBackend = llm_backend or LegacyProviderBackend()
         try:
             self._citation_store: CitationStore | None = CitationStore(project_dir)
         except Exception:
@@ -932,16 +937,30 @@ class BulkReduceWorker(DashboardWorker):
     ) -> str:
         if self._cancel_event.is_set():
             raise BulkAnalysisCancelled
-        response = provider.generate(
-            prompt=prompt,
+        stage_input = BulkReduceStageInput(
+            group_id=self._group.group_id,
+            group_name=self._group.name,
+            group_slug=getattr(self._group, "slug", None) or self._group.folder_name,
+            provider_id=provider_cfg.provider_id,
             model=provider_cfg.model,
-            system_prompt=system_prompt,
-            temperature=provider_cfg.temperature,
             max_tokens=max_tokens,
+            temperature=provider_cfg.temperature,
         )
-        if not response.get("success"):
-            raise RuntimeError(response.get("error", "Unknown LLM error"))
-        content = (response.get("content") or "").strip()
+        trace_attributes = stage_trace_attributes(stage_input)
+        with trace_operation("bulk_reduce.invoke_llm", trace_attributes):
+            response = self._llm_backend.invoke(
+                provider,
+                LLMInvocationRequest(
+                    prompt=prompt,
+                    model=provider_cfg.model,
+                    system_prompt=system_prompt,
+                    temperature=provider_cfg.temperature,
+                    max_tokens=max_tokens,
+                ),
+            )
+        if not response.success:
+            raise RuntimeError(response.error or "Unknown LLM error")
+        content = response.content.strip()
         if not content:
             raise RuntimeError("LLM returned empty response")
         return content

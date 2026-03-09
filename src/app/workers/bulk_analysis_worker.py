@@ -36,6 +36,7 @@ from src.app.core.secure_settings import SecureSettings
 from src.common.llm.base import BaseLLMProvider
 from src.common.llm.factory import create_provider
 from src.common.llm.tokens import TokenCounter
+from src.config.observability import trace_operation
 from src.common.markdown import (
     PromptReference,
     SourceReference,
@@ -47,6 +48,8 @@ from src.common.markdown import (
 
 from .base import DashboardWorker
 from .checkpoint_manager import CheckpointManager, _sha256
+from .llm_backend import LLMExecutionBackend, LLMInvocationRequest, LegacyProviderBackend
+from .stage_contracts import BulkMapStageInput, stage_trace_attributes
 
 
 @dataclass(frozen=True)
@@ -215,6 +218,7 @@ class BulkAnalysisWorker(DashboardWorker):
         force_rerun: bool = False,
         placeholder_values: Mapping[str, str] | None = None,
         project_name: str = "",
+        llm_backend: LLMExecutionBackend | None = None,
     ) -> None:
         super().__init__(worker_name="bulk_analysis")
 
@@ -227,6 +231,7 @@ class BulkAnalysisWorker(DashboardWorker):
         self._base_placeholders = dict(placeholder_values or {})
         self._project_name = project_name
         self._run_timestamp = datetime.now(timezone.utc)
+        self._llm_backend: LLMExecutionBackend = llm_backend or LegacyProviderBackend()
         self._invoke_compat_warning_emitted = False
         try:
             self._citation_store: CitationStore | None = CitationStore(project_dir)
@@ -915,16 +920,31 @@ class BulkAnalysisWorker(DashboardWorker):
                     f"{prompt_tokens} tokens > {input_budget} budget"
                 )
 
-        response = provider.generate(
-            prompt=prompt,
+        stage_input = BulkMapStageInput(
+            group_id=self._group.group_id,
+            group_name=self._group.name,
+            group_slug=getattr(self._group, "slug", None) or self._group.folder_name,
+            provider_id=provider_config.provider_id,
             model=provider_config.model,
-            system_prompt=system_prompt,
-            temperature=temperature,
+            context_label=context_label,
             max_tokens=max_tokens,
+            temperature=temperature,
         )
-        if not response.get("success"):
-            raise RuntimeError(response.get("error", "Unknown LLM error"))
-        content = (response.get("content") or "").strip()
+        trace_attributes = stage_trace_attributes(stage_input)
+        with trace_operation("bulk_analysis.invoke_llm", trace_attributes):
+            response = self._llm_backend.invoke(
+                provider,
+                LLMInvocationRequest(
+                    prompt=prompt,
+                    model=provider_config.model,
+                    system_prompt=system_prompt,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                ),
+            )
+        if not response.success:
+            raise RuntimeError(response.error or "Unknown LLM error")
+        content = response.content.strip()
         if not content:
             raise RuntimeError("LLM returned empty response")
         return content

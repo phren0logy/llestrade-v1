@@ -3,28 +3,30 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
-from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Set, TYPE_CHECKING
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QTextCursor, QColor
 from PySide6.QtWidgets import (
-    QHBoxLayout,
     QMessageBox,
-    QPushButton,
     QTableWidgetItem,
     QTreeWidgetItem,
     QWidget,
 )
 
 from src.app.core.bulk_analysis_groups import BulkAnalysisGroup
+from src.app.core.bulk_analysis_runner import load_prompts
 from src.app.core.file_tracker import WorkspaceGroupMetrics, WorkspaceMetrics
+from src.app.core.prompt_placeholders import get_prompt_spec
 from src.app.ui.workspace.bulk_tab import BulkAnalysisTab
 from src.app.ui.workspace.services import BulkAnalysisService
-from src.app.core.bulk_analysis_runner import load_prompts
-from src.app.core.prompt_placeholders import get_prompt_spec
-from src.app.core.placeholders.analyzer import analyse_prompts, PlaceholderAnalysis
+from src.app.core.placeholders.analyzer import PlaceholderAnalysis
+from .bulk_placeholders import analyse_group_placeholders
+from .bulk_view import (
+    append_log_message as append_log_to_widget,
+    build_action_widget,
+    build_placeholder_item,
+    build_status_text,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from src.app.core.project_manager import ProjectManager
@@ -206,32 +208,11 @@ class BulkAnalysisController:
         table.setItem(row, 3, status_item)
 
         analysis, missing_required, missing_optional = self._analyse_placeholders(group)
-        placeholder_item = QTableWidgetItem("—")
-        placeholder_item.setTextAlignment(Qt.AlignCenter)
-        if analysis:
-            tooltip_lines: List[str] = []
-            if analysis.used:
-                tooltip_lines.append("Used placeholders: " + ", ".join(sorted(analysis.used)))
-            unused = analysis.unused - analysis.used
-            if unused:
-                tooltip_lines.append("Unused placeholders: " + ", ".join(sorted(unused)))
-            if missing_required:
-                placeholder_item.setText(f"Missing required ({len(missing_required)})")
-                placeholder_item.setForeground(QColor(178, 34, 34))
-                tooltip_lines.append(
-                    "Missing required: " + ", ".join(sorted(f"{{{key}}}" for key in missing_required))
-                )
-            elif missing_optional:
-                placeholder_item.setText(f"Missing optional ({len(missing_optional)})")
-                placeholder_item.setForeground(QColor(184, 134, 11))
-                tooltip_lines.append(
-                    "Missing optional: " + ", ".join(sorted(f"{{{key}}}" for key in missing_optional))
-                )
-            else:
-                placeholder_item.setText("OK")
-                placeholder_item.setForeground(QColor(27, 94, 32))
-            if tooltip_lines:
-                placeholder_item.setToolTip("\n".join(tooltip_lines))
+        placeholder_item = build_placeholder_item(
+            analysis,
+            missing_required,
+            missing_optional,
+        )
         table.setItem(row, 4, placeholder_item)
 
         action_widget = self._build_action_widget(group, metrics)
@@ -262,100 +243,33 @@ class BulkAnalysisController:
         group: BulkAnalysisGroup,
         metrics: WorkspaceGroupMetrics | None,
     ) -> str:
-        gid = group.group_id
-        op_type = getattr(metrics, "operation", "per_document") if metrics else group.operation or "per_document"
-
-        if gid in self._cancelling_groups:
-            return "Cancelling…"
-        if gid in self._running_groups:
-            completed, total = self._progress_map.get(gid, (0, 0))
-            if total:
-                return f"Running ({completed}/{total})"
-            return "Running…"
-
-        if op_type == "combined":
-            input_count = getattr(metrics, "combined_input_count", 0) if metrics else 0
-            if input_count == 0:
-                return "No inputs"
-            if metrics and getattr(metrics, "combined_is_stale", False):
-                return "Stale"
-            return "Ready"
-
-        converted_count = metrics.converted_count if metrics else 0
-        if not converted_count:
-            return "No converted files"
-        if metrics and metrics.pending_bulk_analysis:
-            return f"Pending bulk ({metrics.pending_bulk_analysis})"
-        return "Ready"
+        return build_status_text(
+            group=group,
+            metrics=metrics,
+            running_groups=self._running_groups,
+            cancelling_groups=self._cancelling_groups,
+            progress_map=self._progress_map,
+        )
 
     def _build_action_widget(
         self,
         group: BulkAnalysisGroup,
         metrics: WorkspaceGroupMetrics | None,
     ) -> QWidget:
-        widget = QWidget()
-        layout = QHBoxLayout(widget)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(6)
-
-        is_running = group.group_id in self._running_groups
-        is_cancelling = group.group_id in self._cancelling_groups
-        op_type = getattr(metrics, "operation", "per_document") if metrics else group.operation or "per_document"
-
-        if op_type == "combined":
-            input_count = getattr(metrics, "combined_input_count", 0) if metrics else 0
-
-            run_combined = QPushButton("Run Combined")
-            run_combined.setEnabled(input_count > 0 and not is_running)
-            run_combined.clicked.connect(lambda _, g=group: self.start_combined_run(g, False))
-            layout.addWidget(run_combined)
-
-            run_combined_all = QPushButton("Run Combined All")
-            run_combined_all.setEnabled(input_count > 0 and not is_running)
-            run_combined_all.clicked.connect(lambda _, g=group: self.start_combined_run(g, True))
-            layout.addWidget(run_combined_all)
-        else:
-            pending_count = metrics.pending_bulk_analysis if metrics else None
-            converted_count = metrics.converted_count if metrics else 0
-
-            run_pending = QPushButton("Run Pending")
-            run_pending.setEnabled((pending_count or 0) > 0 and not is_running)
-            run_pending.clicked.connect(lambda _, g=group: self.start_map_run(g, False))
-            layout.addWidget(run_pending)
-
-            run_all = QPushButton("Run All")
-            run_all.setEnabled(converted_count > 0 and not is_running)
-            run_all.clicked.connect(lambda _, g=group: self.start_map_run(g, True))
-            layout.addWidget(run_all)
-
-        cancel_button = QPushButton("Cancel")
-        cancel_button.setEnabled(is_running)
-        cancel_button.clicked.connect(lambda _, g=group: self.cancel_run(g))
-        layout.addWidget(cancel_button)
-
-        edit_button = QPushButton("Edit…")
-        edit_button.setEnabled(not is_running and not is_cancelling)
-        edit_button.clicked.connect(lambda _, g=group: self._on_edit_group(g))
-        layout.addWidget(edit_button)
-
-        open_button = QPushButton("Open Folder")
-        open_button.clicked.connect(lambda _, g=group: self._on_open_group_folder(g))
-        layout.addWidget(open_button)
-
-        prompt_button = QPushButton("Preview Prompt")
-        prompt_button.clicked.connect(lambda _, g=group: self._on_show_prompt_preview(g))
-        layout.addWidget(prompt_button)
-
-        combined_button = QPushButton("Open Combined Output")
-        combined_button.clicked.connect(lambda _, g=group: self._on_open_latest_combined(g))
-        layout.addWidget(combined_button)
-
-        delete_button = QPushButton("Delete")
-        delete_button.clicked.connect(lambda _, g=group: self._on_delete_group(g))
-        layout.addWidget(delete_button)
-
-        layout.addStretch()
-        return widget
+        return build_action_widget(
+            group=group,
+            metrics=metrics,
+            is_running=group.group_id in self._running_groups,
+            is_cancelling=group.group_id in self._cancelling_groups,
+            on_run_map=lambda g, force: self.start_map_run(g, force),
+            on_run_combined=lambda g, force: self.start_combined_run(g, force),
+            on_cancel=self.cancel_run,
+            on_edit=self._on_edit_group,
+            on_open_group_folder=self._on_open_group_folder,
+            on_preview_prompt=self._on_show_prompt_preview,
+            on_open_latest_combined=self._on_open_latest_combined,
+            on_delete=self._on_delete_group,
+        )
 
     def _refresh_group_tree(self, groups: Sequence[BulkAnalysisGroup]) -> None:
         tree = self._tab.group_tree
@@ -370,132 +284,103 @@ class BulkAnalysisController:
         tree.expandAll()
 
     def _analyse_placeholders(self, group: BulkAnalysisGroup) -> tuple[PlaceholderAnalysis | None, set[str], set[str]]:
-        manager = self._project_manager
-        if not manager or not manager.project_dir:
-            return None, set(), set()
-        try:
-            bundle = load_prompts(Path(manager.project_dir), group, manager.metadata)
-        except Exception:
-            return None, set(), set()
-
-        values = manager.placeholder_mapping()
-
-        metadata = getattr(manager, "metadata", None)
-        if metadata:
-            values.setdefault("subject_name", metadata.subject_name or metadata.case_name or "")
-            values.setdefault("subject_dob", metadata.date_of_birth or "")
-            values.setdefault("case_info", metadata.case_description or "")
-            values.setdefault("case_name", metadata.case_name or "")
-
-        required: set[str] = set()
-        optional: set[str] = set()
-        if group.placeholder_requirements:
-            for key, is_required in group.placeholder_requirements.items():
-                if is_required:
-                    required.add(key)
-                else:
-                    optional.add(key)
-        else:
-            user_spec = get_prompt_spec("document_bulk_analysis_prompt")
-            if user_spec:
-                required.update(user_spec.required)
-                optional.update(user_spec.optional)
-            system_spec = get_prompt_spec("document_analysis_system_prompt")
-            if system_spec:
-                required.update(system_spec.required)
-                optional.update(system_spec.optional)
-
-        if group.operation == "per_document":
-            required.add("document_content")
-            values.setdefault("document_content", "<document>")
-            if group.files:
-                values.setdefault("document_name", group.files[0])
-            else:
-                values.setdefault("document_name", "<document>")
-        else:
-            optional.update({
-                "reduce_source_list",
-                "reduce_source_table",
-                "reduce_source_count",
-            })
-
-        dynamic_keys = {
-            "document_content",
-            "source_pdf_filename",
-            "source_pdf_relative_path",
-            "source_pdf_absolute_path",
-            "source_pdf_absolute_url",
-            "reduce_source_list",
-            "reduce_source_table",
-            "reduce_source_count",
-        }
-
-        analysis = analyse_prompts(
-            bundle.system_template,
-            bundle.user_template,
-            available_values=values,
-            required_keys=required,
-            optional_keys=optional,
+        return analyse_group_placeholders(
+            self._project_manager,
+            group,
+            prompt_loader=load_prompts,
+            prompt_spec_getter=get_prompt_spec,
         )
-
-        missing_required = set(analysis.missing_required) - dynamic_keys
-        missing_optional = set(analysis.missing_optional) - dynamic_keys
-        return analysis, missing_required, missing_optional
 
     # ------------------------------------------------------------------
     # Actions
     # ------------------------------------------------------------------
-    def start_map_run(self, group: BulkAnalysisGroup, force_rerun: bool) -> None:
+    def auto_run_pending_groups(self, groups: Sequence[BulkAnalysisGroup]) -> int:
+        """Start pending per-document runs without modal prompts.
+
+        Returns the number of groups successfully started.
+        """
+        started = 0
+        for group in groups:
+            if (group.operation or "per_document") != "per_document":
+                continue
+            if group.group_id in self._running_groups or group.group_id in self._cancelling_groups:
+                continue
+            if self.start_map_run(group, force_rerun=False, interactive=False):
+                started += 1
+        return started
+
+    def start_map_run(
+        self,
+        group: BulkAnalysisGroup,
+        force_rerun: bool,
+        *,
+        interactive: bool = True,
+    ) -> bool:
         if not self._feature_enabled:
-            return
+            return False
         manager = self._project_manager
         if not manager or not manager.project_dir:
-            QMessageBox.warning(self._workspace, "Bulk Analysis", "The project directory is not available.")
-            return
+            if interactive:
+                QMessageBox.warning(self._workspace, "Bulk Analysis", "The project directory is not available.")
+            return False
 
         gid = group.group_id
         if gid in self._running_groups:
-            QMessageBox.information(
-                self._workspace,
-                "Already Running",
-                f"Bulk analysis for '{group.name}' is already in progress.",
-            )
-            return
+            if interactive:
+                QMessageBox.information(
+                    self._workspace,
+                    "Already Running",
+                    f"Bulk analysis for '{group.name}' is already in progress.",
+                )
+            return False
 
         metrics = self._resolve_group_metrics(gid)
         if not metrics:
-            QMessageBox.warning(
-                self._workspace,
-                "Bulk Analysis",
-                "Project metrics are unavailable. Re-scan sources before running bulk analysis.",
-            )
+            if interactive:
+                QMessageBox.warning(
+                    self._workspace,
+                    "Bulk Analysis",
+                    "Project metrics are unavailable. Re-scan sources before running bulk analysis.",
+                )
+            else:
+                self._handle_log(gid, f"Skipping '{group.name}': workspace metrics unavailable.")
             self._on_refresh_groups()
-            return
+            return False
 
         if force_rerun:
             files = list(metrics.converted_files)
             if not files:
-                QMessageBox.warning(
-                    self._workspace,
-                    "No Converted Documents",
-                    "This group does not have any converted documents yet. Run conversion first.",
-                )
-                return
+                if interactive:
+                    QMessageBox.warning(
+                        self._workspace,
+                        "No Converted Documents",
+                        "This group does not have any converted documents yet. Run conversion first.",
+                    )
+                return False
         else:
             pending = list(metrics.pending_files)
             if pending:
                 files = pending
             else:
-                QMessageBox.information(
-                    self._workspace,
-                    "Up to Date",
-                    "All documents already have bulk analysis results. Use 'Run All' to re-process everything.",
-                )
-                return
+                if interactive:
+                    QMessageBox.information(
+                        self._workspace,
+                        "Up to Date",
+                        "All documents already have bulk analysis results. Use 'Run All' to re-process everything.",
+                    )
+                return False
 
         analysis, missing_required, missing_optional = self._analyse_placeholders(group)
         if analysis:
             if missing_required or missing_optional:
+                if not interactive:
+                    missing = sorted(missing_required | missing_optional)
+                    missing_text = ", ".join(f"{{{name}}}" for name in missing)
+                    self._handle_log(
+                        gid,
+                        f"Skipping '{group.name}': unresolved placeholders ({missing_text}).",
+                    )
+                    return False
                 messages: list[str] = []
                 if missing_required:
                     messages.append(
@@ -516,7 +401,7 @@ class BulkAnalysisController:
                     QMessageBox.No,
                 )
                 if reply != QMessageBox.Yes:
-                    return
+                    return False
 
         provider_default = (
             (manager.settings or {}).get("llm_provider", ""),
@@ -551,16 +436,18 @@ class BulkAnalysisController:
             self._running_groups.discard(gid)
             self._progress_map.pop(gid, None)
             self._failures.pop(gid, None)
-            QMessageBox.information(
-                self._workspace,
-                "Already Running",
-                f"Bulk analysis for '{group.name}' is already in progress.",
-            )
-            return
+            if interactive:
+                QMessageBox.information(
+                    self._workspace,
+                    "Already Running",
+                    f"Bulk analysis for '{group.name}' is already in progress.",
+                )
+            return False
 
         mode_label = "all documents" if force_rerun else "pending documents"
         self._handle_log(gid, f"Starting bulk analysis for '{group.name}' ({len(files)} {mode_label}).")
         self._on_refresh_groups()
+        return True
 
     def start_combined_run(self, group: BulkAnalysisGroup, force_rerun: bool) -> None:
         if not self._feature_enabled:
@@ -721,12 +608,7 @@ class BulkAnalysisController:
 
     def _handle_log(self, group_id: str, message: str) -> None:
         LOGGER.info("[BulkAnalysis][%s] %s", group_id, message)
-        timestamp = datetime.now().strftime("%H:%M:%S")
-        formatted = f"[{timestamp}] {message}"
-        cursor = self._tab.log_text.textCursor()
-        cursor.movePosition(QTextCursor.End)
-        cursor.insertText(formatted + "\n")
-        self._tab.log_text.setTextCursor(cursor)
+        append_log_to_widget(self._tab.log_text, message, timestamp=True)
         self.set_info_message(message)
 
     def _handle_finished(self, group_id: str, successes: int, failures: int, *, operation: str) -> None:
@@ -764,10 +646,7 @@ class BulkAnalysisController:
         self._tab.info_label.setText(message)
 
     def append_log_message(self, message: str) -> None:
-        cursor = self._tab.log_text.textCursor()
-        cursor.movePosition(QTextCursor.End)
-        cursor.insertText(message + "\n")
-        self._tab.log_text.setTextCursor(cursor)
+        append_log_to_widget(self._tab.log_text, message, timestamp=False)
 
     def _refresh_groups_safely(self, relative_path: str) -> None:
         self._tab.info_label.setText(f"Processing… {relative_path}")

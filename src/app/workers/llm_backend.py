@@ -1,0 +1,292 @@
+"""LLM execution backend contracts used by worker pipelines."""
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass, field
+from typing import Any, Dict, Mapping, Optional, Protocol
+
+
+@dataclass(frozen=True, slots=True)
+class LLMInvocationRequest:
+    """Typed request contract for a single LLM invocation."""
+
+    prompt: str
+    system_prompt: Optional[str]
+    model: Optional[str]
+    temperature: float
+    max_tokens: int
+    extra: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class LLMInvocationResult:
+    """Typed response contract returned by execution backends."""
+
+    success: bool
+    content: str
+    error: Optional[str]
+    usage: Dict[str, Any]
+    provider: Optional[str]
+    model: Optional[str]
+    raw: Dict[str, Any]
+
+    @classmethod
+    def from_provider_response(cls, payload: Mapping[str, Any]) -> "LLMInvocationResult":
+        usage = payload.get("usage")
+        if not isinstance(usage, dict):
+            usage = {}
+        return cls(
+            success=bool(payload.get("success")),
+            content=str(payload.get("content") or ""),
+            error=(str(payload.get("error")) if payload.get("error") else None),
+            usage=dict(usage),
+            provider=(str(payload.get("provider")) if payload.get("provider") else None),
+            model=(str(payload.get("model")) if payload.get("model") else None),
+            raw=dict(payload),
+        )
+
+
+class LLMExecutionBackend(Protocol):
+    """Contract for pluggable LLM execution backends."""
+
+    def requires_native_provider(self) -> bool:
+        """Whether worker code must initialize a native provider client."""
+
+    def invoke(self, provider: Any, request: LLMInvocationRequest) -> LLMInvocationResult:
+        """Execute `request` against the given provider."""
+
+
+class LegacyProviderBackend:
+    """Default backend that forwards directly to existing provider.generate calls."""
+
+    def requires_native_provider(self) -> bool:
+        return True
+
+    def invoke(self, provider: Any, request: LLMInvocationRequest) -> LLMInvocationResult:
+        kwargs: Dict[str, Any] = {
+            "prompt": request.prompt,
+            "model": request.model,
+            "system_prompt": request.system_prompt,
+            "temperature": request.temperature,
+            "max_tokens": request.max_tokens,
+        }
+        kwargs.update(dict(request.extra))
+        response = provider.generate(**kwargs)
+        if not isinstance(response, dict):
+            response = {"success": False, "error": "Provider returned non-dict response"}
+        return LLMInvocationResult.from_provider_response(response)
+
+
+class PydanticAIGatewayBackend:
+    """LLM backend using Pydantic AI Gateway model providers.
+
+    This backend is intentionally scoped for worker-style single-shot calls.
+    Agent/tool orchestration remains in worker code.
+    """
+
+    _FORWARDED_SETTINGS: tuple[str, ...] = (
+        "top_p",
+        "seed",
+        "presence_penalty",
+        "frequency_penalty",
+        "reasoning_effort",
+    )
+
+    def __init__(
+        self,
+        *,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        route: str | None = None,
+        fallback_backend: LLMExecutionBackend | None = None,
+        fallback_on_error: bool = False,
+    ) -> None:
+        self._api_key = api_key or os.getenv("PYDANTIC_AI_GATEWAY_API_KEY") or os.getenv("PAIG_API_KEY")
+        self._base_url = base_url or os.getenv("PYDANTIC_AI_GATEWAY_BASE_URL") or os.getenv("PAIG_BASE_URL")
+        self._route = route or os.getenv("PYDANTIC_AI_GATEWAY_ROUTE")
+        self._fallback_backend = fallback_backend
+        self._fallback_on_error = fallback_on_error
+
+    def requires_native_provider(self) -> bool:
+        return False
+
+    def invoke(self, provider: Any, request: LLMInvocationRequest) -> LLMInvocationResult:
+        provider_id = self._resolve_provider_id(provider)
+        if not provider_id:
+            return self._fallback_or_error(
+                provider=provider,
+                request=request,
+                reason="Unable to resolve provider ID for Gateway backend",
+            )
+
+        model_name = request.model or self._resolve_default_model(provider)
+        if not model_name:
+            return self._fallback_or_error(
+                provider=provider,
+                request=request,
+                reason="No model configured for Gateway backend",
+            )
+
+        try:
+            model = self._build_model(provider_id=provider_id, model_name=model_name)
+            from pydantic_ai import Agent
+
+            model_settings: Dict[str, Any] = {
+                "temperature": request.temperature,
+                "max_tokens": request.max_tokens,
+            }
+            for key in self._FORWARDED_SETTINGS:
+                if key in request.extra:
+                    model_settings[key] = request.extra[key]
+
+            result = Agent(
+                model=model,
+                system_prompt=request.system_prompt or "",
+                retries=1,
+            ).run_sync(
+                request.prompt,
+                model_settings=model_settings,
+            )
+
+            content = str(result.output or "").strip()
+            if not content:
+                return LLMInvocationResult(
+                    success=False,
+                    content="",
+                    error="LLM returned empty response",
+                    usage={},
+                    provider=f"gateway/{provider_id}",
+                    model=model_name,
+                    raw={},
+                )
+
+            usage_obj = result.usage()
+            usage = {
+                "requests": int(getattr(usage_obj, "requests", 0) or 0),
+                "input_tokens": int(getattr(usage_obj, "input_tokens", 0) or 0),
+                "output_tokens": int(getattr(usage_obj, "output_tokens", 0) or 0),
+                "total_tokens": int(getattr(usage_obj, "input_tokens", 0) or 0)
+                + int(getattr(usage_obj, "output_tokens", 0) or 0),
+            }
+            details = getattr(usage_obj, "details", None)
+            if isinstance(details, dict) and details:
+                usage["details"] = dict(details)
+
+            run_id = getattr(result, "run_id", None)
+            raw: Dict[str, Any] = {}
+            if run_id:
+                raw["run_id"] = str(run_id)
+
+            return LLMInvocationResult(
+                success=True,
+                content=content,
+                error=None,
+                usage=usage,
+                provider=f"gateway/{provider_id}",
+                model=model_name,
+                raw=raw,
+            )
+        except Exception as exc:
+            if "not supported by Pydantic AI Gateway backend" in str(exc):
+                return self._fallback_or_error(
+                    provider=provider,
+                    request=request,
+                    reason=f"Gateway invocation failed: {exc}",
+                )
+            return self._fallback_or_error(
+                provider=provider,
+                request=request,
+                reason=f"Gateway invocation failed: {exc}",
+                fallback_on_error=True,
+            )
+
+    def _build_model(self, *, provider_id: str, model_name: str) -> Any:
+        from pydantic_ai.providers.gateway import gateway_provider
+
+        if provider_id == "anthropic":
+            from pydantic_ai.models.anthropic import AnthropicModel
+
+            gateway = gateway_provider(
+                "anthropic", api_key=self._api_key, base_url=self._base_url, route=self._route
+            )
+            return AnthropicModel(model_name, provider=gateway)
+
+        if provider_id == "anthropic_bedrock":
+            from pydantic_ai.models.bedrock import BedrockConverseModel
+
+            gateway = gateway_provider(
+                "bedrock", api_key=self._api_key, base_url=self._base_url, route=self._route
+            )
+            return BedrockConverseModel(model_name, provider=gateway)
+
+        if provider_id == "gemini":
+            from pydantic_ai.models.google import GoogleModel
+
+            gateway = gateway_provider(
+                "google-vertex", api_key=self._api_key, base_url=self._base_url, route=self._route
+            )
+            return GoogleModel(model_name, provider=gateway)
+
+        if provider_id in {"openai", "azure_openai"}:
+            from pydantic_ai.models.openai import OpenAIChatModel
+
+            gateway = gateway_provider(
+                "openai", api_key=self._api_key, base_url=self._base_url, route=self._route
+            )
+            return OpenAIChatModel(model_name, provider=gateway)
+
+        raise RuntimeError(f"Provider '{provider_id}' is not supported by Pydantic AI Gateway backend")
+
+    def _fallback_or_error(
+        self,
+        *,
+        provider: Any,
+        request: LLMInvocationRequest,
+        reason: str,
+        fallback_on_error: bool = False,
+    ) -> LLMInvocationResult:
+        if self._fallback_backend and (not fallback_on_error or self._fallback_on_error):
+            return self._fallback_backend.invoke(provider, request)
+        return LLMInvocationResult(
+            success=False,
+            content="",
+            error=reason,
+            usage={},
+            provider=None,
+            model=request.model,
+            raw={},
+        )
+
+    @staticmethod
+    def _resolve_provider_id(provider: Any) -> str | None:
+        value = getattr(provider, "provider_name", None)
+        if callable(value):
+            try:
+                value = value()
+            except Exception:
+                value = None
+        if not value:
+            return None
+        return str(value)
+
+    @staticmethod
+    def _resolve_default_model(provider: Any) -> str | None:
+        value = getattr(provider, "default_model", None)
+        if callable(value):
+            try:
+                value = value()
+            except Exception:
+                value = None
+        if not value:
+            return None
+        return str(value)
+
+
+__all__ = [
+    "LLMExecutionBackend",
+    "LLMInvocationRequest",
+    "LLMInvocationResult",
+    "LegacyProviderBackend",
+    "PydanticAIGatewayBackend",
+]

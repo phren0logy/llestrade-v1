@@ -32,11 +32,13 @@ class FeatureFlags:
     dashboard_workspace_enabled: bool = True
     bulk_analysis_groups_enabled: bool = True
     auto_run_conversion_on_create: bool = True
+    pydantic_ai_gateway_enabled: bool = False
 
     ENV_MAPPING: ClassVar[Mapping[str, str]] = {
         "dashboard_workspace_enabled": "FRD_ENABLE_DASHBOARD_WORKSPACE",
         "bulk_analysis_groups_enabled": "FRD_ENABLE_BULK_ANALYSIS_GROUPS",
         "auto_run_conversion_on_create": "FRD_AUTO_RUN_CONVERSION",
+        "pydantic_ai_gateway_enabled": "FRD_ENABLE_PYDANTIC_AI_GATEWAY",
     }
 
     SETTINGS_KEY: ClassVar[str] = "feature_flags"

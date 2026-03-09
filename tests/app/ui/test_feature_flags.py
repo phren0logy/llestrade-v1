@@ -30,6 +30,7 @@ def test_defaults_without_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     assert flags.dashboard_workspace_enabled is True
     assert flags.bulk_analysis_groups_enabled is True
     assert flags.auto_run_conversion_on_create is True
+    assert flags.pydantic_ai_gateway_enabled is False
 
 
 def test_settings_override(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -39,6 +40,7 @@ def test_settings_override(monkeypatch: pytest.MonkeyPatch) -> None:
             "feature_flags": {
                 "bulk_analysis_groups_enabled": True,
                 "auto_run_conversion_on_create": False,
+                "pydantic_ai_gateway_enabled": True,
             }
         }
     )
@@ -47,18 +49,21 @@ def test_settings_override(monkeypatch: pytest.MonkeyPatch) -> None:
 
     assert flags.bulk_analysis_groups_enabled is True
     assert flags.auto_run_conversion_on_create is False
+    assert flags.pydantic_ai_gateway_enabled is True
 
 
 def test_environment_has_priority(monkeypatch: pytest.MonkeyPatch) -> None:
     _clear_env(monkeypatch)
     monkeypatch.setenv("FRD_ENABLE_BULK_ANALYSIS_GROUPS", "yes")
     monkeypatch.setenv("FRD_AUTO_RUN_CONVERSION", "0")
+    monkeypatch.setenv("FRD_ENABLE_PYDANTIC_AI_GATEWAY", "true")
 
     settings = _StubSettings(
         {
             "feature_flags": {
                 "bulk_analysis_groups_enabled": False,
                 "auto_run_conversion_on_create": True,
+                "pydantic_ai_gateway_enabled": False,
             }
         }
     )
@@ -67,3 +72,4 @@ def test_environment_has_priority(monkeypatch: pytest.MonkeyPatch) -> None:
 
     assert flags.bulk_analysis_groups_enabled is True
     assert flags.auto_run_conversion_on_create is False
+    assert flags.pydantic_ai_gateway_enabled is True

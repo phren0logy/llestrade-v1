@@ -16,6 +16,7 @@ _ = PySide6
 from src.app.core.project_manager import ProjectMetadata
 from src.app.core.report_inputs import REPORT_CATEGORY_CONVERTED
 from src.app.workers import report_worker
+from src.app.workers.llm_backend import LLMExecutionBackend, LLMInvocationRequest, LLMInvocationResult
 from src.app.workers.report_worker import DraftReportWorker, ReportRefinementWorker
 from src.app.workers import report_common
 from src.common.llm.base import BaseLLMProvider
@@ -80,6 +81,22 @@ class _StubProvider(BaseLLMProvider):
     @property
     def default_model(self) -> str:  # type: ignore[override]
         return "stub-model"
+
+
+class _NoNativeBackend(LLMExecutionBackend):
+    def requires_native_provider(self) -> bool:
+        return False
+
+    def invoke(self, provider, request: LLMInvocationRequest) -> LLMInvocationResult:  # noqa: ANN001
+        return LLMInvocationResult(
+            success=True,
+            content="stub output",
+            error=None,
+            usage={"output_tokens": 1},
+            provider="gateway/anthropic",
+            model=request.model,
+            raw={},
+        )
 
 
 def _write_generation_user_prompt(path: Path) -> None:
@@ -483,3 +500,44 @@ def test_draft_worker_supports_transcript_without_inputs(
     assert finished_results
     draft_path = Path(finished_results[0]["draft_path"])
     assert draft_path.exists()
+
+
+def test_gateway_backend_path_skips_native_provider_initialization(
+    tmp_path: Path,
+    qt_app: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert qt_app is not None
+    (common_paths, _refinement_system_prompt_path) = _prepare_common_files(tmp_path)
+    (
+        template_path,
+        generation_user_prompt_path,
+        _refinement_user_prompt_path,
+        generation_system_prompt_path,
+    ) = common_paths
+
+    def _fail_create_provider(**_kwargs):  # noqa: ANN001
+        raise AssertionError("create_provider should not be called for no-native backends")
+
+    monkeypatch.setattr(report_common, "create_provider", _fail_create_provider, raising=False)
+
+    worker = DraftReportWorker(
+        project_dir=tmp_path,
+        inputs=[(REPORT_CATEGORY_CONVERTED, "converted_documents/doc.md")],
+        provider_id="anthropic",
+        model="claude-sonnet-4-5",
+        custom_model=None,
+        context_window=None,
+        template_path=template_path,
+        transcript_path=None,
+        generation_user_prompt_path=generation_user_prompt_path,
+        generation_system_prompt_path=generation_system_prompt_path,
+        metadata=ProjectMetadata(case_name="Case"),
+        placeholder_values={},
+        project_name="Case",
+        llm_backend=_NoNativeBackend(),
+    )
+
+    provider = worker._create_provider("system prompt")
+    assert provider.provider_name == "anthropic"
+    assert provider.default_model == "claude-sonnet-4-5"

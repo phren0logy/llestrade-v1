@@ -15,3 +15,11 @@ For historical transition notes (legacy UI split/new-ui migration plans), see `d
 - Dashboard workflow is the active product path launched from `main.py`.
 - Legacy and migration planning docs are retained under `docs/archive/` for reference only.
 - `docs/work_plan.md` remains the source of truth for active implementation priorities.
+
+## 2026-03-08 - Gateway-First LLM Plan Adopted
+- Confirmed a Gateway-first direction for Pydantic AI integration while retaining legacy provider fallback during rollout.
+- Completed contract groundwork for backend interchangeability:
+  - Added typed worker stage contracts for report/bulk execution.
+  - Added `LLMExecutionBackend` + legacy adapter, and routed worker invocation through the backend seam.
+  - Added focused tests for backend contracts and stage-to-trace mapping.
+- Updated `docs/work_plan.md` with explicit milestones for report pilot, bulk expansion, cutover gates, and Qt 6.11 parallel validation.

@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -11,8 +10,6 @@ from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QFileDialog, QMessageBox, QTreeWidgetItem, QWidget
 
-from src.app.core.azure_artifacts import is_azure_raw_artifact
-from src.app.core.bulk_paths import iter_map_outputs
 from src.app.core.project_manager import ProjectManager, ProjectMetadata
 from src.app.core.prompt_placeholders import format_prompt, placeholder_summary, get_prompt_spec
 from src.app.core.placeholders.analyzer import analyse_prompts
@@ -37,7 +34,6 @@ from src.app.core.report_prompt_context import (
     build_report_generation_placeholders,
     build_report_refinement_placeholders,
 )
-from src.app.core.report_template_sections import load_template_sections
 from src.app.ui.workspace.qt_flags import ITEM_IS_TRISTATE, ITEM_IS_USER_CHECKABLE
 from src.app.ui.workspace.reports_tab import ReportsTab
 from src.app.ui.workspace.services import (
@@ -46,23 +42,26 @@ from src.app.ui.workspace.services import (
     ReportsService,
 )
 from src.app.ui.dialogs.prompt_preview_dialog import PromptPreviewDialog
+from .reports_history import HistorySelection, current_history_selection, persist_report_history
+from .reports_io import (
+    collect_report_inputs,
+    default_prompt_path,
+    optional_path,
+    preview_additional_documents,
+    preview_template_section,
+    read_prompt_file,
+    resolve_selected_inputs,
+    safe_initial_path,
+    safe_read_text,
+    validate_prompt_path,
+    validate_required_path,
+)
 from src.config.prompt_store import (
-    get_bundled_dir,
     get_custom_dir,
-    get_repo_prompts_dir,
     get_template_custom_dir,
 )
 from src.app.core.secure_settings import SecureSettings
 from src.common.llm.bedrock_catalog import DEFAULT_BEDROCK_MODELS, list_bedrock_models
-
-
-@dataclass(slots=True)
-class _HistorySelection:
-    draft_path: Optional[Path]
-    refined_path: Optional[Path]
-    reasoning_path: Optional[Path]
-    manifest_path: Optional[Path]
-    inputs_path: Optional[Path]
 
 
 class ReportsController:
@@ -348,73 +347,8 @@ class ReportsController:
     # ------------------------------------------------------------------
     def _collect_report_inputs(self) -> List[ReportInputDescriptor]:
         manager = self._project_manager
-        if not manager or not manager.project_dir:
-            return []
-
-        project_dir = Path(manager.project_dir)
-        descriptors: List[ReportInputDescriptor] = []
-
-        def add_descriptor(category: str, absolute: Path, label: str) -> None:
-            descriptors.append(
-                ReportInputDescriptor(
-                    category=category,
-                    relative_path=absolute.relative_to(project_dir).as_posix(),
-                    label=label,
-                )
-            )
-
-        converted_root = project_dir / "converted_documents"
-        if converted_root.exists():
-            for path in sorted(converted_root.rglob("*")):
-                if path.is_file() and path.suffix.lower() in {".md", ".txt"}:
-                    if is_azure_raw_artifact(path):
-                        continue
-                    add_descriptor(
-                        REPORT_CATEGORY_CONVERTED,
-                        path,
-                        path.relative_to(converted_root).as_posix(),
-                    )
-
-        bulk_root = project_dir / "bulk_analysis"
-        if bulk_root.exists():
-            for slug_dir in sorted(bulk_root.iterdir()):
-                if not slug_dir.is_dir():
-                    continue
-                slug = slug_dir.name
-                for path, rel in sorted(iter_map_outputs(project_dir, slug), key=lambda item: item[1]):
-                    add_descriptor(
-                        REPORT_CATEGORY_BULK_MAP,
-                        path,
-                        f"{slug}/{rel}",
-                    )
-                reduce_dir = slug_dir / "reduce"
-                if reduce_dir.exists():
-                    for path in sorted(reduce_dir.rglob("*.md")):
-                        add_descriptor(
-                            REPORT_CATEGORY_BULK_COMBINED,
-                            path,
-                            f"{slug_dir.name}/reduce/{path.relative_to(reduce_dir).as_posix()}",
-                        )
-
-        highlight_docs = project_dir / "highlights" / "documents"
-        if highlight_docs.exists():
-            for path in sorted(highlight_docs.rglob("*.md")):
-                add_descriptor(
-                    REPORT_CATEGORY_HIGHLIGHT_DOCUMENT,
-                    path,
-                    path.relative_to(highlight_docs).as_posix(),
-                )
-
-        highlight_colors = project_dir / "highlights" / "colors"
-        if highlight_colors.exists():
-            for path in sorted(highlight_colors.glob("*.md")):
-                add_descriptor(
-                    REPORT_CATEGORY_HIGHLIGHT_COLOR,
-                    path,
-                    path.relative_to(highlight_colors).as_posix(),
-                )
-
-        return descriptors
+        project_dir = Path(manager.project_dir) if manager and manager.project_dir else None
+        return collect_report_inputs(project_dir)
 
     def _populate_report_inputs_tree(self, descriptors: List[ReportInputDescriptor]) -> None:
         tree = self._tab.inputs_tree
@@ -781,72 +715,20 @@ class ReportsController:
         dialog.exec()
 
     def _read_prompt_file(self, path_str: str) -> str:
-        path_str = (path_str or "").strip()
-        if not path_str:
-            return ""
         manager = self._project_manager
-        if not manager or not manager.project_dir:
-            return ""
-        path = Path(path_str).expanduser()
-        candidates: List[Path] = []
-        if path.is_absolute():
-            candidates.append(path)
-        else:
-            candidates.extend(
-                [
-                    Path(manager.project_dir) / path,
-                    get_custom_dir() / path,
-                    get_bundled_dir() / path,
-                    get_repo_prompts_dir() / path,
-                ]
-            )
-        for candidate in candidates:
-            try:
-                if candidate.exists():
-                    return candidate.read_text(encoding="utf-8")
-            except Exception:
-                continue
-        return ""
+        project_dir = Path(manager.project_dir) if manager and manager.project_dir else None
+        return read_prompt_file(path_str, project_dir)
 
     def _safe_read_text(self, path: Optional[Path]) -> str:
-        if not path:
-            return ""
-        try:
-            return path.expanduser().read_text(encoding="utf-8")
-        except Exception:
-            return ""
+        return safe_read_text(path)
 
     def _preview_template_section(self, template_path: Optional[Path]) -> tuple[str, str]:
-        if not template_path:
-            return "", ""
-        try:
-            sections = load_template_sections(template_path)
-        except Exception:
-            return "", ""
-        if not sections:
-            return "", ""
-        first = sections[0]
-        return first.body.strip(), first.title or ""
+        return preview_template_section(template_path)
 
     def _preview_additional_documents(self, descriptors: Sequence[ReportInputDescriptor]) -> str:
         manager = self._project_manager
-        if not manager or not manager.project_dir:
-            return ""
-        project_dir = Path(manager.project_dir)
-        lines: list[str] = []
-        for descriptor in descriptors:
-            candidate = (project_dir / descriptor.relative_path).resolve()
-            if not candidate.exists() or not candidate.is_file():
-                continue
-            if candidate.suffix.lower() not in {".md", ".txt"}:
-                continue
-            try:
-                content = candidate.read_text(encoding="utf-8").strip()
-            except Exception:
-                continue
-            header = f"# {descriptor.label} ({descriptor.category})"
-            lines.extend(["<!-- preview: report-input -->", header, content, ""])
-        return "\n".join(lines).strip()
+        project_dir = Path(manager.project_dir) if manager and manager.project_dir else None
+        return preview_additional_documents(project_dir, descriptors)
 
     # ------------------------------------------------------------------
     # Job orchestration
@@ -1163,85 +1045,7 @@ class ReportsController:
         manager = self._project_manager
         if not manager:
             return
-
-        timestamp_raw = str(result.get("timestamp"))
-        try:
-            timestamp = datetime.fromisoformat(timestamp_raw)
-        except Exception:
-            timestamp = datetime.now(timezone.utc)
-
-        def _maybe_path(raw: object) -> Optional[Path]:
-            if not raw:
-                return None
-            try:
-                return Path(str(raw)).expanduser()
-            except Exception:
-                return None
-
-        draft_path = _maybe_path(result.get("draft_path"))
-        refined_path = _maybe_path(result.get("refined_path"))
-        reasoning_path = _maybe_path(result.get("reasoning_path"))
-        manifest_path = _maybe_path(result.get("manifest_path"))
-        inputs_path = _maybe_path(result.get("inputs_path"))
-
-        provider = str(result.get("provider", "anthropic"))
-        model = str(result.get("model", ""))
-        custom_model = result.get("custom_model")
-        context_window = result.get("context_window")
-        try:
-            context_window_int = int(context_window) if context_window is not None else None
-        except (ValueError, TypeError):
-            context_window_int = None
-        inputs = list(result.get("inputs", []))
-
-        template_value = str(result.get("template_path") or "").strip() or None
-        transcript_value = str(result.get("transcript_path") or "").strip() or None
-
-        generation_user_prompt = str(result.get("generation_user_prompt") or "").strip() or None
-        generation_system_prompt = str(result.get("generation_system_prompt") or "").strip() or None
-        refinement_user_prompt = str(result.get("refinement_user_prompt") or "").strip() or None
-        refinement_system_prompt = str(result.get("refinement_system_prompt") or "").strip() or None
-
-        if run_type == "refinement" and refined_path is not None:
-            manager.record_report_refinement_run(
-                timestamp=timestamp,
-                draft_path=(draft_path or refined_path),
-                refined_path=refined_path,
-                reasoning_path=reasoning_path,
-                manifest_path=manifest_path,
-                inputs_path=inputs_path,
-                provider=provider,
-                model=model,
-                custom_model=str(custom_model) if custom_model else None,
-                context_window=context_window_int,
-                inputs=inputs,
-                template_path=template_value,
-                transcript_path=transcript_value,
-                refinement_user_prompt=refinement_user_prompt,
-                refinement_system_prompt=refinement_system_prompt,
-                refined_tokens=result.get("refinement_tokens"),
-            )
-        else:
-            if draft_path is None and result.get("draft_path"):
-                draft_path = Path(str(result["draft_path"])).expanduser()
-            if draft_path is None:
-                return
-            manager.record_report_draft_run(
-                timestamp=timestamp,
-                draft_path=draft_path,
-                manifest_path=manifest_path,
-                inputs_path=inputs_path,
-                provider=provider,
-                model=model,
-                custom_model=str(custom_model) if custom_model else None,
-                context_window=context_window_int,
-                inputs=inputs,
-                template_path=template_value,
-                transcript_path=transcript_value,
-                generation_user_prompt=generation_user_prompt,
-                generation_system_prompt=generation_system_prompt,
-                draft_tokens=result.get("draft_tokens"),
-            )
+        persist_report_history(manager, run_type, result)
 
     def _open_report_history_file(self, kind: str) -> None:
         selection = self._current_history_selection()
@@ -1261,27 +1065,14 @@ class ReportsController:
             return
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(target)))
 
-    def _current_history_selection(self) -> Optional[_HistorySelection]:
+    def _current_history_selection(self) -> Optional[HistorySelection]:
         manager = self._project_manager
         if not manager:
             return None
         item = self._tab.history_list.currentItem()
         if not item:
             return None
-        index = item.data(0, Qt.UserRole)
-        if index is None:
-            return None
-        try:
-            entry = manager.report_state.history[int(index)]
-        except (ValueError, TypeError, IndexError):
-            return None
-        return _HistorySelection(
-            draft_path=Path(entry.draft_path) if entry.draft_path else None,
-            refined_path=Path(entry.refined_path) if entry.refined_path else None,
-            reasoning_path=Path(entry.reasoning_path) if entry.reasoning_path else None,
-            manifest_path=Path(entry.manifest_path) if entry.manifest_path else None,
-            inputs_path=Path(entry.inputs_path) if entry.inputs_path else None,
-        )
+        return current_history_selection(manager, item.data(0, Qt.UserRole))
 
     # ------------------------------------------------------------------
     # Misc helpers
@@ -1314,46 +1105,19 @@ class ReportsController:
                 self._tab.refinement_system_prompt_edit.setText(default_refinement_system)
 
     def _default_generation_user_prompt_path(self) -> str:
-        for candidate in (
-            get_repo_prompts_dir() / "reports" / "default_generation_user.md",
-            get_bundled_dir() / "reports" / "default_generation_user.md",
-        ):
-            if candidate.exists():
-                return str(candidate)
-        return ""
+        return default_prompt_path("default_generation_user.md")
 
     def _default_generation_system_prompt_path(self) -> str:
-        for candidate in (
-            get_repo_prompts_dir() / "reports" / "default_generation_system.md",
-            get_bundled_dir() / "reports" / "default_generation_system.md",
-        ):
-            if candidate.exists():
-                return str(candidate)
-        return ""
+        return default_prompt_path("default_generation_system.md")
 
     def _default_refinement_user_prompt_path(self) -> str:
-        for candidate in (
-            get_repo_prompts_dir() / "reports" / "default_refinement_user.md",
-            get_bundled_dir() / "reports" / "default_refinement_user.md",
-        ):
-            if candidate.exists():
-                return str(candidate)
-        return ""
+        return default_prompt_path("default_refinement_user.md")
 
     def _default_refinement_system_prompt_path(self) -> str:
-        for candidate in (
-            get_repo_prompts_dir() / "reports" / "default_refinement_system.md",
-            get_bundled_dir() / "reports" / "default_refinement_system.md",
-        ):
-            if candidate.exists():
-                return str(candidate)
-        return ""
+        return default_prompt_path("default_refinement_system.md")
 
     def _safe_initial(self, provider) -> Path:
-        try:
-            return Path(provider())
-        except Exception:
-            return self._project_dir_or_home()
+        return safe_initial_path(provider, self._project_dir_or_home())
 
     def _project_dir_or_home(self) -> Path:
         manager = self._project_manager
@@ -1372,19 +1136,10 @@ class ReportsController:
         self._tab.refine_draft_edit.clear()
 
     def _optional_path(self, value: str) -> Optional[Path]:
-        value = value.strip()
-        return Path(value).expanduser() if value else None
+        return optional_path(value)
 
     def _validate_required_path(self, value: str, title: str, message: str) -> Optional[Path]:
-        value = value.strip()
-        if not value:
-            QMessageBox.warning(self._workspace, title, message)
-            return None
-        path = Path(value).expanduser()
-        if not path.is_file():
-            QMessageBox.warning(self._workspace, title, f"The selected file does not exist:\n{path}")
-            return None
-        return path
+        return validate_required_path(value, title, message, self._workspace)
 
     def _validate_prompt_path(
         self,
@@ -1395,19 +1150,14 @@ class ReportsController:
         validator,
         reader,
     ) -> Optional[Path]:
-        path = self._validate_required_path(value, title, message)
-        if path is None:
-            return None
-        try:
-            content = reader(path)
-            validator(content)
-        except ValueError as exc:
-            QMessageBox.warning(self._workspace, title, str(exc))
-            return None
-        except Exception:
-            QMessageBox.warning(self._workspace, title, "Unable to read the selected prompt.")
-            return None
-        return path
+        return validate_prompt_path(
+            value,
+            title,
+            message,
+            validator=validator,
+            reader=reader,
+            workspace=self._workspace,
+        )
 
     def _resolve_model_selection(self) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[int]]:
         data = self._tab.model_combo.currentData()
@@ -1428,13 +1178,7 @@ class ReportsController:
         return "custom", "", custom_model, context_window
 
     def _resolve_selected_inputs(self) -> List[tuple[str, str]]:
-        selected_pairs: List[tuple[str, str]] = []
-        for key in sorted(self._selected_inputs):
-            if ":" not in key:
-                continue
-            category, relative = key.split(":", 1)
-            selected_pairs.append((category, relative))
-        return selected_pairs
+        return resolve_selected_inputs(self._selected_inputs)
 
 
 __all__ = ["ReportsController"]

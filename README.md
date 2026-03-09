@@ -270,6 +270,20 @@ The application stores settings in `var/app_settings.json` (created on first run
 }
 ```
 
+### Experimental: Pydantic AI Gateway (Report Workflows)
+
+Report draft/refinement can be routed through a Gateway-backed execution backend behind a feature flag.
+
+- Enable the path:
+  - `FRD_ENABLE_PYDANTIC_AI_GATEWAY=true`
+- Required auth:
+  - `PYDANTIC_AI_GATEWAY_API_KEY=<your key>` (or `PAIG_API_KEY`)
+- Optional custom endpoint (self-hosted Gateway):
+  - `PYDANTIC_AI_GATEWAY_BASE_URL=<gateway base url>` (or `PAIG_BASE_URL`)
+  - `PYDANTIC_AI_GATEWAY_ROUTE=<route override>`
+
+If the flag is disabled (default), workers use the existing native provider clients.
+
 ### AWS Bedrock Credentials
 
 Claude models delivered through AWS Bedrock rely on the AWS CLI credential chain. Run `aws configure` (for long-term access keys) or `aws configure sso` (for IAM Identity Center) so credentials are written to `~/.aws/credentials` and `~/.aws/config`. Llestrade reads those settings automatically; no AWS secrets are stored in the application. Optional overrides for profile, region, and the default Bedrock Claude model can be set under **Settings → Configure API Keys → AWS Bedrock (Claude)**.
@@ -458,6 +472,8 @@ The active workspace flow is:
 3. Highlights (PDF-only extraction and tracking)
 4. Bulk Analysis (grouped per-document and combined runs)
 5. Reports (draft + refinement runs)
+
+Note: there is no standalone Progress tab in the dashboard workflow. Bulk Analysis inline logs are the canonical activity feed.
 
 Legacy transition notes and historical plans live under `docs/archive/` and are not the source of truth for current behavior.
 
