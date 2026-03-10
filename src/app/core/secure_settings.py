@@ -25,6 +25,7 @@ from src.config.paths import app_config_dir
 _GLOBAL_API_KEY_CACHE: Dict[str, Optional[str]] = {}
 _CACHE_LOCK = Lock()
 _CACHE_MISS = object()
+_LEGACY_SETTINGS_ENV_VAR = "FRD_SETTINGS_DIR"
 
 
 class SecureSettings(QObject):
@@ -41,7 +42,7 @@ class SecureSettings(QObject):
         self.logger = logging.getLogger(__name__)
         
         # Determine settings directory
-        env_override = os.getenv("LLESTRADE_SETTINGS_DIR")
+        env_override = os.getenv("LLESTRADE_SETTINGS_DIR") or os.getenv(_LEGACY_SETTINGS_ENV_VAR)
         if settings_dir:
             self.settings_dir = settings_dir
         elif env_override:
@@ -59,7 +60,10 @@ class SecureSettings(QObject):
         self._settings = self._load_settings()
         
         # Qt settings for UI preferences
-        self.qt_settings = QSettings("Llestrade", "Settings")
+        self.qt_settings = QSettings(
+            os.getenv("LLESTRADE_QSETTINGS_ORG", "Llestrade"),
+            os.getenv("LLESTRADE_QSETTINGS_APP", "Settings"),
+        )
         
     def _load_settings(self) -> Dict[str, Any]:
         """Load settings from JSON file."""
@@ -258,17 +262,35 @@ class SecureSettings(QObject):
         
         # Convert old string format to new dict format
         converted = []
+        changed = False
         for item in recent:
             if isinstance(item, str):
                 # Old format - convert to dict
-                converted.append({
+                entry = {
                     'path': item,
                     'name': Path(item).stem,
                     'last_modified': ''
-                })
+                }
+                changed = True
             else:
-                converted.append(item)
-        
+                entry = item
+
+            project_path_raw = str(entry.get("path", "")).strip()
+            if not project_path_raw:
+                changed = True
+                continue
+
+            project_path = Path(project_path_raw).expanduser()
+            if not project_path.exists():
+                changed = True
+                continue
+
+            converted.append(entry)
+
+        if changed and converted != recent:
+            self._settings["recent_projects"] = converted
+            self._save_settings()
+
         return converted
     
     def remove_recent_project(self, project_path: str):
