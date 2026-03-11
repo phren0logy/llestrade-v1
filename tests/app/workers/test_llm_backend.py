@@ -13,7 +13,6 @@ from pydantic_ai.usage import RequestUsage
 from src.app.workers.llm_backend import (
     DirectProviderMetadata,
     LLMInvocationRequest,
-    LLMInvocationResult,
     LLMProviderRequest,
     PydanticAIDirectBackend,
     PydanticAIGatewayBackend,
@@ -34,19 +33,16 @@ class _ProviderMeta:
 def test_direct_provider_backend_requires_direct_provider_metadata() -> None:
     backend = PydanticAIDirectBackend()
 
-    result = backend.invoke(
-        object(),
-        LLMInvocationRequest(
-            prompt="summarize",
-            system_prompt="system",
-            model="claude-sonnet-4-5",
-            model_settings={"temperature": 0.2, "max_tokens": 2048},
-        ),
-    )
-
-    assert result.success is False
-    assert result.error == "Direct provider backend requires DirectProviderMetadata"
-    assert result.model == "claude-sonnet-4-5"
+    with pytest.raises(RuntimeError, match="Direct provider backend requires DirectProviderMetadata"):
+        backend.invoke_response(
+            object(),
+            LLMInvocationRequest(
+                prompt="summarize",
+                system_prompt="system",
+                model="claude-sonnet-4-5",
+                model_settings={"temperature": 0.2, "max_tokens": 2048},
+            ),
+        )
 
 
 def test_direct_provider_backend_count_input_tokens_requires_direct_provider_metadata() -> None:
@@ -63,21 +59,6 @@ def test_direct_provider_backend_count_input_tokens_requires_direct_provider_met
     )
 
     assert result is None
-
-
-def test_invocation_result_normalizes_non_dict_usage() -> None:
-    result = LLMInvocationResult.from_provider_response(
-        {
-            "success": True,
-            "content": "ok",
-            "usage": "invalid",
-            "error": None,
-        }
-    )
-
-    assert result.success is True
-    assert result.content == "ok"
-    assert result.usage == {}
 
 
 def test_normalize_model_name_translates_bedrock_aliases() -> None:
@@ -197,7 +178,7 @@ def test_direct_provider_backend_direct_provider_uses_pydantic_ai_requests(
         provider=object(),
     )
 
-    result = backend.invoke(
+    response = backend.invoke_response(
         provider,
         LLMInvocationRequest(
             prompt="Summarize this",
@@ -207,12 +188,12 @@ def test_direct_provider_backend_direct_provider_uses_pydantic_ai_requests(
         ),
     )
 
-    assert result.success is True
-    assert result.content == "Direct response"
-    assert result.provider == "anthropic"
-    assert result.model == "claude-sonnet-4-5"
-    assert result.usage["input_tokens"] == 25
-    assert result.usage["output_tokens"] == 10
+    assert isinstance(response, ModelResponse)
+    assert response.text == "Direct response"
+    assert response.provider_name == "anthropic"
+    assert response.model_name == "claude-sonnet-4-5"
+    assert response.usage.input_tokens == 25
+    assert response.usage.output_tokens == 10
     assert captured["call"]["messages"][0].instructions == "System prompt"
     assert captured["call"]["messages"][0].parts[0].content == "Summarize this"
     assert captured["call"]["model_settings"] == {"temperature": 0.2, "max_tokens": 512}
@@ -285,20 +266,17 @@ def test_direct_provider_backend_enforces_input_limit_before_request_when_counti
     monkeypatch.setattr(backend, "_build_direct_model", lambda **_kwargs: object(), raising=True)
     monkeypatch.setattr(backend, "_count_input_tokens_direct", lambda provider, request: 500, raising=True)
 
-    result = backend.invoke(
-        provider,
-        LLMInvocationRequest(
-            prompt="Summarize this",
-            system_prompt="System",
-            model="claude-sonnet-4-5",
-            model_settings={"temperature": 0.2, "max_tokens": 512},
-            input_tokens_limit=400,
-        ),
-    )
-
-    assert result.success is False
-    assert result.error is not None
-    assert "input_tokens_limit" in result.error
+    with pytest.raises(Exception, match="input_tokens_limit"):
+        backend.invoke_response(
+            provider,
+            LLMInvocationRequest(
+                prompt="Summarize this",
+                system_prompt="System",
+                model="claude-sonnet-4-5",
+                model_settings={"temperature": 0.2, "max_tokens": 512},
+                input_tokens_limit=400,
+            ),
+        )
 
 
 def test_direct_provider_backend_enforces_input_limit_after_response_when_precount_is_unavailable(
@@ -330,20 +308,17 @@ def test_direct_provider_backend_enforces_input_limit_after_response_when_precou
     )
     monkeypatch.setattr(backend, "_build_direct_model", lambda **_kwargs: object(), raising=True)
 
-    result = backend.invoke(
-        provider,
-        LLMInvocationRequest(
-            prompt="Summarize this",
-            system_prompt="System",
-            model="gpt-4.1",
-            model_settings={"temperature": 0.2, "max_tokens": 512},
-            input_tokens_limit=400,
-        ),
-    )
-
-    assert result.success is False
-    assert result.error is not None
-    assert "Exceeded the input_tokens_limit" in result.error
+    with pytest.raises(Exception, match="Exceeded the input_tokens_limit"):
+        backend.invoke_response(
+            provider,
+            LLMInvocationRequest(
+                prompt="Summarize this",
+                system_prompt="System",
+                model="gpt-4.1",
+                model_settings={"temperature": 0.2, "max_tokens": 512},
+                input_tokens_limit=400,
+            ),
+        )
 
 
 def test_gateway_backend_create_provider_returns_metadata() -> None:
@@ -374,7 +349,9 @@ def test_gateway_backend_create_provider_rejects_unsupported_provider() -> None:
         )
 
 
-def test_gateway_backend_success_normalizes_response(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_gateway_backend_invoke_response_returns_model_response_with_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     captured: dict[str, Any] = {}
 
     def _fake_model_request_sync(
@@ -412,7 +389,7 @@ def test_gateway_backend_success_normalizes_response(monkeypatch: pytest.MonkeyP
         raising=True,
     )
 
-    result = backend.invoke(
+    response = backend.invoke_response(
         _ProviderMeta("anthropic"),
         LLMInvocationRequest(
             prompt="Summarize this",
@@ -426,20 +403,15 @@ def test_gateway_backend_success_normalizes_response(monkeypatch: pytest.MonkeyP
         ),
     )
 
-    assert result.success is True
-    assert result.content == "Gateway response"
-    assert result.error is None
-    assert result.provider == "gateway/anthropic"
-    assert result.model == "claude-sonnet-4-5"
-    assert result.usage["input_tokens"] == 120
-    assert result.usage["output_tokens"] == 45
-    assert result.usage["total_tokens"] == 165
-    assert result.raw == {
-        "provider_response_id": "resp-123",
-        "finish_reason": "stop",
-        "provider_name": "gateway/anthropic",
-        "provider_url": "https://gateway.example.com/anthropic",
-    }
+    assert isinstance(response, ModelResponse)
+    assert response.text == "Gateway response"
+    assert response.provider_name == "gateway/anthropic"
+    assert response.model_name == "claude-sonnet-4-5"
+    assert response.usage.input_tokens == 120
+    assert response.usage.output_tokens == 45
+    assert response.provider_response_id == "resp-123"
+    assert response.finish_reason == "stop"
+    assert response.provider_url == "https://gateway.example.com/anthropic"
     assert captured["call"]["messages"][0].instructions == "System prompt"
     assert captured["call"]["messages"][0].parts[0].content == "Summarize this"
     assert captured["call"]["model_settings"]["temperature"] == 0.2
@@ -451,18 +423,16 @@ def test_gateway_backend_success_normalizes_response(monkeypatch: pytest.MonkeyP
 def test_gateway_backend_rejects_unsupported_provider() -> None:
     backend = PydanticAIGatewayBackend(api_key="pylf_test_key")
 
-    result = backend.invoke(
-        ProviderMetadata(provider_name="unsupported_provider", default_model="legacy-model"),
-        LLMInvocationRequest(
-            prompt="test",
-            system_prompt="sys",
-            model=None,
-            model_settings={"temperature": 0.1, "max_tokens": 128},
-        ),
-    )
-
-    assert result.success is False
-    assert "not supported by Pydantic AI Gateway backend" in (result.error or "")
+    with pytest.raises(RuntimeError, match="not supported by Pydantic AI Gateway backend"):
+        backend.invoke_response(
+            ProviderMetadata(provider_name="unsupported_provider", default_model="legacy-model"),
+            LLMInvocationRequest(
+                prompt="test",
+                system_prompt="sys",
+                model=None,
+                model_settings={"temperature": 0.1, "max_tokens": 128},
+            ),
+        )
 
 
 def test_supported_provider_lists_are_explicit() -> None:
@@ -485,20 +455,16 @@ def test_supported_provider_lists_are_explicit() -> None:
 def test_gateway_backend_rejects_unsupported_provider_metadata() -> None:
     backend = PydanticAIGatewayBackend(api_key="pylf_test_key")
 
-    result = backend.invoke(
-        ProviderMetadata(provider_name="unsupported_provider", default_model="custom-model"),
-        LLMInvocationRequest(
-            prompt="test",
-            system_prompt="sys",
-            model=None,
-            model_settings={"temperature": 0.1, "max_tokens": 128},
-        ),
-    )
-
-    assert result.success is False
-    assert result.content == ""
-    assert result.error is not None
-    assert "not supported by Pydantic AI Gateway backend" in result.error
+    with pytest.raises(RuntimeError, match="not supported by Pydantic AI Gateway backend"):
+        backend.invoke_response(
+            ProviderMetadata(provider_name="unsupported_provider", default_model="custom-model"),
+            LLMInvocationRequest(
+                prompt="test",
+                system_prompt="sys",
+                model=None,
+                model_settings={"temperature": 0.1, "max_tokens": 128},
+            ),
+        )
 
 
 def test_gateway_backend_reports_configuration_error_without_key(
@@ -508,19 +474,16 @@ def test_gateway_backend_reports_configuration_error_without_key(
     monkeypatch.delenv("PAIG_API_KEY", raising=False)
     backend = PydanticAIGatewayBackend(api_key=None, base_url=None)
 
-    result = backend.invoke(
-        _ProviderMeta("anthropic", default_model="claude-sonnet-4-5"),
-        LLMInvocationRequest(
-            prompt="Summarize this",
-            system_prompt="System",
-            model="claude-sonnet-4-5",
-            model_settings={"temperature": 0.2, "max_tokens": 512},
-        ),
-    )
-
-    assert result.success is False
-    assert result.error is not None
-    assert "Gateway invocation failed" in result.error
+    with pytest.raises(Exception):
+        backend.invoke_response(
+            _ProviderMeta("anthropic", default_model="claude-sonnet-4-5"),
+            LLMInvocationRequest(
+                prompt="Summarize this",
+                system_prompt="System",
+                model="claude-sonnet-4-5",
+                model_settings={"temperature": 0.2, "max_tokens": 512},
+            ),
+        )
 
 
 def test_gateway_backend_count_input_tokens_uses_model_token_counter(
@@ -654,20 +617,17 @@ def test_gateway_backend_enforces_input_limit_before_request_when_counting_is_av
     monkeypatch.setattr(backend, "_build_model", lambda **_kwargs: object(), raising=True)
     monkeypatch.setattr(backend, "count_input_tokens", lambda provider, request: 500, raising=True)
 
-    result = backend.invoke(
-        _ProviderMeta("anthropic", default_model="claude-sonnet-4-5"),
-        LLMInvocationRequest(
-            prompt="Summarize this",
-            system_prompt="System",
-            model="claude-sonnet-4-5",
-            model_settings={"temperature": 0.2, "max_tokens": 512},
-            input_tokens_limit=400,
-        ),
-    )
-
-    assert result.success is False
-    assert result.error is not None
-    assert "input_tokens_limit" in result.error
+    with pytest.raises(Exception, match="input_tokens_limit"):
+        backend.invoke_response(
+            _ProviderMeta("anthropic", default_model="claude-sonnet-4-5"),
+            LLMInvocationRequest(
+                prompt="Summarize this",
+                system_prompt="System",
+                model="claude-sonnet-4-5",
+                model_settings={"temperature": 0.2, "max_tokens": 512},
+                input_tokens_limit=400,
+            ),
+        )
 
 
 def test_gateway_backend_enforces_input_limit_after_response_when_precount_is_unavailable(
@@ -693,20 +653,17 @@ def test_gateway_backend_enforces_input_limit_after_response_when_precount_is_un
     backend = PydanticAIGatewayBackend(api_key="pylf_test_key", base_url="https://gateway.example.com")
     monkeypatch.setattr(backend, "_build_model", lambda **_kwargs: object(), raising=True)
 
-    result = backend.invoke(
-        _ProviderMeta("openai", default_model="gpt-4.1"),
-        LLMInvocationRequest(
-            prompt="Summarize this",
-            system_prompt="System",
-            model="gpt-4.1",
-            model_settings={"temperature": 0.2, "max_tokens": 512},
-            input_tokens_limit=400,
-        ),
-    )
-
-    assert result.success is False
-    assert result.error is not None
-    assert "Exceeded the input_tokens_limit" in result.error
+    with pytest.raises(Exception, match="Exceeded the input_tokens_limit"):
+        backend.invoke_response(
+            _ProviderMeta("openai", default_model="gpt-4.1"),
+            LLMInvocationRequest(
+                prompt="Summarize this",
+                system_prompt="System",
+                model="gpt-4.1",
+                model_settings={"temperature": 0.2, "max_tokens": 512},
+                input_tokens_limit=400,
+            ),
+        )
 
 
 def test_gateway_backend_reports_configuration_error_without_key(
@@ -716,19 +673,16 @@ def test_gateway_backend_reports_configuration_error_without_key(
     monkeypatch.delenv("PAIG_API_KEY", raising=False)
     backend = PydanticAIGatewayBackend(api_key=None, base_url=None)
 
-    result = backend.invoke(
-        ProviderMetadata(provider_name="anthropic", default_model="claude-sonnet-4-5"),
-        LLMInvocationRequest(
-            prompt="Summarize this",
-            system_prompt="System",
-            model="claude-sonnet-4-5",
-            model_settings={"temperature": 0.2, "max_tokens": 512},
-        ),
-    )
-
-    assert result.success is False
-    assert result.error is not None
-    assert "Gateway invocation failed" in result.error
+    with pytest.raises(Exception):
+        backend.invoke_response(
+            ProviderMetadata(provider_name="anthropic", default_model="claude-sonnet-4-5"),
+            LLMInvocationRequest(
+                prompt="Summarize this",
+                system_prompt="System",
+                model="claude-sonnet-4-5",
+                model_settings={"temperature": 0.2, "max_tokens": 512},
+            ),
+        )
 
 
 def test_gateway_backend_reports_empty_output_as_failure(
@@ -758,19 +712,16 @@ def test_gateway_backend_reports_empty_output_as_failure(
         raising=True,
     )
 
-    result = backend.invoke(
-        _ProviderMeta("anthropic"),
-        LLMInvocationRequest(
-            prompt="Summarize this",
-            system_prompt="System prompt",
-            model="claude-sonnet-4-5",
-            model_settings={"temperature": 0.2, "max_tokens": 4096},
-        ),
-    )
-
-    assert result.success is False
-    assert result.error == "LLM returned empty response"
-    assert result.provider == "gateway/anthropic"
+    with pytest.raises(RuntimeError, match="LLM returned empty response"):
+        backend.invoke_response(
+            _ProviderMeta("anthropic"),
+            LLMInvocationRequest(
+                prompt="Summarize this",
+                system_prompt="System prompt",
+                model="claude-sonnet-4-5",
+                model_settings={"temperature": 0.2, "max_tokens": 4096},
+            ),
+        )
 
 
 def test_gateway_backend_build_model_uses_canonical_gateway_model_ids(
@@ -834,47 +785,6 @@ def test_gateway_backend_build_model_uses_canonical_gateway_model_ids(
     assert captured["provider"]["http_client"] is not None
 
 
-def test_gateway_backend_invoke_response_returns_model_response(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def _fake_model_request_sync(
-        model: Any,
-        messages: Any,
-        *,
-        model_settings: Dict[str, Any],
-        model_request_parameters: Any = None,
-        instrument: Any = None,
-    ) -> ModelResponse:
-        _ = model, messages, model_settings, model_request_parameters, instrument
-        return ModelResponse(
-            parts=[TextPart("Gateway response")],
-            usage=RequestUsage(input_tokens=20, output_tokens=8),
-            model_name="claude-sonnet-4-5",
-        )
-
-    monkeypatch.setattr("pydantic_ai.direct.model_request_sync", _fake_model_request_sync)
-    backend = PydanticAIGatewayBackend(api_key="pylf_test_key", base_url="https://gateway.example.com")
-    monkeypatch.setattr(
-        backend,
-        "_build_model",
-        lambda **kwargs: {"provider_id": kwargs["provider_id"], "model_name": kwargs["model_name"]},
-        raising=True,
-    )
-
-    response = backend.invoke_response(
-        ProviderMetadata(provider_name="anthropic", default_model="claude-sonnet-4-5"),
-        LLMInvocationRequest(
-            prompt="Summarize this",
-            system_prompt="System prompt",
-            model="claude-sonnet-4-5",
-            model_settings={"temperature": 0.2, "max_tokens": 512},
-        ),
-    )
-
-    assert isinstance(response, ModelResponse)
-    assert response.text == "Gateway response"
-
-
 def test_gateway_backend_only_marks_transient_gateway_statuses_for_retry() -> None:
     retryable = httpx.Response(429, request=httpx.Request("POST", "https://gateway.example.com"))
     with pytest.raises(httpx.HTTPStatusError):
@@ -892,15 +802,13 @@ def test_gateway_backend_can_disable_concurrency_limit() -> None:
 def test_gateway_backend_returns_error_when_provider_metadata_is_missing() -> None:
     backend = PydanticAIGatewayBackend(api_key="pylf_test_key")
 
-    result = backend.invoke(
-        object(),
-        LLMInvocationRequest(
-            prompt="Summarize this",
-            system_prompt="System prompt",
-            model="claude-sonnet-4-5",
-            model_settings={"temperature": 0.2, "max_tokens": 4096},
-        ),
-    )
-
-    assert result.success is False
-    assert result.error == "Unable to resolve provider ID for Gateway backend"
+    with pytest.raises(RuntimeError, match="Unable to resolve provider ID for Gateway backend"):
+        backend.invoke_response(
+            object(),
+            LLMInvocationRequest(
+                prompt="Summarize this",
+                system_prompt="System prompt",
+                model="claude-sonnet-4-5",
+                model_settings={"temperature": 0.2, "max_tokens": 4096},
+            ),
+        )

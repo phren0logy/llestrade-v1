@@ -6,7 +6,7 @@ import asyncio
 import logging
 import os
 from dataclasses import dataclass, field
-from typing import Any, Dict, Mapping, Optional, Protocol
+from typing import Any, Mapping, Optional, Protocol
 
 from pydantic_ai.settings import ModelSettings
 
@@ -45,34 +45,6 @@ class LLMInvocationRequest:
     model: Optional[str]
     model_settings: ModelSettings = field(default_factory=dict)
     input_tokens_limit: Optional[int] = None
-
-
-@dataclass(frozen=True, slots=True)
-class LLMInvocationResult:
-    """Typed response contract returned by execution backends."""
-
-    success: bool
-    content: str
-    error: Optional[str]
-    usage: Dict[str, Any]
-    provider: Optional[str]
-    model: Optional[str]
-    raw: Dict[str, Any]
-
-    @classmethod
-    def from_provider_response(cls, payload: Mapping[str, Any]) -> "LLMInvocationResult":
-        usage = payload.get("usage")
-        if not isinstance(usage, dict):
-            usage = {}
-        return cls(
-            success=bool(payload.get("success")),
-            content=str(payload.get("content") or ""),
-            error=(str(payload.get("error")) if payload.get("error") else None),
-            usage=dict(usage),
-            provider=(str(payload.get("provider")) if payload.get("provider") else None),
-            model=(str(payload.get("model")) if payload.get("model") else None),
-            raw=dict(payload),
-        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -207,68 +179,18 @@ def _count_tokens_with_model(
         return None
 
 
-def _response_usage(response: Any) -> Dict[str, Any]:
-    usage_obj = response.usage
-    usage = {
-        "requests": int(getattr(usage_obj, "requests", 0) or 0),
-        "input_tokens": int(getattr(usage_obj, "input_tokens", 0) or 0),
-        "output_tokens": int(getattr(usage_obj, "output_tokens", 0) or 0),
-        "total_tokens": int(getattr(usage_obj, "input_tokens", 0) or 0)
-        + int(getattr(usage_obj, "output_tokens", 0) or 0),
-    }
-    details = getattr(usage_obj, "details", None)
-    if isinstance(details, dict) and details:
-        usage["details"] = dict(details)
-    return usage
-
-
-def _response_metadata(response: Any) -> Dict[str, Any]:
-    raw: Dict[str, Any] = {}
-    provider_response_id = getattr(response, "provider_response_id", None)
-    finish_reason = getattr(response, "finish_reason", None)
-    provider_name = getattr(response, "provider_name", None)
-    provider_url = getattr(response, "provider_url", None)
-    if provider_response_id:
-        raw["provider_response_id"] = str(provider_response_id)
-    if finish_reason:
-        raw["finish_reason"] = str(finish_reason)
-    if provider_name:
-        raw["provider_name"] = str(provider_name)
-    if provider_url:
-        raw["provider_url"] = str(provider_url)
-    provider_details = getattr(response, "provider_details", None)
-    if isinstance(provider_details, dict) and provider_details:
-        raw["provider_details"] = dict(provider_details)
-    return raw
-
-
-def _success_result_from_response(
+def _require_response_text(
     *,
     response: Any,
     provider_name: str,
     model_name: str,
-) -> LLMInvocationResult:
+) -> Any:
     content = str(response.text or "").strip()
     if not content:
-        return LLMInvocationResult(
-            success=False,
-            content="",
-            error="LLM returned empty response",
-            usage={},
-            provider=provider_name,
-            model=model_name,
-            raw={},
+        raise RuntimeError(
+            f"LLM returned empty response for provider={provider_name} model={model_name}"
         )
-
-    return LLMInvocationResult(
-        success=True,
-        content=content,
-        error=None,
-        usage=_response_usage(response),
-        provider=provider_name,
-        model=str(getattr(response, "model_name", None) or model_name),
-        raw=_response_metadata(response),
-    )
+    return response
 
 
 def _supports_pre_request_count(provider_id: str) -> bool:
@@ -356,9 +278,6 @@ class LLMExecutionBackend(Protocol):
     def invoke_response(self, provider: Any, request: LLMInvocationRequest) -> Any:
         """Execute `request` and return the raw Pydantic AI `ModelResponse`."""
 
-    def invoke(self, provider: Any, request: LLMInvocationRequest) -> LLMInvocationResult:
-        """Execute `request` against the given provider."""
-
 
 class PydanticAIDirectBackend:
     """Default backend that uses direct Pydantic AI providers for worker requests."""
@@ -394,19 +313,6 @@ class PydanticAIDirectBackend:
         if not isinstance(provider, DirectProviderMetadata):
             raise RuntimeError("Direct provider backend requires DirectProviderMetadata")
         return self._invoke_direct_response(provider, request)
-
-    def invoke(self, provider: Any, request: LLMInvocationRequest) -> LLMInvocationResult:
-        if not isinstance(provider, DirectProviderMetadata):
-            return LLMInvocationResult(
-                success=False,
-                content="",
-                error="Direct provider backend requires DirectProviderMetadata",
-                usage={},
-                provider=None,
-                model=request.model,
-                raw={},
-            )
-        return self._invoke_direct(provider, request)
 
     def _create_pydantic_provider_metadata(
         self,
@@ -493,46 +399,17 @@ class PydanticAIDirectBackend:
         model_name = self.resolve_model(provider.app_provider_id, request.model or provider.default_model)
         if not model_name:
             raise RuntimeError("No model configured for direct provider backend")
-        return _invoke_model_response_sync(
+        response = _invoke_model_response_sync(
             model=self._build_direct_model(provider=provider, model_name=model_name),
             request=request,
             provider_id=provider.app_provider_id,
             count_input_tokens_fn=lambda: self._count_input_tokens_direct(provider, request),
         )
-
-    def _invoke_direct(
-        self,
-        provider: DirectProviderMetadata,
-        request: LLMInvocationRequest,
-    ) -> LLMInvocationResult:
-        model_name = self.resolve_model(provider.app_provider_id, request.model or provider.default_model)
-        if not model_name:
-            return LLMInvocationResult(
-                success=False,
-                content="",
-                error="No model configured for direct provider backend",
-                usage={},
-                provider=provider.app_provider_id,
-                model=model_name,
-                raw={},
-            )
-        try:
-            response = self._invoke_direct_response(provider, request)
-            return _success_result_from_response(
-                response=response,
-                provider_name=provider.app_provider_id,
-                model_name=model_name,
-            )
-        except Exception as exc:
-            return LLMInvocationResult(
-                success=False,
-                content="",
-                error=str(exc),
-                usage={},
-                provider=provider.app_provider_id,
-                model=model_name,
-                raw={},
-            )
+        return _require_response_text(
+            response=response,
+            provider_name=provider.app_provider_id,
+            model_name=model_name,
+        )
     @staticmethod
     def _build_direct_model(*, provider: DirectProviderMetadata, model_name: str) -> Any:
         from pydantic_ai.models import infer_model
@@ -667,43 +544,17 @@ class PydanticAIGatewayBackend:
         if not model_name:
             raise RuntimeError("No model configured for Gateway backend")
 
-        return _invoke_model_response_sync(
+        response = _invoke_model_response_sync(
             model=self._build_model(provider_id=provider_id, model_name=model_name),
             request=request,
             provider_id=provider_id,
             count_input_tokens_fn=lambda: self.count_input_tokens(provider, request),
         )
-
-    def invoke(self, provider: Any, request: LLMInvocationRequest) -> LLMInvocationResult:
-        provider_id = self._resolve_provider_id(provider)
-        if not provider_id:
-            return self._error_result(
-                reason="Unable to resolve provider ID for Gateway backend",
-                model=request.model,
-            )
-
-        model_name = self.resolve_model(
-            provider_id,
-            request.model or self._resolve_default_model(provider),
+        return _require_response_text(
+            response=response,
+            provider_name=f"gateway/{provider_id}",
+            model_name=model_name,
         )
-        if not model_name:
-            return self._error_result(
-                reason="No model configured for Gateway backend",
-                model=request.model,
-            )
-
-        try:
-            response = self.invoke_response(provider, request)
-            return _success_result_from_response(
-                response=response,
-                provider_name=f"gateway/{provider_id}",
-                model_name=model_name,
-            )
-        except Exception as exc:
-            return self._error_result(
-                reason=f"Gateway invocation failed: {exc}",
-                model=model_name,
-            )
 
     def _build_model(self, *, provider_id: str, model_name: str) -> Any:
         from pydantic_ai.models import infer_model
@@ -717,18 +568,6 @@ class PydanticAIGatewayBackend:
         if limiter is None:
             return model
         return limit_model_concurrency(model, limiter=limiter)
-
-    @staticmethod
-    def _error_result(*, reason: str, model: str | None) -> LLMInvocationResult:
-        return LLMInvocationResult(
-            success=False,
-            content="",
-            error=reason,
-            usage={},
-            provider=None,
-            model=model,
-            raw={},
-        )
 
     @staticmethod
     def _resolve_provider_id(provider: Any) -> str | None:
@@ -846,7 +685,6 @@ __all__ = [
     "LLMExecutionBackend",
     "LLMProviderRequest",
     "LLMInvocationRequest",
-    "LLMInvocationResult",
     "PydanticAIDirectBackend",
     "PydanticAIGatewayBackend",
     "default_model_for_provider",

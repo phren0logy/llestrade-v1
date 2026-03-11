@@ -9,6 +9,8 @@ from typing import Any, Sequence
 
 import frontmatter
 import pytest
+from pydantic_ai.messages import ModelResponse, TextPart, ThinkingPart
+from pydantic_ai.usage import RequestUsage
 
 PySide6 = pytest.importorskip("PySide6")
 from PySide6.QtWidgets import QApplication
@@ -24,7 +26,6 @@ from src.app.workers.bulk_reduce_worker import BulkReduceWorker
 from src.app.workers.llm_backend import (
     LLMExecutionBackend,
     LLMInvocationRequest,
-    LLMInvocationResult,
     LLMProviderRequest,
     ProviderMetadata,
     normalize_model_name,
@@ -52,8 +53,26 @@ class _FrozenDateTime(datetime):
         return _FIXED_NOW.astimezone(tz)
 
 
+def _model_response(
+    content: str,
+    *,
+    model_name: str = "claude-sonnet-4-5",
+    output_tokens: int = 101,
+    reasoning: str | None = None,
+) -> ModelResponse:
+    parts: list[object] = []
+    if reasoning:
+        parts.append(ThinkingPart(reasoning))
+    parts.append(TextPart(content))
+    return ModelResponse(
+        parts=parts,
+        usage=RequestUsage(input_tokens=1, output_tokens=output_tokens),
+        model_name=model_name,
+    )
+
+
 class _SequenceBackend(LLMExecutionBackend):
-    def __init__(self, payloads: Sequence[LLMInvocationResult]) -> None:
+    def __init__(self, payloads: Sequence[ModelResponse | Exception]) -> None:
         self._payloads = list(payloads)
 
     def normalize_model(self, provider_id: str, model: str | None) -> str | None:
@@ -65,11 +84,14 @@ class _SequenceBackend(LLMExecutionBackend):
     def create_provider(self, request: LLMProviderRequest) -> object:
         return ProviderMetadata(provider_name=request.provider_id, default_model=request.model or "default-model")
 
-    def invoke(self, provider, request: LLMInvocationRequest) -> LLMInvocationResult:  # noqa: ANN001
+    def invoke_response(self, provider, request: LLMInvocationRequest) -> ModelResponse:  # noqa: ANN001
         _ = provider, request
         if not self._payloads:
             raise AssertionError("Sequence backend called more times than expected")
-        return self._payloads.pop(0)
+        payload = self._payloads.pop(0)
+        if isinstance(payload, Exception):
+            raise payload
+        return payload
 
 
 def _freeze_worker_time(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -239,16 +261,13 @@ def _gateway_result(
     *,
     model: str = "claude-sonnet-4-5",
     output_tokens: int = 101,
-    raw: dict[str, Any] | None = None,
-) -> LLMInvocationResult:
-    return LLMInvocationResult(
-        success=True,
-        content=content,
-        error=None,
-        usage={"output_tokens": output_tokens},
-        provider="gateway/anthropic",
-        model=model,
-        raw=raw or {},
+    reasoning: str | None = None,
+) -> ModelResponse:
+    return _model_response(
+        content,
+        model_name=model,
+        output_tokens=output_tokens,
+        reasoning=reasoning,
     )
 
 
@@ -271,24 +290,8 @@ def _run_report_pipeline(
     if legacy:
         draft_backend = _SequenceBackend(
             [
-                LLMInvocationResult(
-                    success=True,
-                    content="Section output 1",
-                    error=None,
-                    usage={"output_tokens": 101},
-                    provider="anthropic",
-                    model="claude-sonnet-4-5",
-                    raw={},
-                ),
-                LLMInvocationResult(
-                    success=True,
-                    content="Section output 2",
-                    error=None,
-                    usage={"output_tokens": 102},
-                    provider="anthropic",
-                    model="claude-sonnet-4-5",
-                    raw={},
-                ),
+                _model_response("Section output 1", model_name="claude-sonnet-4-5", output_tokens=101),
+                _model_response("Section output 2", model_name="claude-sonnet-4-5", output_tokens=102),
             ]
         )
     else:
@@ -330,14 +333,11 @@ def _run_report_pipeline(
     if legacy:
         refine_backend = _SequenceBackend(
             [
-                LLMInvocationResult(
-                    success=True,
-                    content="Refined content",
-                    error=None,
-                    usage={"output_tokens": 111},
-                    provider="anthropic",
-                    model="claude-sonnet-4-5",
-                    raw={"reasoning": "Reasoning trace"},
+                _model_response(
+                    "Refined content",
+                    model_name="claude-sonnet-4-5",
+                    output_tokens=111,
+                    reasoning="Reasoning trace",
                 )
             ]
         )
@@ -347,7 +347,7 @@ def _run_report_pipeline(
                 _gateway_result(
                     "Refined content",
                     output_tokens=111,
-                    raw={"reasoning": "Reasoning trace"},
+                    reasoning="Reasoning trace",
                 )
             ]
         )
@@ -404,15 +404,7 @@ def _run_bulk_map(
     if legacy:
         llm_backend = _SequenceBackend(
             [
-                LLMInvocationResult(
-                    success=True,
-                    content="summary",
-                    error=None,
-                    usage={"output_tokens": 7},
-                    provider="anthropic",
-                    model="claude-sonnet-4-5",
-                    raw={},
-                )
+                _model_response("summary", model_name="claude-sonnet-4-5", output_tokens=7)
             ]
         )
     else:
@@ -450,15 +442,7 @@ def _run_bulk_reduce(
     if legacy:
         llm_backend = _SequenceBackend(
             [
-                LLMInvocationResult(
-                    success=True,
-                    content="summary",
-                    error=None,
-                    usage={"output_tokens": 7},
-                    provider="anthropic",
-                    model="claude-sonnet-4-5",
-                    raw={},
-                )
+                _model_response("summary", model_name="claude-sonnet-4-5", output_tokens=7)
             ]
         )
     else:

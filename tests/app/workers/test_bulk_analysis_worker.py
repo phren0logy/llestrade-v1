@@ -5,6 +5,8 @@ from pathlib import Path
 from typing import Sequence
 
 import pytest
+from pydantic_ai.messages import ModelResponse, TextPart
+from pydantic_ai.usage import RequestUsage
 
 from src.app.workers.checkpoint_manager import CheckpointManager
 
@@ -24,12 +26,24 @@ from src.app.workers.bulk_analysis_worker import (
 from src.app.workers.llm_backend import (
     LLMExecutionBackend,
     LLMInvocationRequest,
-    LLMInvocationResult,
     LLMProviderRequest,
     ProviderMetadata,
     normalize_model_name,
     resolve_model_name,
 )
+
+
+def _model_response(
+    content: str,
+    *,
+    model_name: str = "claude",
+    output_tokens: int = 1,
+) -> ModelResponse:
+    return ModelResponse(
+        parts=[TextPart(content)],
+        usage=RequestUsage(input_tokens=1, output_tokens=output_tokens),
+        model_name=model_name,
+    )
 
 
 class _NoNativeBackend(LLMExecutionBackend):
@@ -42,20 +56,13 @@ class _NoNativeBackend(LLMExecutionBackend):
     def create_provider(self, request: LLMProviderRequest) -> object:
         return ProviderMetadata(provider_name=request.provider_id, default_model=request.model or "default-model")
 
-    def invoke(self, provider, request: LLMInvocationRequest) -> LLMInvocationResult:  # noqa: ANN001
-        return LLMInvocationResult(
-            success=True,
-            content="summary",
-            error=None,
-            usage={"output_tokens": 1},
-            provider="gateway/anthropic",
-            model=request.model,
-            raw={},
-        )
+    def invoke_response(self, provider, request: LLMInvocationRequest) -> ModelResponse:  # noqa: ANN001
+        _ = provider
+        return _model_response("summary", model_name=request.model or "claude", output_tokens=1)
 
 
 class _ResultBackend(LLMExecutionBackend):
-    def __init__(self, result: LLMInvocationResult) -> None:
+    def __init__(self, result: ModelResponse | Exception) -> None:
         self._result = result
 
     def normalize_model(self, provider_id: str, model: str | None) -> str | None:
@@ -67,8 +74,10 @@ class _ResultBackend(LLMExecutionBackend):
     def create_provider(self, request: LLMProviderRequest) -> object:
         return ProviderMetadata(provider_name=request.provider_id, default_model=request.model or "default-model")
 
-    def invoke(self, provider, request: LLMInvocationRequest) -> LLMInvocationResult:  # noqa: ANN001
+    def invoke_response(self, provider, request: LLMInvocationRequest) -> ModelResponse:  # noqa: ANN001
         _ = provider, request
+        if isinstance(self._result, Exception):
+            raise self._result
         return self._result
 
 
@@ -90,18 +99,10 @@ class _CountingBackend(LLMExecutionBackend):
         _ = provider, request
         return self.token_count
 
-    def invoke(self, provider, request: LLMInvocationRequest) -> LLMInvocationResult:  # noqa: ANN001
+    def invoke_response(self, provider, request: LLMInvocationRequest) -> ModelResponse:  # noqa: ANN001
         _ = provider, request
         self.invoked = True
-        return LLMInvocationResult(
-            success=True,
-            content="summary",
-            error=None,
-            usage={},
-            provider="gateway/anthropic",
-            model="claude",
-            raw={},
-        )
+        return _model_response("summary", model_name="claude", output_tokens=1)
 
 
 def _capture_traces(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, dict[str, object] | None]]:
@@ -220,34 +221,18 @@ def test_bulk_map_resolve_provider_normalizes_bedrock_model(tmp_path: Path) -> N
     ("result", "message"),
     [
         (
-            LLMInvocationResult(
-                success=False,
-                content="",
-                error="Gateway timeout",
-                usage={},
-                provider="gateway/anthropic",
-                model="claude",
-                raw={},
-            ),
+            RuntimeError("Gateway timeout"),
             "Gateway timeout",
         ),
         (
-            LLMInvocationResult(
-                success=True,
-                content="   ",
-                error=None,
-                usage={},
-                provider="gateway/anthropic",
-                model="claude",
-                raw={},
-            ),
+            _model_response("   ", model_name="claude", output_tokens=1),
             "LLM returned empty response",
         ),
     ],
 )
 def test_bulk_map_invoke_provider_raises_for_failed_or_empty_backend_result(
     tmp_path: Path,
-    result: LLMInvocationResult,
+    result: ModelResponse | Exception,
     message: str,
 ) -> None:
     group = BulkAnalysisGroup.create("Group")
@@ -304,15 +289,7 @@ def test_bulk_map_trace_attributes_match_between_legacy_and_gateway(
         metadata=ProjectMetadata(case_name="Case"),
         force_rerun=False,
         llm_backend=_ResultBackend(
-            LLMInvocationResult(
-                success=True,
-                content="summary",
-                error=None,
-                usage={"output_tokens": 1},
-                provider="anthropic",
-                model="claude",
-                raw={},
-            )
+            _model_response("summary", model_name="claude", output_tokens=1)
         ),
     )
     legacy_traces = _capture_traces(monkeypatch)
@@ -331,15 +308,7 @@ def test_bulk_map_trace_attributes_match_between_legacy_and_gateway(
         metadata=ProjectMetadata(case_name="Case"),
         force_rerun=False,
         llm_backend=_ResultBackend(
-            LLMInvocationResult(
-                success=True,
-                content="summary",
-                error=None,
-                usage={"output_tokens": 1},
-                provider="gateway/anthropic",
-                model="claude",
-                raw={},
-            )
+            _model_response("summary", model_name="claude", output_tokens=1)
         ),
     )
     gateway_traces = _capture_traces(monkeypatch)
@@ -559,15 +528,7 @@ def test_invoke_provider_rejects_over_budget_prompt(tmp_path: Path) -> None:
         metadata=ProjectMetadata(case_name="Case"),
         force_rerun=True,
         llm_backend=_ResultBackend(
-            LLMInvocationResult(
-                success=True,
-                content="summary",
-                error=None,
-                usage={"output_tokens": 1},
-                provider="anthropic",
-                model="claude-sonnet-4-5-20250929",
-                raw={},
-            )
+            _model_response("summary", model_name="claude-sonnet-4-5-20250929", output_tokens=1)
         ),
     )
 
@@ -610,15 +571,7 @@ def test_process_document_forces_chunking_when_full_prompt_exceeds_budget(
         placeholder_values={},
         project_name="Project XYZ",
         llm_backend=_ResultBackend(
-            LLMInvocationResult(
-                success=True,
-                content="summary",
-                error=None,
-                usage={"output_tokens": 1},
-                provider="anthropic",
-                model="claude-sonnet-4-5-20250929",
-                raw={},
-            )
+            _model_response("summary", model_name="claude-sonnet-4-5-20250929", output_tokens=1)
         ),
     )
 
@@ -715,15 +668,7 @@ def test_bulk_worker_surfaces_gateway_spend_limit_rejection(
         metadata=metadata,
         force_rerun=True,
         llm_backend=_ResultBackend(
-            LLMInvocationResult(
-                success=False,
-                content="",
-                error="Gateway spend limit exceeded",
-                usage={},
-                provider="gateway/anthropic",
-                model="claude",
-                raw={},
-            )
+            RuntimeError("Gateway spend limit exceeded")
         ),
     )
 

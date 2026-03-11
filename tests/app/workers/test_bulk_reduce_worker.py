@@ -4,6 +4,8 @@ from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
+from pydantic_ai.messages import ModelResponse, TextPart
+from pydantic_ai.usage import RequestUsage
 
 from src.app.core.project_manager import ProjectMetadata
 from src.app.core.bulk_analysis_groups import BulkAnalysisGroup
@@ -11,13 +13,25 @@ from src.app.workers import bulk_reduce_worker as reduce_module
 from src.app.workers.llm_backend import (
     LLMExecutionBackend,
     LLMInvocationRequest,
-    LLMInvocationResult,
     LLMProviderRequest,
     ProviderMetadata,
     normalize_model_name,
     resolve_model_name,
 )
 from src.app.workers.bulk_reduce_worker import BulkReduceWorker, ProviderConfig
+
+
+def _model_response(
+    content: str,
+    *,
+    model_name: str = "claude",
+    output_tokens: int = 1,
+) -> ModelResponse:
+    return ModelResponse(
+        parts=[TextPart(content)],
+        usage=RequestUsage(input_tokens=1, output_tokens=output_tokens),
+        model_name=model_name,
+    )
 
 
 class _NoNativeBackend(LLMExecutionBackend):
@@ -30,20 +44,13 @@ class _NoNativeBackend(LLMExecutionBackend):
     def create_provider(self, request: LLMProviderRequest) -> object:
         return ProviderMetadata(provider_name=request.provider_id, default_model=request.model or "default-model")
 
-    def invoke(self, provider, request: LLMInvocationRequest) -> LLMInvocationResult:  # noqa: ANN001
-        return LLMInvocationResult(
-            success=True,
-            content="summary",
-            error=None,
-            usage={"output_tokens": 1},
-            provider="gateway/anthropic",
-            model=request.model,
-            raw={},
-        )
+    def invoke_response(self, provider, request: LLMInvocationRequest) -> ModelResponse:  # noqa: ANN001
+        _ = provider
+        return _model_response("summary", model_name=request.model or "claude", output_tokens=1)
 
 
 class _ResultBackend(LLMExecutionBackend):
-    def __init__(self, result: LLMInvocationResult) -> None:
+    def __init__(self, result: ModelResponse | Exception) -> None:
         self._result = result
 
     def normalize_model(self, provider_id: str, model: str | None) -> str | None:
@@ -55,13 +62,15 @@ class _ResultBackend(LLMExecutionBackend):
     def create_provider(self, request: LLMProviderRequest) -> object:
         return ProviderMetadata(provider_name=request.provider_id, default_model=request.model or "default-model")
 
-    def invoke(self, provider, request: LLMInvocationRequest) -> LLMInvocationResult:  # noqa: ANN001
+    def invoke_response(self, provider, request: LLMInvocationRequest) -> ModelResponse:  # noqa: ANN001
         _ = provider, request
+        if isinstance(self._result, Exception):
+            raise self._result
         return self._result
 
 
 class _CapturingBackend(LLMExecutionBackend):
-    def __init__(self, result: LLMInvocationResult) -> None:
+    def __init__(self, result: ModelResponse | Exception) -> None:
         self._result = result
         self.requests: list[LLMInvocationRequest] = []
 
@@ -74,9 +83,11 @@ class _CapturingBackend(LLMExecutionBackend):
     def create_provider(self, request: LLMProviderRequest) -> object:
         return ProviderMetadata(provider_name=request.provider_id, default_model=request.model or "default-model")
 
-    def invoke(self, provider, request: LLMInvocationRequest) -> LLMInvocationResult:  # noqa: ANN001
+    def invoke_response(self, provider, request: LLMInvocationRequest) -> ModelResponse:  # noqa: ANN001
         _ = provider
         self.requests.append(request)
+        if isinstance(self._result, Exception):
+            raise self._result
         return self._result
 
 
@@ -289,34 +300,18 @@ def test_bulk_reduce_resolve_provider_normalizes_bedrock_model(tmp_path: Path) -
     ("result", "message"),
     [
         (
-            LLMInvocationResult(
-                success=False,
-                content="",
-                error="Gateway provider rejected request",
-                usage={},
-                provider="gateway/anthropic",
-                model="claude",
-                raw={},
-            ),
+            RuntimeError("Gateway provider rejected request"),
             "Gateway provider rejected request",
         ),
         (
-            LLMInvocationResult(
-                success=True,
-                content=" ",
-                error=None,
-                usage={},
-                provider="gateway/anthropic",
-                model="claude",
-                raw={},
-            ),
+            _model_response(" ", model_name="claude", output_tokens=1),
             "LLM returned empty response",
         ),
     ],
 )
 def test_bulk_reduce_invoke_provider_raises_for_failed_or_empty_backend_result(
     tmp_path: Path,
-    result: LLMInvocationResult,
+    result: ModelResponse | Exception,
     message: str,
 ) -> None:
     group = BulkAnalysisGroup.create("Group")
@@ -370,15 +365,7 @@ def test_bulk_reduce_trace_attributes_match_between_legacy_and_gateway(
         metadata=ProjectMetadata(case_name="Case"),
         force_rerun=False,
         llm_backend=_ResultBackend(
-            LLMInvocationResult(
-                success=True,
-                content="summary",
-                error=None,
-                usage={"output_tokens": 1},
-                provider="anthropic",
-                model="claude",
-                raw={},
-            )
+            _model_response("summary", model_name="claude", output_tokens=1)
         ),
     )
     legacy_traces = _capture_traces(monkeypatch)
@@ -395,15 +382,7 @@ def test_bulk_reduce_trace_attributes_match_between_legacy_and_gateway(
         metadata=ProjectMetadata(case_name="Case"),
         force_rerun=False,
         llm_backend=_ResultBackend(
-            LLMInvocationResult(
-                success=True,
-                content="summary",
-                error=None,
-                usage={"output_tokens": 1},
-                provider="gateway/anthropic",
-                model="claude",
-                raw={},
-            )
+            _model_response("summary", model_name="claude", output_tokens=1)
         ),
     )
     gateway_traces = _capture_traces(monkeypatch)
@@ -440,15 +419,7 @@ def test_bulk_reduce_passes_computed_input_budget_to_backend(
     group = BulkAnalysisGroup.create("Group")
     group.model_context_window = 100_000
     backend = _CapturingBackend(
-        LLMInvocationResult(
-            success=True,
-            content="summary",
-            error=None,
-            usage={"output_tokens": 1},
-            provider="gateway/anthropic",
-            model="claude",
-            raw={},
-        )
+        _model_response("summary", model_name="claude", output_tokens=1)
     )
     worker = BulkReduceWorker(
         project_dir=tmp_path,
@@ -515,15 +486,7 @@ def test_bulk_reduce_worker_surfaces_gateway_timeout(
         metadata=metadata,
         force_rerun=True,
         llm_backend=_ResultBackend(
-            LLMInvocationResult(
-                success=False,
-                content="",
-                error="Gateway timeout",
-                usage={},
-                provider="gateway/anthropic",
-                model="claude",
-                raw={},
-            )
+            RuntimeError("Gateway timeout")
         ),
     )
 

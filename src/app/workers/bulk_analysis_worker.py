@@ -891,7 +891,7 @@ class BulkAnalysisWorker(DashboardWorker):
         )
         trace_attributes = stage_trace_attributes(stage_input)
         with trace_operation("bulk_analysis.invoke_llm", trace_attributes):
-            response = self._llm_backend.invoke(
+            response = self._llm_backend.invoke_response(
                 provider,
                 LLMInvocationRequest(
                     prompt=prompt,
@@ -904,9 +904,7 @@ class BulkAnalysisWorker(DashboardWorker):
                     input_tokens_limit=input_budget,
                 ),
             )
-        if not response.success:
-            raise RuntimeError(response.error or "Unknown LLM error")
-        content = response.content.strip()
+        content = str(response.text or "").strip()
         if not content:
             raise RuntimeError("LLM returned empty response")
         return content

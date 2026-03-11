@@ -91,9 +91,6 @@ class _StubBackend(LLMExecutionBackend):
             output_tokens=100 + self._call_index,
         )
 
-    def invoke(self, provider, request: LLMInvocationRequest):  # noqa: ANN001
-        raise NotImplementedError("Report worker tests use invoke_response()")
-
 
 class _NoNativeBackend(LLMExecutionBackend):
     def normalize_model(self, provider_id: str, model: str | None) -> str | None:
@@ -112,9 +109,6 @@ class _NoNativeBackend(LLMExecutionBackend):
             model_name=request.model or "claude-sonnet-4-5",
             output_tokens=1,
         )
-
-    def invoke(self, provider, request: LLMInvocationRequest):  # noqa: ANN001
-        raise NotImplementedError("Report worker tests use invoke_response()")
 
 
 class _ResultBackend(LLMExecutionBackend):
@@ -135,9 +129,6 @@ class _ResultBackend(LLMExecutionBackend):
         if isinstance(self._result, Exception):
             raise self._result
         return self._result
-
-    def invoke(self, provider, request: LLMInvocationRequest):  # noqa: ANN001
-        raise NotImplementedError("Report worker tests use invoke_response()")
 
 
 class _CapturingBackend(LLMExecutionBackend):
@@ -160,9 +151,6 @@ class _CapturingBackend(LLMExecutionBackend):
         if isinstance(self._result, Exception):
             raise self._result
         return self._result
-
-    def invoke(self, provider, request: LLMInvocationRequest):  # noqa: ANN001
-        raise NotImplementedError("Report worker tests use invoke_response()")
 
 
 def _capture_traces(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, dict[str, object] | None]]:
