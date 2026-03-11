@@ -34,6 +34,7 @@ from src.app.core.placeholders.system import SourceFileContext
 from src.app.core.project_manager import ProjectMetadata
 from src.app.core.secure_settings import SecureSettings
 from src.common.llm.base import BaseLLMProvider
+from src.common.llm.budgets import compute_input_token_budget
 from src.common.llm.factory import create_provider
 from src.common.llm.tokens import TokenCounter
 from src.config.observability import trace_operation
@@ -69,8 +70,6 @@ class ProviderConfig:
 _MANIFEST_VERSION = 2
 _MTIME_TOLERANCE = 1e-6
 _DEFAULT_MAX_OUTPUT_TOKENS = 32_000
-_INPUT_BUDGET_RATIO = 0.85
-_INPUT_BUDGET_BUFFER = 1_000
 _MIN_CHUNK_TOKEN_TARGET = 4_000
 _PAGE_MARKER_RE = re.compile(r"<!---\\s*.+?#page=(\\d+)\\s*--->")
 
@@ -744,10 +743,12 @@ class BulkAnalysisWorker(DashboardWorker):
         return result, run_details, doc_placeholders
 
     def _max_input_budget(self, *, raw_context_window: int, max_output_tokens: int) -> int:
-        ratio_budget = int(raw_context_window * _INPUT_BUDGET_RATIO)
-        available_budget = raw_context_window - max_output_tokens - _INPUT_BUDGET_BUFFER
-        budget = min(ratio_budget, available_budget)
-        return max(int(budget), _MIN_CHUNK_TOKEN_TARGET)
+        budget = compute_input_token_budget(
+            raw_context_window=raw_context_window,
+            max_output_tokens=max_output_tokens,
+            minimum_budget=_MIN_CHUNK_TOKEN_TARGET,
+        )
+        return budget or _MIN_CHUNK_TOKEN_TARGET
 
     def _count_prompt_tokens(
         self,

@@ -40,7 +40,9 @@ from src.app.core.placeholders.system import SourceFileContext
 from src.app.core.project_manager import ProjectMetadata
 from src.app.core.secure_settings import SecureSettings
 from src.common.llm.base import BaseLLMProvider
+from src.common.llm.budgets import compute_input_token_budget
 from src.common.llm.factory import create_provider
+from src.common.llm.tokens import TokenCounter
 from src.config.observability import trace_operation
 from src.common.markdown import (
     PromptReference,
@@ -67,6 +69,7 @@ LOGGER = logging.getLogger(__name__)
 
 _MANIFEST_VERSION = 2
 _PAGE_MARKER_RE = re.compile(r"<!---\\s*.+?#page=(\\d+)\\s*--->")
+_MIN_INPUT_TOKEN_BUDGET = 4_000
 
 _DYNAMIC_REDUCE_KEYS: frozenset[str] = frozenset(
     {
@@ -472,6 +475,8 @@ class BulkReduceWorker(DashboardWorker):
                 "max_tokens": max_tokens,
                 "chunking": bool(needs_chunking),
             }
+            input_budget = self._max_input_budget(provider_cfg, max_output_tokens=32_000)
+            run_details["input_budget"] = input_budget
 
             if not needs_chunking:
                 prompt = render_user_prompt(
@@ -482,7 +487,13 @@ class BulkReduceWorker(DashboardWorker):
                     placeholder_values=placeholders_global,
                 )
                 prompt = self._append_citation_ledger(prompt, evidence_ledger)
-                result = self._invoke_provider(provider, provider_cfg, prompt, system_prompt)
+                result = self._invoke_provider(
+                    provider,
+                    provider_cfg,
+                    prompt,
+                    system_prompt,
+                    input_budget=input_budget,
+                )
                 run_details["chunk_count"] = 1
                 chunk_state = current_manifest.get("chunks", {"count": 0, "done": [], "checksums": {}})
                 chunk_state["count"] = 1
@@ -499,7 +510,13 @@ class BulkReduceWorker(DashboardWorker):
                         placeholder_values=placeholders_global,
                     )
                     prompt = self._append_citation_ledger(prompt, evidence_ledger)
-                    result = self._invoke_provider(provider, provider_cfg, prompt, system_prompt)
+                    result = self._invoke_provider(
+                        provider,
+                        provider_cfg,
+                        prompt,
+                        system_prompt,
+                        input_budget=input_budget,
+                    )
                     run_details["chunk_count"] = 1
                     run_details["chunking"] = False
                 else:
@@ -543,7 +560,13 @@ class BulkReduceWorker(DashboardWorker):
                                 base_ledger=evidence_ledger,
                             )
                             prompt = self._append_citation_ledger(prompt, chunk_ledger)
-                            summary = self._invoke_provider(provider, provider_cfg, prompt, system_prompt)
+                            summary = self._invoke_provider(
+                                provider,
+                                provider_cfg,
+                                prompt,
+                                system_prompt,
+                                input_budget=input_budget,
+                            )
                             checkpoint_mgr.save_reduce_chunk(idx, summary, chunk_checksum)
 
                         chunk_state.setdefault("checksums", {})[str(idx)] = chunk_checksum
@@ -561,7 +584,13 @@ class BulkReduceWorker(DashboardWorker):
                     # This handles large documents that would exceed token limits
                     def invoke_combine(prompt: str) -> str:
                         """Wrapper for provider invocation during hierarchical reduction."""
-                        return self._invoke_provider(provider, provider_cfg, prompt, system_prompt)
+                        return self._invoke_provider(
+                            provider,
+                            provider_cfg,
+                            prompt,
+                            system_prompt,
+                            input_budget=input_budget,
+                        )
 
                     def load_batch(level: int, batch_index: int, checksum: str) -> Optional[str]:
                         cached = checkpoint_mgr.load_reduce_batch(level, batch_index)
@@ -946,6 +975,7 @@ class BulkReduceWorker(DashboardWorker):
         system_prompt: str,
         *,
         max_tokens: int = 32_000,
+        input_budget: Optional[int] = None,
     ) -> str:
         if self._cancel_event.is_set():
             raise BulkAnalysisCancelled
@@ -968,6 +998,7 @@ class BulkReduceWorker(DashboardWorker):
                     system_prompt=system_prompt,
                     temperature=provider_cfg.temperature,
                     max_tokens=max_tokens,
+                    input_tokens_limit=input_budget,
                 ),
             )
         if not response.success:
@@ -976,6 +1007,18 @@ class BulkReduceWorker(DashboardWorker):
         if not content:
             raise RuntimeError("LLM returned empty response")
         return content
+
+    def _max_input_budget(self, provider_cfg: ProviderConfig, *, max_output_tokens: int) -> int | None:
+        raw_context_window = getattr(self._group, "model_context_window", None)
+        if not isinstance(raw_context_window, int) or raw_context_window <= 0:
+            model_key = provider_cfg.model or provider_cfg.provider_id
+            raw_context_window = TokenCounter.get_model_context_window(model_key, ratio=1.0)
+
+        return compute_input_token_budget(
+            raw_context_window=raw_context_window,
+            max_output_tokens=max_output_tokens,
+            minimum_budget=_MIN_INPUT_TOKEN_BUDGET,
+        )
 
     def _timestamp(self) -> str:
         return datetime.now().strftime("%Y%m%d-%H%M")

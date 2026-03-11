@@ -113,6 +113,20 @@ class _ResultBackend(LLMExecutionBackend):
         return self._result
 
 
+class _CapturingBackend(LLMExecutionBackend):
+    def __init__(self, result: LLMInvocationResult) -> None:
+        self._result = result
+        self.requests: list[LLMInvocationRequest] = []
+
+    def requires_native_provider(self) -> bool:
+        return False
+
+    def invoke(self, provider, request: LLMInvocationRequest) -> LLMInvocationResult:  # noqa: ANN001
+        _ = provider
+        self.requests.append(request)
+        return self._result
+
+
 def _capture_traces(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, dict[str, object] | None]]:
     recorded: list[tuple[str, dict[str, object] | None]] = []
 
@@ -665,6 +679,63 @@ def test_report_draft_trace_attributes_match_between_legacy_and_gateway(
     ]
 
 
+def test_report_draft_passes_computed_input_budget_to_backend(
+    tmp_path: Path,
+    qt_app: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert qt_app is not None
+    (common_paths, _refinement_system_prompt_path) = _prepare_common_files(tmp_path)
+    (
+        template_path,
+        generation_user_prompt_path,
+        _refinement_user_prompt_path,
+        generation_system_prompt_path,
+    ) = common_paths
+    section = TemplateSection(title="Section One", body="Describe the findings.")
+    backend = _CapturingBackend(
+        LLMInvocationResult(
+            success=True,
+            content="stub output",
+            error=None,
+            usage={"output_tokens": 1},
+            provider="gateway/anthropic",
+            model="claude-sonnet-4-5",
+            raw={},
+        )
+    )
+    worker = DraftReportWorker(
+        project_dir=tmp_path,
+        inputs=[(REPORT_CATEGORY_CONVERTED, "converted_documents/doc.md")],
+        provider_id="anthropic",
+        model="claude-sonnet-4-5",
+        custom_model=None,
+        context_window=100_000,
+        template_path=template_path,
+        transcript_path=None,
+        generation_user_prompt_path=generation_user_prompt_path,
+        generation_system_prompt_path=generation_system_prompt_path,
+        metadata=ProjectMetadata(case_name="Case"),
+        max_report_tokens=20_000,
+        llm_backend=backend,
+    )
+    monkeypatch.setattr(worker, "_create_provider", lambda _system_prompt: object())
+
+    outputs = worker._generate_section_outputs(
+        sections=[section],
+        user_prompt_template="Write {template_section}\n\n{additional_documents}",
+        additional_documents="Documents",
+        transcript_text="",
+        system_prompt="System prompt",
+        placeholder_map={},
+        evidence_ledger="",
+    )
+
+    assert outputs[0]["title"] == "Section One"
+    assert len(backend.requests) == 1
+    assert backend.requests[0].input_tokens_limit == 79_000
+
+
 def test_report_refine_trace_attributes_match_between_legacy_and_gateway(
     tmp_path: Path,
     qt_app: QApplication,
@@ -750,6 +821,62 @@ def test_report_refine_trace_attributes_match_between_legacy_and_gateway(
             },
         )
     ]
+
+
+def test_report_refine_passes_computed_input_budget_to_backend(
+    tmp_path: Path,
+    qt_app: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert qt_app is not None
+    (common_paths, refinement_system_prompt_path) = _prepare_common_files(tmp_path)
+    (
+        template_path,
+        _generation_user_prompt_path,
+        refinement_user_prompt_path,
+        _generation_system_prompt_path,
+    ) = common_paths
+    draft_path = tmp_path / "reports" / "draft.md"
+    draft_path.parent.mkdir(parents=True, exist_ok=True)
+    draft_path.write_text("---\n---\nDraft content", encoding="utf-8")
+    backend = _CapturingBackend(
+        LLMInvocationResult(
+            success=True,
+            content="stub output",
+            error=None,
+            usage={"output_tokens": 1},
+            provider="gateway/anthropic",
+            model="claude-sonnet-4-5",
+            raw={},
+        )
+    )
+    worker = ReportRefinementWorker(
+        project_dir=tmp_path,
+        draft_path=draft_path,
+        inputs=[(REPORT_CATEGORY_CONVERTED, "converted_documents/doc.md")],
+        provider_id="anthropic",
+        model="claude-sonnet-4-5",
+        custom_model=None,
+        context_window=100_000,
+        template_path=template_path,
+        transcript_path=None,
+        refinement_user_prompt_path=refinement_user_prompt_path,
+        refinement_system_prompt_path=refinement_system_prompt_path,
+        metadata=ProjectMetadata(case_name="Case"),
+        max_report_tokens=20_000,
+        llm_backend=backend,
+    )
+    monkeypatch.setattr(worker, "_create_provider", lambda _system_prompt: object())
+
+    content, reasoning = worker._run_refinement(
+        prompt="Prompt",
+        system_prompt="System prompt",
+    )
+
+    assert content.strip() == "stub output"
+    assert reasoning is None
+    assert len(backend.requests) == 1
+    assert backend.requests[0].input_tokens_limit == 79_000
 
 
 @pytest.mark.parametrize("message", ["Gateway timeout", "Gateway spend limit exceeded"])

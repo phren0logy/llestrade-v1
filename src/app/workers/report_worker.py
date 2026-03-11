@@ -309,6 +309,9 @@ class DraftReportWorker(ReportWorkerBase):
                         model=self._custom_model or self._model,
                         temperature=0.2,
                         max_tokens=self._max_report_tokens,
+                        input_tokens_limit=self._input_token_limit(
+                            max_output_tokens=self._max_report_tokens
+                        ),
                     ),
                 )
             if not response.success:
@@ -684,6 +687,9 @@ class ReportRefinementWorker(ReportWorkerBase):
                     model=self._custom_model or self._model,
                     temperature=0.2,
                     max_tokens=self._max_report_tokens,
+                    input_tokens_limit=self._input_token_limit(
+                        max_output_tokens=self._max_report_tokens
+                    ),
                 ),
             )
         if not response.success:

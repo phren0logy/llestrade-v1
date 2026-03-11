@@ -13,6 +13,7 @@ from src.app.core.report_prompt_context import build_report_base_placeholders
 from src.app.core.project_manager import ProjectMetadata
 from src.app.core.report_inputs import category_display_name
 from src.app.core.secure_settings import SecureSettings
+from src.common.llm.budgets import compute_input_token_budget
 from src.common.llm.factory import create_provider
 from src.common.llm.tokens import TokenCounter
 from src.common.markdown import PromptReference, SourceReference, compute_file_checksum
@@ -35,6 +36,7 @@ _BEDROCK_MODEL_ALIASES: Dict[str, str] = {
     "claude-opus-4-1-20250805": "anthropic.claude-opus-4-1-20250805-v1:0",
 }
 _CITATION_ID_RE = re.compile(r"^ev_[a-z0-9]{8,64}$")
+_MIN_REPORT_INPUT_BUDGET = 4_000
 
 
 class ReportWorkerBase(DashboardWorker):
@@ -182,6 +184,13 @@ class ReportWorkerBase(DashboardWorker):
             return path.resolve().relative_to(self._project_dir.resolve()).as_posix()
         except Exception:
             return path.name
+
+    def _input_token_limit(self, *, max_output_tokens: int) -> int | None:
+        return compute_input_token_budget(
+            raw_context_window=self._context_window,
+            max_output_tokens=max_output_tokens,
+            minimum_budget=_MIN_REPORT_INPUT_BUDGET,
+        )
 
     # ------------------------------------------------------------------
     # Citation helpers

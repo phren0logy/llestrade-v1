@@ -40,6 +40,20 @@ class _ResultBackend(LLMExecutionBackend):
         return self._result
 
 
+class _CapturingBackend(LLMExecutionBackend):
+    def __init__(self, result: LLMInvocationResult) -> None:
+        self._result = result
+        self.requests: list[LLMInvocationRequest] = []
+
+    def requires_native_provider(self) -> bool:
+        return False
+
+    def invoke(self, provider, request: LLMInvocationRequest) -> LLMInvocationResult:  # noqa: ANN001
+        _ = provider
+        self.requests.append(request)
+        return self._result
+
+
 def _capture_traces(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, dict[str, object] | None]]:
     recorded: list[tuple[str, dict[str, object] | None]] = []
 
@@ -172,7 +186,8 @@ def test_bulk_reduce_worker_applies_placeholder_values(tmp_path: Path, monkeypat
 
     captured: dict[str, list[str]] = {"system": [], "user": []}
 
-    def fake_invoke(self, provider, cfg, prompt, system_prompt):  # noqa: ANN001
+    def fake_invoke(self, provider, cfg, prompt, system_prompt, **kwargs):  # noqa: ANN001
+        _ = kwargs
         captured["system"].append(system_prompt)
         captured["user"].append(prompt)
         return "summary"
@@ -368,6 +383,46 @@ def test_bulk_reduce_trace_attributes_match_between_legacy_and_gateway(
             },
         )
     ]
+
+
+def test_bulk_reduce_passes_computed_input_budget_to_backend(
+    tmp_path: Path,
+) -> None:
+    group = BulkAnalysisGroup.create("Group")
+    group.model_context_window = 100_000
+    backend = _CapturingBackend(
+        LLMInvocationResult(
+            success=True,
+            content="summary",
+            error=None,
+            usage={"output_tokens": 1},
+            provider="gateway/anthropic",
+            model="claude",
+            raw={},
+        )
+    )
+    worker = BulkReduceWorker(
+        project_dir=tmp_path,
+        group=group,
+        metadata=ProjectMetadata(case_name="Case"),
+        force_rerun=False,
+        llm_backend=backend,
+    )
+
+    result = worker._invoke_provider(
+        provider=object(),
+        provider_cfg=ProviderConfig(provider_id="anthropic", model="claude", temperature=0.1),
+        prompt="Prompt",
+        system_prompt="System",
+        input_budget=worker._max_input_budget(
+            ProviderConfig(provider_id="anthropic", model="claude", temperature=0.1),
+            max_output_tokens=32_000,
+        ),
+    )
+
+    assert result == "summary"
+    assert len(backend.requests) == 1
+    assert backend.requests[0].input_tokens_limit == 67_000
 
 
 def test_bulk_reduce_worker_surfaces_gateway_timeout(
