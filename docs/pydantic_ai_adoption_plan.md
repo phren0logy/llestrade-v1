@@ -11,11 +11,31 @@ Current local baseline:
 - Installed package: `pydantic-ai-slim 1.67.0`
 - Current app pattern: worker-driven imperative LLM calls, custom provider wrappers, custom token budgeting, custom retry/fallback paths, and custom Phoenix/OpenTelemetry spans
 
+## Current Progress
+
+The worker runtime has already advanced materially beyond the original starting point for this plan.
+
+Completed in the current worker/backend layer:
+
+- `direct` Pydantic AI requests now power both the direct-provider and gateway-backed worker paths in [`src/app/workers/llm_backend.py`](../src/app/workers/llm_backend.py).
+- Provider/model normalization is centralized in [`src/app/workers/llm_backend.py`](../src/app/workers/llm_backend.py), including gateway model IDs and provider-specific aliases such as Bedrock Claude mappings.
+- `UsageLimits` is now used in the worker backend layer for request budgeting, with provider-aware pre-request token counting where supported.
+- Gateway-specific retry transport and model-level concurrency limiting are implemented in [`src/app/workers/llm_backend.py`](../src/app/workers/llm_backend.py).
+- The old worker-runtime fallback escape hatch has been removed. Worker execution no longer falls back to `src.common.llm.factory` or legacy `provider.generate(...)` paths.
+- The old `LegacyProviderBackend` name has been retired in favor of `PydanticAIDirectBackend`.
+
+Still open:
+
+- model-level instrumentation via Pydantic AI / InstrumentedModel
+- upstream failover via `FallbackModel` and/or Gateway routing groups
+- broader migration of non-worker legacy code under [`src/common/llm/`](../src/common/llm/) and [`src/config/app_config.py`](../src/config/app_config.py)
+- later-phase items such as structured outputs, evals, toolsets, and durable execution
+
 ## Current State
 
 The current LLM execution path is centered on custom abstractions:
 
-- [`src/app/workers/llm_backend.py`](../src/app/workers/llm_backend.py) provides `LLMExecutionBackend`, `LegacyProviderBackend`, and `PydanticAIGatewayBackend`.
+- [`src/app/workers/llm_backend.py`](../src/app/workers/llm_backend.py) provides `LLMExecutionBackend`, `PydanticAIDirectBackend`, and `PydanticAIGatewayBackend`.
 - [`src/app/workers/bulk_analysis_worker.py`](../src/app/workers/bulk_analysis_worker.py) and [`src/app/workers/bulk_reduce_worker.py`](../src/app/workers/bulk_reduce_worker.py) perform custom prompt budgeting, chunk sizing, and provider invocation.
 - [`src/app/workers/report_common.py`](../src/app/workers/report_common.py) and [`src/app/workers/report_worker.py`](../src/app/workers/report_worker.py) build prompts and call providers imperatively.
 - [`src/common/llm/tokens.py`](../src/common/llm/tokens.py) implements mixed token-counting strategies, including provider-specific fallbacks and character-based estimates.
@@ -40,8 +60,8 @@ What it should replace:
 
 Replacement status:
 
-- Partial replacement at first. Keep the app-level worker abstractions, cancellation, checkpointing, and prompt assembly.
-- Replace only the low-level request execution and response normalization layer.
+- Completed for the worker runtime.
+- The app-level worker abstractions, cancellation, checkpointing, and prompt assembly still remain, but low-level request execution and response normalization have already moved onto Pydantic AI `direct`.
 
 ### 2. Use Model Strings and Provider/Profile Resolution Instead of Expanding Custom Provider Branches
 
@@ -59,8 +79,9 @@ What it should replace:
 
 Replacement status:
 
-- Full replacement for provider/model selection logic in the Gateway-backed path.
-- Keep a narrow compatibility layer only where the app still needs settings-specific provider construction for legacy providers.
+- Largely complete for worker execution.
+- Direct-provider and gateway-backed workers now resolve provider/model naming centrally in [`src/app/workers/llm_backend.py`](../src/app/workers/llm_backend.py).
+- Remaining legacy compatibility is outside the worker runtime, primarily in [`src/common/llm/`](../src/common/llm/) and [`src/config/app_config.py`](../src/config/app_config.py).
 
 ### 3. Use UsageLimits for Pre-Request Token Enforcement Where Supported
 
@@ -77,8 +98,8 @@ What it should replace:
 
 Replacement status:
 
-- Partial replacement.
-- Keep custom chunk planning and file/document-level budgeting because the app still has domain-specific prompt assembly, evidence ledgers, and hierarchical chunking.
+- Implemented in the worker backend layer.
+- The remaining custom logic is the app-specific part that should stay custom: chunk planning, file/document-level budgeting, evidence ledgers, and hierarchical chunking.
 
 Provider caveat:
 
@@ -100,8 +121,8 @@ What it should replace:
 
 Replacement status:
 
-- Partial replacement.
-- Keep the current worker orchestration and job coordination; use model-level concurrency only for network request limiting.
+- Implemented for the worker backend layer.
+- Keep the current worker orchestration and job coordination; model-level concurrency is now used only for network request limiting.
 
 ### 5. Use Instrumented Models for LLM-Layer Telemetry
 
@@ -136,7 +157,7 @@ What it should replace:
 
 Replacement status:
 
-- Partial replacement.
+- Implemented for Gateway-backed worker execution, and standardized for the direct Pydantic AI worker backend as well.
 - Keep custom retry behavior when it is tied to provider SDK semantics or worker-level resume/cancellation behavior.
 
 ### 7. Use FallbackModel and Gateway Routing for Cross-Provider Failover
@@ -156,6 +177,7 @@ Replacement status:
 
 - Partial replacement initially.
 - Gateway routing groups are the better long-term fit once Anthropic, Gemini, and OpenAI are all enabled behind the gateway.
+- The current worker runtime intentionally does not do app-side fallback anymore; the next failover step should use upstream routing/fallback abstractions rather than reintroducing local backend escape hatches.
 
 ## Useful Later
 
@@ -372,6 +394,12 @@ But Gateway does not remove the need for app-level policy around:
 5. Adopt structured outputs and validators for selected workflows that currently depend on fragile text parsing.
 6. Add Pydantic Evals and span-based regression coverage after model-level instrumentation is stable.
 7. Revisit durable execution only if the product moves beyond the current desktop/file-checkpoint model.
+
+Status against this sequence:
+
+- Steps 1-4 are largely complete for worker execution, except for the failover portion of step 4.
+- Steps 5-7 remain open.
+- The next meaningful work should target either model-level instrumentation or selected structured-output migrations, not a return to local provider fallback logic.
 
 ## Sources
 
