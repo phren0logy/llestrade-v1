@@ -16,6 +16,7 @@ from PySide6.QtCore import Signal
 
 from src.app.core.azure_artifacts import is_azure_raw_artifact
 from src.app.core.bulk_analysis_groups import BulkAnalysisGroup
+from src.app.core.llm_catalog import calculate_usage_cost
 from src.app.core.bulk_analysis_runner import (
     BulkAnalysisCancelled,
     PromptBundle,
@@ -200,6 +201,7 @@ class BulkReduceWorker(DashboardWorker):
     file_failed = Signal(str, str)  # path, error
     finished = Signal(int, int)  # successes, failures
     log_message = Signal(str)
+    cost_calculated = Signal(float, str, str)
 
     def __init__(
         self,
@@ -225,6 +227,10 @@ class BulkReduceWorker(DashboardWorker):
             self._citation_store: CitationStore | None = CitationStore(project_dir)
         except Exception:
             self._citation_store = None
+        self._usage_totals = {
+            "input_tokens": 0,
+            "output_tokens": 0,
+        }
 
     # ------------------------------------------------------------------
     # QRunnable API
@@ -653,6 +659,9 @@ class BulkReduceWorker(DashboardWorker):
             checkpoint_mgr.clear_reduce()
 
             self.progress.emit(1, 1, "Completed")
+            total_cost = self._total_cost(provider_id=provider_cfg.provider_id, model_id=provider_cfg.model)
+            if total_cost is not None:
+                self.cost_calculated.emit(total_cost, provider_cfg.provider_id, "bulk_combined")
             self.finished.emit(1, 0)
 
         except BulkAnalysisCancelled:
@@ -975,6 +984,7 @@ class BulkReduceWorker(DashboardWorker):
                     input_tokens_limit=input_budget,
                 ),
             )
+        self._record_response_usage(response)
         content = str(response.text or "").strip()
         if not content:
             raise RuntimeError("LLM returned empty response")
@@ -984,7 +994,11 @@ class BulkReduceWorker(DashboardWorker):
         raw_context_window = getattr(self._group, "model_context_window", None)
         if not isinstance(raw_context_window, int) or raw_context_window <= 0:
             model_key = provider_cfg.model or provider_cfg.provider_id
-            raw_context_window = TokenCounter.get_model_context_window(model_key, ratio=1.0)
+            raw_context_window = TokenCounter.get_model_context_window(
+                model_key,
+                ratio=1.0,
+                provider_id=provider_cfg.provider_id,
+            )
 
         return compute_input_token_budget(
             raw_context_window=raw_context_window,
@@ -994,6 +1008,26 @@ class BulkReduceWorker(DashboardWorker):
 
     def _timestamp(self) -> str:
         return datetime.now().strftime("%Y%m%d-%H%M")
+
+    def _record_response_usage(self, response: object) -> None:
+        usage = getattr(response, "usage", None)
+        if usage is None:
+            return
+        self._usage_totals["input_tokens"] += int(getattr(usage, "input_tokens", 0) or 0)
+        self._usage_totals["output_tokens"] += int(getattr(usage, "output_tokens", 0) or 0)
+
+    def _total_cost(self, *, provider_id: str | None, model_id: str | None) -> float | None:
+        if not provider_id:
+            return None
+        amount = calculate_usage_cost(
+            provider_id=provider_id,
+            model_id=model_id,
+            input_tokens=self._usage_totals["input_tokens"],
+            output_tokens=self._usage_totals["output_tokens"],
+        )
+        if amount is None:
+            return None
+        return float(amount)
 
     def _output_paths(self) -> tuple[Path, Path]:
         slug = getattr(self._group, "slug", None) or self._group.folder_name

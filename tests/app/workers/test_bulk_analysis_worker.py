@@ -124,7 +124,7 @@ class _CountingBackend(LLMExecutionBackend):
         _ = provider, request
         self.invoked = True
         self.requests.append(request)
-        return _model_response("summary", model_name="claude", output_tokens=1)
+        return _model_response("summary", model_name="claude-sonnet-4-5", output_tokens=1)
 
 
 def _capture_traces(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, dict[str, object] | None]]:
@@ -176,7 +176,7 @@ def test_compute_prompt_hash_changes_on_prompt_and_settings() -> None:
     group = BulkAnalysisGroup.create("Group")
     metadata = ProjectMetadata(case_name="Case A", subject_name="Subject", case_description="Desc")
     bundle = PromptBundle(system_template="System", user_template="User {document_content}")
-    config = ProviderConfig(provider_id="anthropic", model="claude")
+    config = ProviderConfig(provider_id="anthropic", model="claude-sonnet-4-5")
 
     first = _compute_prompt_hash(bundle, config, group, metadata)
 
@@ -247,7 +247,7 @@ def test_bulk_map_resolve_provider_normalizes_bedrock_model(tmp_path: Path) -> N
             "Gateway timeout",
         ),
         (
-            _model_response("   ", model_name="claude", output_tokens=1),
+            _model_response("   ", model_name="claude-sonnet-4-5", output_tokens=1),
             "LLM returned empty response",
         ),
     ],
@@ -270,7 +270,7 @@ def test_bulk_map_invoke_provider_raises_for_failed_or_empty_backend_result(
     with pytest.raises(RuntimeError, match=message):
         worker._invoke_provider(
             provider=object(),
-            provider_config=ProviderConfig(provider_id="anthropic", model="claude"),
+            provider_config=ProviderConfig(provider_id="anthropic", model="claude-sonnet-4-5"),
             prompt="Prompt",
             system_prompt="System",
         )
@@ -290,7 +290,7 @@ def test_bulk_map_invoke_provider_raises_cancelled_when_worker_cancelled(tmp_pat
     with pytest.raises(worker_module.BulkAnalysisCancelled):
         worker._invoke_provider(
             provider=object(),
-            provider_config=ProviderConfig(provider_id="anthropic", model="claude"),
+            provider_config=ProviderConfig(provider_id="anthropic", model="claude-sonnet-4-5"),
             prompt="Prompt",
             system_prompt="System",
         )
@@ -302,7 +302,7 @@ def test_bulk_map_trace_attributes_match_between_legacy_and_gateway(
 ) -> None:
     group = BulkAnalysisGroup.create("Group")
     group.slug = "group-slug"
-    config = ProviderConfig(provider_id="anthropic", model="claude")
+    config = ProviderConfig(provider_id="anthropic", model="claude-sonnet-4-5")
 
     legacy_worker = BulkAnalysisWorker(
         project_dir=tmp_path,
@@ -311,7 +311,7 @@ def test_bulk_map_trace_attributes_match_between_legacy_and_gateway(
         metadata=ProjectMetadata(case_name="Case"),
         force_rerun=False,
         llm_backend=_ResultBackend(
-            _model_response("summary", model_name="claude", output_tokens=1)
+            _model_response("summary", model_name="claude-sonnet-4-5", output_tokens=1)
         ),
     )
     legacy_traces = _capture_traces(monkeypatch)
@@ -330,7 +330,7 @@ def test_bulk_map_trace_attributes_match_between_legacy_and_gateway(
         metadata=ProjectMetadata(case_name="Case"),
         force_rerun=False,
         llm_backend=_ResultBackend(
-            _model_response("summary", model_name="claude", output_tokens=1)
+            _model_response("summary", model_name="claude-sonnet-4-5", output_tokens=1)
         ),
     )
     gateway_traces = _capture_traces(monkeypatch)
@@ -347,10 +347,10 @@ def test_bulk_map_trace_attributes_match_between_legacy_and_gateway(
     assert legacy_traces == gateway_traces == [
         (
             "bulk_analysis.invoke_llm",
-            {
-                "llestrade.provider_id": "anthropic",
-                "llestrade.model": "claude",
-                "llestrade.max_tokens": 32000,
+                {
+                    "llestrade.provider_id": "anthropic",
+                    "llestrade.model": "claude-sonnet-4-5",
+                    "llestrade.max_tokens": 32000,
                 "llestrade.temperature": 0.1,
                 "llestrade.worker": "bulk_analysis",
                 "llestrade.stage": "bulk_map",
@@ -377,8 +377,8 @@ def test_bulk_worker_uses_backend_token_count_for_gateway_preflight(tmp_path: Pa
 
     with pytest.raises(RuntimeError, match="500 tokens > 400 budget"):
         worker._invoke_provider(
-            provider=worker._create_provider(ProviderConfig(provider_id="anthropic", model="claude")),
-            provider_config=ProviderConfig(provider_id="anthropic", model="claude"),
+            provider=worker._create_provider(ProviderConfig(provider_id="anthropic", model="claude-sonnet-4-5")),
+            provider_config=ProviderConfig(provider_id="anthropic", model="claude-sonnet-4-5"),
             prompt="Prompt",
             system_prompt="System",
             input_budget=400,
@@ -401,8 +401,8 @@ def test_bulk_worker_applies_reasoning_settings_to_llm_request(tmp_path: Path) -
     )
 
     result = worker._invoke_provider(
-        provider=worker._create_provider(ProviderConfig(provider_id="anthropic", model="claude")),
-        provider_config=ProviderConfig(provider_id="anthropic", model="claude"),
+        provider=worker._create_provider(ProviderConfig(provider_id="anthropic", model="claude-sonnet-4-5")),
+        provider_config=ProviderConfig(provider_id="anthropic", model="claude-sonnet-4-5"),
         prompt="Prompt",
         system_prompt="System",
     )
@@ -528,7 +528,7 @@ def test_bulk_worker_applies_placeholder_values(tmp_path: Path, monkeypatch: pyt
         user_template="Summary of {source_pdf_filename} for {client_name}",
     )
 
-    provider_config = ProviderConfig(provider_id="anthropic", model="model")
+    provider_config = ProviderConfig(provider_id="anthropic", model="claude-sonnet-4-5")
     captured: dict[str, list[str]] = {"system": [], "user": []}
 
     def fake_invoke(self, provider, config, prompt, system_prompt, **_kwargs):  # noqa: ANN001
@@ -703,7 +703,7 @@ def test_bulk_worker_surfaces_gateway_spend_limit_rejection(
     monkeypatch.setattr(
         BulkAnalysisWorker,
         "_resolve_provider",
-        lambda self: ProviderConfig(provider_id="anthropic", model="claude"),
+        lambda self: ProviderConfig(provider_id="anthropic", model="claude-sonnet-4-5"),
     )
     monkeypatch.setattr(
         BulkAnalysisWorker,

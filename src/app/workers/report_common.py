@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from src.app.core.citations import CitationRecordStats, CitationStore, parse_citation_tokens
+from src.app.core.llm_catalog import calculate_usage_cost
 from src.app.core.report_prompt_context import build_report_base_placeholders
 from src.app.core.project_manager import ProjectMetadata
 from src.app.core.report_inputs import category_display_name
@@ -65,6 +66,11 @@ class ReportWorkerBase(DashboardWorker):
             self._citation_store: CitationStore | None = CitationStore(project_dir)
         except Exception:
             self._citation_store = None
+        self._usage_totals = {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+        }
 
     # ------------------------------------------------------------------
     # Placeholder helpers
@@ -179,6 +185,31 @@ class ReportWorkerBase(DashboardWorker):
             max_output_tokens=max_output_tokens,
             minimum_budget=_MIN_REPORT_INPUT_BUDGET,
         )
+
+    def _record_response_usage(self, response: object) -> None:
+        usage = getattr(response, "usage", None)
+        if usage is None:
+            return
+
+        input_tokens = int(getattr(usage, "input_tokens", 0) or 0)
+        output_tokens = int(getattr(usage, "output_tokens", 0) or 0)
+        self._usage_totals["input_tokens"] += input_tokens
+        self._usage_totals["output_tokens"] += output_tokens
+        self._usage_totals["total_tokens"] += input_tokens + output_tokens
+
+    def _usage_summary(self) -> dict[str, int]:
+        return dict(self._usage_totals)
+
+    def _total_cost(self) -> float | None:
+        amount = calculate_usage_cost(
+            provider_id=self._provider_id,
+            model_id=self._custom_model or self._model,
+            input_tokens=self._usage_totals["input_tokens"],
+            output_tokens=self._usage_totals["output_tokens"],
+        )
+        if amount is None:
+            return None
+        return float(amount)
 
     # ------------------------------------------------------------------
     # Citation helpers

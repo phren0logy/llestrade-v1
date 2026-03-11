@@ -10,6 +10,8 @@ from typing import Any, Literal, Mapping, Optional, Protocol
 
 from pydantic_ai.settings import ModelSettings
 
+from src.app.core.llm_catalog import default_model_for_provider
+
 logger = logging.getLogger(__name__)
 
 _BEDROCK_MODEL_ALIASES: dict[str, str] = {
@@ -87,19 +89,6 @@ class LLMProviderRequest:
 
     provider_id: str
     model: Optional[str]
-
-
-def default_model_for_provider(provider_id: str) -> str:
-    """Return a stable fallback model when native providers are not initialized."""
-    defaults = {
-        "anthropic": os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-5"),
-        "anthropic_bedrock": os.getenv("BEDROCK_ANTHROPIC_MODEL", "anthropic.claude-sonnet-4-5-v1"),
-        "azure_openai": os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4.1"),
-        "openai": os.getenv("OPENAI_MODEL", "gpt-4.1"),
-        "gemini": os.getenv("GEMINI_MODEL", "gemini-2.5-pro"),
-    }
-    return defaults.get(provider_id, "")
-
 
 def normalize_model_name(provider_id: str, model: Optional[str]) -> str | None:
     """Normalize explicit model selections for a provider."""

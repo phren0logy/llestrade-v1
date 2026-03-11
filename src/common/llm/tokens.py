@@ -3,36 +3,15 @@ Token counting utilities for LLM providers.
 """
 
 import logging
-from functools import lru_cache
 from typing import Dict, List, Optional, Any
+
+from src.app.core.llm_catalog import resolve_model_context_window
 
 logger = logging.getLogger(__name__)
 
-# Model context window sizes (actual token limits)
-MODEL_CONTEXT_WINDOWS = {
-    # Azure OpenAI
-    "gpt-4.1": 1_000_000,
-    "gpt-4-turbo": 128_000,
-    "gpt-35-turbo": 16_000,
-
-    # Anthropic Claude
-    "claude-sonnet-4-5": 200_000,
-    "claude-sonnet-4-5-20250929": 200_000,
-    "claude-opus-4-6": 200_000,
-    "claude-opus-4-1-20250805": 200_000,
-    "anthropic.claude-sonnet-4-5-v1": 200_000,
-    "anthropic.claude-opus-4-6-v1": 200_000,
-    "anthropic.claude-sonnet-4-5-20250929-v1:0": 200_000,
-    "anthropic.claude-opus-4-1-20250805-v1:0": 200_000,
-
-    # Google Gemini
-    "gemini-2.5-pro-preview-05-06": 2_000_000,
-    "gemini-1.5-pro": 2_000_000,
-    "gemini-1.5-flash": 1_000_000,
-}
+MODEL_CONTEXT_WINDOWS: dict[str, int] = {}
 
 SAFE_WINDOW_RATIO = 0.65
-DEFAULT_CONTEXT_WINDOW = int(30_000 / SAFE_WINDOW_RATIO)
 
 # Token counting cache
 _TOKEN_COUNT_CACHE = {}
@@ -44,38 +23,51 @@ class TokenCounter:
     """Unified token counting for all providers."""
     
     @staticmethod
-    def get_model_context_window(model_name: str, ratio: Optional[float] = None) -> int:
+    def get_model_context_window(
+        model_name: str,
+        ratio: Optional[float] = None,
+        *,
+        provider_id: Optional[str] = None,
+    ) -> int:
         """
         Get the safe context window size for a model.
         
         Args:
             model_name: The model identifier
+            provider_id: Optional provider identifier to disambiguate model lookup.
             ratio: Optional multiplier to apply to the raw context window.
                 Defaults to SAFE_WINDOW_RATIO (0.65) to keep a safety buffer.
             
         Returns:
-            The safe context window size in tokens (65% of actual limit)
-            Defaults to 30,000 tokens if model not found
+            The safe context window size in tokens.
         """
-        raw_window = TokenCounter._resolve_context_window(model_name)
+        raw_window = TokenCounter._resolve_context_window(
+            model_name,
+            provider_id=provider_id,
+        )
         applied_ratio = SAFE_WINDOW_RATIO if ratio is None else ratio
         applied_ratio = max(0.0, min(1.0, applied_ratio))
         return int(raw_window * applied_ratio)
 
     @staticmethod
-    def _resolve_context_window(model_name: str) -> int:
+    def _resolve_context_window(
+        model_name: str,
+        *,
+        provider_id: Optional[str] = None,
+    ) -> int:
         """Return the raw (max) context window for a model."""
         if not model_name:
-            return DEFAULT_CONTEXT_WINDOW
-        if model_name in MODEL_CONTEXT_WINDOWS:
-            return MODEL_CONTEXT_WINDOWS[model_name]
+            raise RuntimeError("A model name is required to resolve the context window.")
 
-        for known_model, window_size in MODEL_CONTEXT_WINDOWS.items():
-            if known_model in model_name or model_name in known_model:
-                return window_size
+        raw_window = resolve_model_context_window(provider_id or "", model_name)
+        if raw_window:
+            return raw_window
 
-        logger.warning(f"Unknown model '{model_name}', using default context window of 30,000 tokens")
-        return DEFAULT_CONTEXT_WINDOW
+        message = f"Unknown context window for provider={provider_id or 'unknown'} model={model_name}"
+        logger.warning(message)
+        raise RuntimeError(
+            f"{message}. Choose a preset model with catalog metadata or enter an explicit context window."
+        )
     
     @staticmethod
     def count(

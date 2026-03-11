@@ -55,7 +55,7 @@ class _NoNativeBackend(LLMExecutionBackend):
 
     def invoke_response(self, provider, request: LLMInvocationRequest) -> ModelResponse:  # noqa: ANN001
         _ = provider
-        return _model_response("summary", model_name=request.model or "claude", output_tokens=1)
+        return _model_response("summary", model_name=request.model or "claude-sonnet-4-5", output_tokens=1)
 
 
 class _ResultBackend(LLMExecutionBackend):
@@ -164,7 +164,7 @@ def test_bulk_reduce_worker_force_rerun(tmp_path: Path, qtbot, monkeypatch: pyte
     monkeypatch.setattr(
         BulkReduceWorker,
         "_resolve_provider",
-        lambda self: ProviderConfig(provider_id="anthropic", model="claude", temperature=0.1),
+        lambda self: ProviderConfig(provider_id="anthropic", model="claude-sonnet-4-5", temperature=0.1),
     )
     monkeypatch.setattr(
         BulkReduceWorker,
@@ -247,7 +247,7 @@ def test_bulk_reduce_worker_applies_placeholder_values(tmp_path: Path, monkeypat
     monkeypatch.setattr(
         BulkReduceWorker,
         "_resolve_provider",
-        lambda self: ProviderConfig(provider_id="anthropic", model="claude", temperature=0.1),
+        lambda self: ProviderConfig(provider_id="anthropic", model="claude-sonnet-4-5", temperature=0.1),
     )
     monkeypatch.setattr(
         BulkReduceWorker,
@@ -365,7 +365,7 @@ def test_bulk_reduce_invoke_provider_rejects_unsupported_reasoning_mode(tmp_path
             "Gateway provider rejected request",
         ),
         (
-            _model_response(" ", model_name="claude", output_tokens=1),
+            _model_response(" ", model_name="claude-sonnet-4-5", output_tokens=1),
             "LLM returned empty response",
         ),
     ],
@@ -387,7 +387,7 @@ def test_bulk_reduce_invoke_provider_raises_for_failed_or_empty_backend_result(
     with pytest.raises(RuntimeError, match=message):
         worker._invoke_provider(
             provider=object(),
-            provider_cfg=ProviderConfig(provider_id="anthropic", model="claude", temperature=0.1),
+            provider_cfg=ProviderConfig(provider_id="anthropic", model="claude-sonnet-4-5", temperature=0.1),
             prompt="Prompt",
             system_prompt="System",
         )
@@ -406,7 +406,7 @@ def test_bulk_reduce_invoke_provider_raises_cancelled_when_worker_cancelled(tmp_
     with pytest.raises(reduce_module.BulkAnalysisCancelled):
         worker._invoke_provider(
             provider=object(),
-            provider_cfg=ProviderConfig(provider_id="anthropic", model="claude", temperature=0.1),
+            provider_cfg=ProviderConfig(provider_id="anthropic", model="claude-sonnet-4-5", temperature=0.1),
             prompt="Prompt",
             system_prompt="System",
         )
@@ -418,7 +418,7 @@ def test_bulk_reduce_trace_attributes_match_between_legacy_and_gateway(
 ) -> None:
     group = BulkAnalysisGroup.create("Group")
     group.slug = "group-slug"
-    config = ProviderConfig(provider_id="anthropic", model="claude", temperature=0.1)
+    config = ProviderConfig(provider_id="anthropic", model="claude-sonnet-4-5", temperature=0.1)
 
     legacy_worker = BulkReduceWorker(
         project_dir=tmp_path,
@@ -426,7 +426,7 @@ def test_bulk_reduce_trace_attributes_match_between_legacy_and_gateway(
         metadata=ProjectMetadata(case_name="Case"),
         force_rerun=False,
         llm_backend=_ResultBackend(
-            _model_response("summary", model_name="claude", output_tokens=1)
+            _model_response("summary", model_name="claude-sonnet-4-5", output_tokens=1)
         ),
     )
     legacy_traces = _capture_traces(monkeypatch)
@@ -443,7 +443,7 @@ def test_bulk_reduce_trace_attributes_match_between_legacy_and_gateway(
         metadata=ProjectMetadata(case_name="Case"),
         force_rerun=False,
         llm_backend=_ResultBackend(
-            _model_response("summary", model_name="claude", output_tokens=1)
+            _model_response("summary", model_name="claude-sonnet-4-5", output_tokens=1)
         ),
     )
     gateway_traces = _capture_traces(monkeypatch)
@@ -459,10 +459,10 @@ def test_bulk_reduce_trace_attributes_match_between_legacy_and_gateway(
     assert legacy_traces == gateway_traces == [
         (
             "bulk_reduce.invoke_llm",
-            {
-                "llestrade.provider_id": "anthropic",
-                "llestrade.model": "claude",
-                "llestrade.max_tokens": 32000,
+                {
+                    "llestrade.provider_id": "anthropic",
+                    "llestrade.model": "claude-sonnet-4-5",
+                    "llestrade.max_tokens": 32000,
                 "llestrade.temperature": 0.1,
                 "llestrade.worker": "bulk_reduce",
                 "llestrade.stage": "bulk_reduce",
@@ -480,7 +480,7 @@ def test_bulk_reduce_passes_computed_input_budget_to_backend(
     group = BulkAnalysisGroup.create("Group")
     group.model_context_window = 100_000
     backend = _CapturingBackend(
-        _model_response("summary", model_name="claude", output_tokens=1)
+        _model_response("summary", model_name="claude-sonnet-4-5", output_tokens=1)
     )
     worker = BulkReduceWorker(
         project_dir=tmp_path,
@@ -492,11 +492,11 @@ def test_bulk_reduce_passes_computed_input_budget_to_backend(
 
     result = worker._invoke_provider(
         provider=object(),
-        provider_cfg=ProviderConfig(provider_id="anthropic", model="claude", temperature=0.1),
+        provider_cfg=ProviderConfig(provider_id="anthropic", model="claude-sonnet-4-5", temperature=0.1),
         prompt="Prompt",
         system_prompt="System",
         input_budget=worker._max_input_budget(
-            ProviderConfig(provider_id="anthropic", model="claude", temperature=0.1),
+            ProviderConfig(provider_id="anthropic", model="claude-sonnet-4-5", temperature=0.1),
             max_output_tokens=32_000,
         ),
     )
@@ -510,7 +510,7 @@ def test_bulk_reduce_applies_reasoning_settings_to_llm_request(tmp_path: Path) -
     group = BulkAnalysisGroup.create("Group")
     group.use_reasoning = True
     backend = _CapturingBackend(
-        _model_response("summary", model_name="claude", output_tokens=1)
+        _model_response("summary", model_name="claude-sonnet-4-5", output_tokens=1)
     )
     worker = BulkReduceWorker(
         project_dir=tmp_path,
@@ -522,7 +522,7 @@ def test_bulk_reduce_applies_reasoning_settings_to_llm_request(tmp_path: Path) -
 
     result = worker._invoke_provider(
         provider=object(),
-        provider_cfg=ProviderConfig(provider_id="anthropic", model="claude", temperature=0.1),
+        provider_cfg=ProviderConfig(provider_id="anthropic", model="claude-sonnet-4-5", temperature=0.1),
         prompt="Prompt",
         system_prompt="System",
     )
@@ -556,7 +556,7 @@ def test_bulk_reduce_worker_surfaces_gateway_timeout(
     monkeypatch.setattr(
         BulkReduceWorker,
         "_resolve_provider",
-        lambda self: ProviderConfig(provider_id="anthropic", model="claude", temperature=0.1),
+        lambda self: ProviderConfig(provider_id="anthropic", model="claude-sonnet-4-5", temperature=0.1),
     )
     monkeypatch.setattr(
         BulkReduceWorker,

@@ -31,7 +31,6 @@ def test_default_provider_catalog_exposes_openai_and_gemini_but_not_azure() -> N
     provider_ids = {option.provider_id for option in default_provider_catalog()}
 
     assert "anthropic" in provider_ids
-    assert "anthropic_bedrock" in provider_ids
     assert "openai" in provider_ids
     assert "gemini" in provider_ids
     assert "azure_openai" not in provider_ids

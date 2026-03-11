@@ -180,7 +180,12 @@ def should_chunk(
             tokens = max(counted, 1)
     else:
         tokens = conservative_estimate
-    context_window = TokenCounter.get_model_context_window(model_name or provider_id)
+    if not model_name:
+        raise RuntimeError("A model must be selected before bulk chunk sizing can be calculated.")
+    context_window = TokenCounter.get_model_context_window(
+        model_name,
+        provider_id=provider_id,
+    )
     max_tokens_per_chunk = max(context_window, 4000)
     return tokens > max_tokens_per_chunk, tokens, max_tokens_per_chunk
 
@@ -305,8 +310,17 @@ def combine_chunk_summaries_hierarchical(
         raise BulkAnalysisCancelled("Operation cancelled before hierarchical reduction")
 
     # Calculate thresholds from the model's context window with a 65% safety buffer.
-    raw_context_window = TokenCounter.get_model_context_window(model or provider_id, ratio=1.0)
-    context_window = TokenCounter.get_model_context_window(model or provider_id)
+    if not model:
+        raise RuntimeError("A model must be selected before hierarchical reduction can run.")
+    raw_context_window = TokenCounter.get_model_context_window(
+        model,
+        ratio=1.0,
+        provider_id=provider_id,
+    )
+    context_window = TokenCounter.get_model_context_window(
+        model,
+        provider_id=provider_id,
+    )
     max_combine_tokens = int(context_window * 0.95)
 
     logger.info(

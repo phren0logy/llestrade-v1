@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from typing import Any, Dict
 
@@ -31,6 +32,17 @@ class _ProviderMeta:
     def __init__(self, name: str, default_model: str = "default-model") -> None:
         self.provider_name = name
         self.default_model = default_model
+
+
+@pytest.fixture(autouse=True)
+def gateway_test_event_loop() -> Any:
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        yield loop
+    finally:
+        asyncio.set_event_loop(None)
+        loop.close()
 
 
 def test_direct_provider_backend_requires_direct_provider_metadata() -> None:
@@ -70,8 +82,11 @@ def test_normalize_model_name_translates_bedrock_aliases() -> None:
 
 
 def test_resolve_model_name_uses_provider_defaults() -> None:
-    assert resolve_model_name("azure_openai", None) == "gpt-4.1"
-    assert resolve_model_name("anthropic_bedrock", None) == "anthropic.claude-sonnet-4-5-v1"
+    assert str(resolve_model_name("anthropic", None)).startswith("claude")
+    assert str(resolve_model_name("openai", None)).startswith(("gpt-", "o"))
+    assert str(resolve_model_name("gemini", None)).startswith("gemini")
+    assert resolve_model_name("azure_openai", None) is None
+    assert resolve_model_name("anthropic_bedrock", None) is None
 
 
 def test_provider_capabilities_centralize_reasoning_and_preflight_support() -> None:

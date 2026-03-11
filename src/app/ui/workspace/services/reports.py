@@ -93,6 +93,7 @@ class ReportsService:
         on_log: Callable[[str], None],
         on_finished: Callable[[dict], None],
         on_failed: Callable[[str], None],
+        on_cost: Callable[[float, str, str], None],
     ) -> bool:
         if self.is_running():
             return False
@@ -124,6 +125,7 @@ class ReportsService:
             on_log=on_log,
             on_finished=on_finished,
             on_failed=on_failed,
+            on_cost=on_cost,
         )
 
     # ------------------------------------------------------------------
@@ -138,6 +140,7 @@ class ReportsService:
         on_log: Callable[[str], None],
         on_finished: Callable[[dict], None],
         on_failed: Callable[[str], None],
+        on_cost: Callable[[float, str, str], None],
     ) -> bool:
         if self.is_running():
             return False
@@ -170,6 +173,7 @@ class ReportsService:
             on_log=on_log,
             on_finished=on_finished,
             on_failed=on_failed,
+            on_cost=on_cost,
         )
 
     # ------------------------------------------------------------------
@@ -185,9 +189,12 @@ class ReportsService:
         on_log: Callable[[str], None],
         on_finished: Callable[[dict], None],
         on_failed: Callable[[str], None],
+        on_cost: Callable[[float, str, str], None],
     ) -> bool:
         worker.progress.connect(on_progress)
         worker.log_message.connect(on_log)
+        if hasattr(worker, "cost_calculated"):
+            worker.cost_calculated.connect(on_cost)
         worker.finished.connect(lambda result, w=worker, k=key: self._handle_finished(k, w, result, on_finished))
         worker.failed.connect(lambda message, w=worker, k=key: self._handle_failed(k, w, message, on_failed))
 

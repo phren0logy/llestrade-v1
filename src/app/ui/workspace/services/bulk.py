@@ -46,6 +46,7 @@ class BulkAnalysisService:
         on_failed: Callable[[str, str, str], None],
         on_log: Callable[[str, str], None],
         on_finished: Callable[[str, int, int], None],
+        on_cost: Callable[[float, str, str], None],
     ) -> bool:
         key = self._map_key(group.group_id)
         if self._workers.get(key):
@@ -67,6 +68,8 @@ class BulkAnalysisService:
         worker.progress.connect(lambda done, total, rel, g=gid: on_progress(g, done, total, rel))
         worker.file_failed.connect(lambda rel, err, g=gid: on_failed(g, rel, err))
         worker.log_message.connect(lambda message, g=gid: on_log(g, message))
+        if hasattr(worker, "cost_calculated"):
+            worker.cost_calculated.connect(on_cost)
         worker.finished.connect(
             lambda success, failed, w=worker, g=gid: self._handle_finished(
                 key, w, success, failed, lambda s=success, f=failed, group_id=g: on_finished(group_id, s, f)
@@ -92,6 +95,7 @@ class BulkAnalysisService:
         on_failed: Callable[[str, str, str], None],
         on_log: Callable[[str, str], None],
         on_finished: Callable[[str, int, int], None],
+        on_cost: Callable[[float, str, str], None],
     ) -> bool:
         key = self._combined_key(group.group_id)
         if self._workers.get(key):
@@ -111,6 +115,8 @@ class BulkAnalysisService:
         worker.progress.connect(lambda done, total, msg, g=gid: on_progress(g, done, total, msg))
         worker.file_failed.connect(lambda rel, err, g=gid: on_failed(g, rel, err))
         worker.log_message.connect(lambda message, g=gid: on_log(g, message))
+        if hasattr(worker, "cost_calculated"):
+            worker.cost_calculated.connect(on_cost)
         worker.finished.connect(
             lambda success, failed, w=worker, g=gid: self._handle_finished(
                 key, w, success, failed, lambda s=success, f=failed, group_id=g: on_finished(group_id, s, f)

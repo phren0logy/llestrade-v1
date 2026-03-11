@@ -47,6 +47,7 @@ class DraftReportWorker(ReportWorkerBase):
     log_message = Signal(str)
     finished = Signal(dict)
     failed = Signal(str)
+    cost_calculated = Signal(float, str, str)
 
     def __init__(
         self,
@@ -256,7 +257,11 @@ class DraftReportWorker(ReportWorkerBase):
                 "generation_user_prompt": str(self._generation_user_prompt_path),
                 "generation_system_prompt": str(self._generation_system_prompt_path),
                 "section_count": len(section_outputs),
+                "usage": self._usage_summary(),
+                "cost": self._total_cost(),
             }
+            if result["cost"] is not None:
+                self.cost_calculated.emit(float(result["cost"]), self._provider_id, "report_draft")
             self.progress.emit(100, "Draft generated")
             self.finished.emit(result)
         except Exception as exc:  # pragma: no cover - defensive
@@ -322,6 +327,7 @@ class DraftReportWorker(ReportWorkerBase):
                         ),
                     ),
                 )
+            self._record_response_usage(response)
             content = str(response.text or "").strip()
             if not content:
                 raise RuntimeError(f"Generated section is empty: {section.title}")
@@ -394,6 +400,8 @@ class DraftReportWorker(ReportWorkerBase):
                 }
                 for payload in sections
             ],
+            "usage": self._usage_summary(),
+            "cost": self._total_cost(),
         }
         if citation_stats is not None:
             manifest["citations"] = {
@@ -412,6 +420,7 @@ class ReportRefinementWorker(ReportWorkerBase):
     log_message = Signal(str)
     finished = Signal(dict)
     failed = Signal(str)
+    cost_calculated = Signal(float, str, str)
 
     def __init__(
         self,
@@ -663,7 +672,11 @@ class ReportRefinementWorker(ReportWorkerBase):
                 "refinement_user_prompt": str(self._refinement_user_prompt_path),
                 "refinement_system_prompt": str(self._refinement_system_prompt_path),
                 "refinement_tokens": self._refine_usage,
+                "usage": self._usage_summary(),
+                "cost": self._total_cost(),
             }
+            if result["cost"] is not None:
+                self.cost_calculated.emit(float(result["cost"]), self._provider_id, "report_refinement")
             self.progress.emit(100, "Refinement completed")
             self.finished.emit(result)
         except Exception as exc:  # pragma: no cover - defensive
@@ -705,6 +718,7 @@ class ReportRefinementWorker(ReportWorkerBase):
                     ),
                 ),
             )
+        self._record_response_usage(response)
         content = str(response.text or "").strip()
         if not content:
             raise RuntimeError("Refinement step returned empty content")
@@ -747,7 +761,9 @@ class ReportRefinementWorker(ReportWorkerBase):
             "inputs": list(inputs_metadata),
             "usage": {
                 "refined_tokens": self._refine_usage,
+                **self._usage_summary(),
             },
+            "cost": self._total_cost(),
         }
         if citation_stats is not None:
             manifest["citations"] = {

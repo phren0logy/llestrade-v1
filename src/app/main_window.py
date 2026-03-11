@@ -32,6 +32,10 @@ from src.app.core import (
     SecureSettings,
     WorkspaceController,
 )
+from src.app.core.llm_catalog import (
+    start_background_catalog_refresh,
+    stop_background_catalog_refresh,
+)
 from src.app.ui.dialogs import NewProjectDialog
 from src.app.ui.stages.welcome_stage import WelcomeStage
 from src.config.prompt_store import (
@@ -134,6 +138,7 @@ class SimplifiedMainWindow(QMainWindow):
     # ------------------------------------------------------------------
     def _startup(self) -> None:
         self.logger.info("Initializing dashboard views")
+        start_background_catalog_refresh()
         self._welcome_stage = WelcomeStage()
         self._welcome_stage.new_project_requested.connect(self._new_project)
         self._welcome_stage.project_opened.connect(self._load_project)
@@ -455,6 +460,7 @@ class SimplifiedMainWindow(QMainWindow):
         self.settings.save_window_geometry(self.saveGeometry())
         if self.project_manager:
             self.project_manager.close_project()
+        stop_background_catalog_refresh()
         super().closeEvent(event)
 
 

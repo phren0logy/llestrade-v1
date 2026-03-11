@@ -783,6 +783,7 @@ class ReportsController:
             on_log=self._append_report_log,
             on_finished=self._on_report_finished,
             on_failed=self._on_report_failed,
+            on_cost=self._on_run_cost,
         )
         if not started:
             QMessageBox.information(
@@ -899,6 +900,7 @@ class ReportsController:
             on_log=self._append_report_log,
             on_finished=self._on_report_finished,
             on_failed=self._on_report_failed,
+            on_cost=self._on_run_cost,
         )
         if not started:
             QMessageBox.information(
@@ -946,6 +948,12 @@ class ReportsController:
         self._update_report_history_buttons()
         QMessageBox.critical(self._workspace, "Report Generator", message)
         self._append_report_log(f"Error: {message}")
+
+    def _on_run_cost(self, amount: float, provider: str, stage: str) -> None:
+        manager = self._project_manager
+        if not manager:
+            return
+        manager.add_cost(amount, provider, stage)
 
     # ------------------------------------------------------------------
     # History helpers

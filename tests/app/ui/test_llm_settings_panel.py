@@ -66,3 +66,21 @@ def test_panel_advanced_reasoning_starts_collapsed(qt_app: QApplication) -> None
         assert panel.advanced_frame.isVisible() is False
     finally:
         panel.deleteLater()
+
+
+def test_panel_shows_catalog_details_for_selected_model(qt_app: QApplication) -> None:
+    assert qt_app is not None
+    panel = LLMSettingsPanel()
+    try:
+        provider_index = panel.provider_combo.findData("openai")
+        panel.provider_combo.setCurrentIndex(provider_index)
+
+        model_index = panel.model_combo.findData("gpt-4.1")
+        panel.model_combo.setCurrentIndex(model_index)
+
+        details = panel.model_details_label.text()
+        assert "Context:" in details
+        assert "Input:" in details
+        assert "Output:" in details
+    finally:
+        panel.deleteLater()

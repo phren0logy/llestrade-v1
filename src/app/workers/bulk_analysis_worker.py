@@ -14,6 +14,7 @@ import frontmatter
 from PySide6.QtCore import Signal
 
 from src.app.core.bulk_analysis_groups import BulkAnalysisGroup
+from src.app.core.llm_catalog import calculate_usage_cost
 from src.app.core.bulk_analysis_runner import (
     BulkAnalysisCancelled,
     BulkAnalysisDocument,
@@ -205,6 +206,7 @@ class BulkAnalysisWorker(DashboardWorker):
     file_failed = Signal(str, str)  # relative path, error message
     finished = Signal(int, int)  # successes, failures
     log_message = Signal(str)
+    cost_calculated = Signal(float, str, str)
 
     def __init__(
         self,
@@ -235,6 +237,10 @@ class BulkAnalysisWorker(DashboardWorker):
             self._citation_store: CitationStore | None = CitationStore(project_dir)
         except Exception:
             self._citation_store = None
+        self._usage_totals = {
+            "input_tokens": 0,
+            "output_tokens": 0,
+        }
 
     # ------------------------------------------------------------------
     # QRunnable API
@@ -482,6 +488,12 @@ class BulkAnalysisWorker(DashboardWorker):
                     self.logger.debug("%s failed to save bulk analysis manifest", self.job_tag, exc_info=True)
             if skipped:
                 self.log_message.emit(f"Skipped {skipped} document(s) (no changes detected)")
+            total_cost = self._total_cost(
+                provider_id=provider_config.provider_id if "provider_config" in locals() else None,
+                model_id=provider_config.model if "provider_config" in locals() else None,
+            )
+            if total_cost is not None:
+                self.cost_calculated.emit(total_cost, provider_config.provider_id, "bulk_map")
             self.logger.info("%s finished: successes=%s failures=%s skipped=%s", self.job_tag, successes, failures, skipped)
             self.finished.emit(successes, failures)
     def cancel(self) -> None:
@@ -535,6 +547,7 @@ class BulkAnalysisWorker(DashboardWorker):
             raw_context_window = TokenCounter.get_model_context_window(
                 provider_config.model or provider_config.provider_id,
                 ratio=1.0,
+                provider_id=provider_config.provider_id,
             )
 
         input_budget = self._max_input_budget(
@@ -914,10 +927,31 @@ class BulkAnalysisWorker(DashboardWorker):
                     input_tokens_limit=input_budget,
                 ),
             )
+        self._record_response_usage(response)
         content = str(response.text or "").strip()
         if not content:
             raise RuntimeError("LLM returned empty response")
         return content
+
+    def _record_response_usage(self, response: object) -> None:
+        usage = getattr(response, "usage", None)
+        if usage is None:
+            return
+        self._usage_totals["input_tokens"] += int(getattr(usage, "input_tokens", 0) or 0)
+        self._usage_totals["output_tokens"] += int(getattr(usage, "output_tokens", 0) or 0)
+
+    def _total_cost(self, *, provider_id: str | None, model_id: str | None) -> float | None:
+        if not provider_id:
+            return None
+        amount = calculate_usage_cost(
+            provider_id=provider_id,
+            model_id=model_id,
+            input_tokens=self._usage_totals["input_tokens"],
+            output_tokens=self._usage_totals["output_tokens"],
+        )
+        if amount is None:
+            return None
+        return float(amount)
 
     def _resolve_provider(self) -> ProviderConfig:
         provider_id = self._group.provider_id or self._default_provider[0] or "anthropic"

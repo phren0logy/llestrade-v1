@@ -3,35 +3,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import os
-from typing import Optional, Sequence
+from typing import Optional
 
-from src.app.core.secure_settings import SecureSettings
-from src.common.llm.bedrock_catalog import DEFAULT_BEDROCK_MODELS, list_bedrock_models
-
-SUPPORTED_SELECTOR_PROVIDER_IDS: tuple[str, ...] = (
-    "anthropic",
-    "anthropic_bedrock",
-    "openai",
-    "gemini",
+from src.app.core.llm_catalog import (
+    LLMModelOption,
+    LLMProviderOption,
+    SUPPORTED_SELECTOR_PROVIDER_IDS,
+    default_model_for_provider,
+    default_provider_catalog,
+    provider_option_map,
 )
-
-
-@dataclass(frozen=True, slots=True)
-class LLMModelOption:
-    """Single preset model entry for a provider."""
-
-    model_id: str
-    label: str
-
-
-@dataclass(frozen=True, slots=True)
-class LLMProviderOption:
-    """Selector metadata for a supported LLM provider."""
-
-    provider_id: str
-    label: str
-    models: tuple[LLMModelOption, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,103 +65,13 @@ def settings_from_report_preferences(
     if not provider:
         provider = "anthropic"
 
-    model_id = custom or stored_model or default_model_for_provider(provider)
+    model_id = custom or stored_model or default_model_for_provider(provider) or ""
     return LLMOperationSettings(
         provider_id=provider,
         model_id=model_id,
         context_window=context_window if custom else None,
         use_reasoning=bool(use_reasoning),
     )
-
-
-def default_provider_catalog(
-    *,
-    include_azure: bool = False,
-) -> tuple[LLMProviderOption, ...]:
-    """Return the shared provider/model selector catalog for the UI."""
-    providers: list[LLMProviderOption] = [
-        LLMProviderOption(
-            provider_id="anthropic",
-            label="Anthropic Claude",
-            models=(
-                LLMModelOption("claude-sonnet-4-5-20250929", "Claude Sonnet 4.5"),
-                LLMModelOption("claude-opus-4-6", "Claude Opus 4.6"),
-            ),
-        ),
-        LLMProviderOption(
-            provider_id="anthropic_bedrock",
-            label="AWS Bedrock (Claude)",
-            models=_bedrock_model_options(),
-        ),
-        LLMProviderOption(
-            provider_id="openai",
-            label="OpenAI",
-            models=(
-                LLMModelOption(
-                    default_model_for_provider("openai"),
-                    default_model_for_provider("openai"),
-                ),
-            ),
-        ),
-        LLMProviderOption(
-            provider_id="gemini",
-            label="Google Gemini",
-            models=(
-                LLMModelOption(
-                    default_model_for_provider("gemini"),
-                    default_model_for_provider("gemini"),
-                ),
-            ),
-        ),
-    ]
-    if include_azure:
-        providers.append(
-            LLMProviderOption(
-                provider_id="azure_openai",
-                label="Azure OpenAI",
-                models=(
-                    LLMModelOption(
-                        default_model_for_provider("azure_openai"),
-                        default_model_for_provider("azure_openai"),
-                    ),
-                ),
-            )
-        )
-    return tuple(provider for provider in providers if provider.models)
-
-
-def provider_option_map(
-    options: Sequence[LLMProviderOption],
-) -> dict[str, LLMProviderOption]:
-    return {option.provider_id: option for option in options}
-
-
-def _bedrock_model_options() -> tuple[LLMModelOption, ...]:
-    try:
-        settings = SecureSettings()
-        bedrock_settings = settings.get("aws_bedrock_settings", {}) or {}
-        bedrock_models = list_bedrock_models(
-            region=bedrock_settings.get("region"),
-            profile=bedrock_settings.get("profile"),
-        )
-    except Exception:
-        bedrock_models = list(DEFAULT_BEDROCK_MODELS)
-
-    return tuple(
-        LLMModelOption(model.model_id, model.name or model.model_id)
-        for model in bedrock_models
-    )
-
-
-def default_model_for_provider(provider_id: str) -> str:
-    defaults = {
-        "anthropic": os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-5"),
-        "anthropic_bedrock": os.getenv("BEDROCK_ANTHROPIC_MODEL", "anthropic.claude-sonnet-4-5-v1"),
-        "openai": os.getenv("OPENAI_MODEL", "gpt-4.1"),
-        "gemini": os.getenv("GEMINI_MODEL", "gemini-2.5-pro"),
-        "azure_openai": os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4.1"),
-    }
-    return defaults.get(provider_id, "")
 
 
 __all__ = [

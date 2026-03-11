@@ -431,6 +431,7 @@ class BulkAnalysisController:
                 failures,
                 operation="map",
             ),
+            on_cost=self._on_run_cost,
         )
         if not started:
             self._running_groups.discard(gid)
@@ -563,6 +564,7 @@ class BulkAnalysisController:
                 failures,
                 operation="combined",
             ),
+            on_cost=self._on_run_cost,
         )
         if not started:
             self._running_groups.discard(gid)
@@ -637,6 +639,12 @@ class BulkAnalysisController:
         if self._on_refresh_metrics:
             self._on_refresh_metrics()
         self._on_refresh_groups()
+
+    def _on_run_cost(self, amount: float, provider: str, stage: str) -> None:
+        manager = self._project_manager
+        if not manager:
+            return
+        manager.add_cost(amount, provider, stage)
 
     # ------------------------------------------------------------------
     # Helpers
