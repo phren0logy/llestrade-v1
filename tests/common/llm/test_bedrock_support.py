@@ -1,9 +1,18 @@
 import sys
 import types
 
+import pytest
+
 from src.common.llm import bedrock_catalog as catalog
 from src.common.llm.bedrock_catalog import DEFAULT_BEDROCK_MODELS
 from src.common.llm.providers import anthropic_bedrock
+
+
+@pytest.fixture(autouse=True)
+def _reset_bedrock_backoff():
+    anthropic_bedrock.AnthropicBedrockProvider.reset_backoff()
+    yield
+    anthropic_bedrock.AnthropicBedrockProvider.reset_backoff()
 
 
 def test_list_bedrock_models_falls_back_to_defaults(monkeypatch):

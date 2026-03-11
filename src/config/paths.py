@@ -7,6 +7,7 @@ to a visible Documents folder: ~/Documents/llestrade (and platform equivalents).
 
 from __future__ import annotations
 
+import os
 import sys
 import shutil
 from pathlib import Path
@@ -62,7 +63,11 @@ def documents_dir() -> Path:
 
 
 def app_user_root() -> Path:
-    root = documents_dir() / APP_FOLDER_NAME
+    env_override = os.getenv("LLESTRADE_USER_ROOT")
+    if env_override:
+        root = Path(env_override).expanduser()
+    else:
+        root = documents_dir() / APP_FOLDER_NAME
     root.mkdir(parents=True, exist_ok=True)
     return root
 

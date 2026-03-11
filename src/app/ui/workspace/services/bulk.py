@@ -10,6 +10,7 @@ from src.app.core.bulk_analysis_groups import BulkAnalysisGroup
 from src.app.core.project_manager import ProjectMetadata
 from src.app.workers import WorkerCoordinator
 from src.app.workers import BulkAnalysisWorker, BulkReduceWorker
+from src.app.workers.llm_backend import LLMExecutionBackend
 
 
 class BulkAnalysisService:
@@ -18,8 +19,14 @@ class BulkAnalysisService:
     _MAP_KEY_PREFIX = "bulk:"
     _COMBINED_KEY_PREFIX = "combine:"
 
-    def __init__(self, workers: WorkerCoordinator) -> None:
+    def __init__(
+        self,
+        workers: WorkerCoordinator,
+        *,
+        llm_backend: LLMExecutionBackend | None = None,
+    ) -> None:
         self._workers = workers
+        self._llm_backend = llm_backend
 
     # ------------------------------------------------------------------
     # Map (per-document) runs
@@ -53,6 +60,7 @@ class BulkAnalysisService:
             force_rerun=force_rerun,
             placeholder_values=placeholder_values,
             project_name=project_name,
+            llm_backend=self._llm_backend,
         )
 
         gid = group.group_id
@@ -96,6 +104,7 @@ class BulkAnalysisService:
             force_rerun=force_rerun,
             placeholder_values=placeholder_values,
             project_name=project_name,
+            llm_backend=self._llm_backend,
         )
 
         gid = group.group_id

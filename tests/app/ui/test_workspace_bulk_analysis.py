@@ -149,6 +149,58 @@ def test_workspace_run_executes_worker_and_updates_ui(tmp_path: Path, qt_app: QA
     workspace.deleteLater()
 
 
+def test_workspace_defaults_to_bulk_tab_when_converted_docs_exist(
+    tmp_path: Path,
+    qt_app: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert qt_app is not None
+
+    manager, _group = _create_project_with_group(tmp_path)
+    pool = _CaptureThreadPool()
+    monkeypatch.setattr(project_workspace, "get_worker_pool", lambda: pool)
+
+    workspace = ProjectWorkspace()
+    workspace.set_project(manager)
+    QCoreApplication.processEvents()
+
+    current_text = workspace._tabs.tabText(workspace._tabs.currentIndex())
+    assert current_text == "Bulk Analysis"
+
+    workspace.deleteLater()
+
+
+def test_workspace_conversion_finish_auto_runs_pending_groups(
+    tmp_path: Path,
+    qt_app: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert qt_app is not None
+
+    manager, group = _create_project_with_group(tmp_path)
+    pool = _CaptureThreadPool()
+    monkeypatch.setattr(project_workspace, "get_worker_pool", lambda: pool)
+
+    workspace = ProjectWorkspace()
+    workspace.set_project(manager)
+    QCoreApplication.processEvents()
+
+    captured_group_ids: list[str] = []
+
+    def fake_auto_run(groups):
+        captured_group_ids.extend(candidate.group_id for candidate in groups)
+        return 1
+
+    assert workspace.bulk_controller is not None
+    monkeypatch.setattr(workspace.bulk_controller, "auto_run_pending_groups", fake_auto_run)
+
+    workspace._on_conversion_finished(worker=None, jobs=[], successes=1, failures=0)
+
+    assert captured_group_ids == [group.group_id]
+
+    workspace.deleteLater()
+
+
 class _StubBulkAnalysisWorker(QObject, QRunnable):
     """Bulk-analysis worker stub that supports cancellation flow."""
 
@@ -168,6 +220,7 @@ class _StubBulkAnalysisWorker(QObject, QRunnable):
         force_rerun: bool = False,
         placeholder_values: dict[str, str] | None = None,
         project_name: str = "",
+        llm_backend=None,  # noqa: ANN001
     ) -> None:
         QObject.__init__(self)
         QRunnable.__init__(self)

@@ -73,11 +73,16 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
 
 @pytest.fixture(autouse=True)
 def _isolate_settings_dir(tmp_path, monkeypatch: pytest.MonkeyPatch):
-    """Keep tests from writing into the user's real settings directory."""
+    """Keep tests from writing into the user's real settings/profile directories."""
 
+    user_root = tmp_path / "user_root"
+    user_root.mkdir()
     settings_dir = tmp_path / "settings"
     settings_dir.mkdir()
-    monkeypatch.setenv("FRD_SETTINGS_DIR", str(settings_dir))
+    monkeypatch.setenv("LLESTRADE_USER_ROOT", str(user_root))
+    monkeypatch.setenv("LLESTRADE_SETTINGS_DIR", str(settings_dir))
+    monkeypatch.setenv("LLESTRADE_QSETTINGS_ORG", "LlestradeTests")
+    monkeypatch.setenv("LLESTRADE_QSETTINGS_APP", f"Settings-{tmp_path.name}")
     yield
 
 

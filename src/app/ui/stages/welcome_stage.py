@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 from datetime import datetime
 from pathlib import Path
@@ -27,7 +28,6 @@ from PySide6.QtWidgets import (
 
 from src.app.core import ProjectManager, SecureSettings
 from src.app.core.file_tracker import DashboardMetrics, FileTracker
-from src.common.llm.providers import AnthropicBedrockProvider
 
 LOGGER = logging.getLogger(__name__)
 
@@ -436,11 +436,28 @@ class WelcomeStage(QWidget):
 
     def _is_bedrock_available(self) -> bool:
         try:
-            provider = AnthropicBedrockProvider()
-            return provider.initialized
-        except Exception as exc:  # pragma: no cover - defensive
-            LOGGER.debug("Bedrock availability check failed: %s", exc)
-            return False
+            bedrock_settings = self.settings.get("aws_bedrock_settings", {}) or {}
+        except Exception:
+            bedrock_settings = {}
+
+        profile = str(bedrock_settings.get("profile") or "").strip()
+        if profile:
+            return True
+
+        # Consider standard AWS credential hints as "configured" for welcome-stage status.
+        env_markers = (
+            "AWS_PROFILE",
+            "AWS_DEFAULT_PROFILE",
+            "AWS_ACCESS_KEY_ID",
+            "AWS_WEB_IDENTITY_TOKEN_FILE",
+            "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+            "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+        )
+        if any(os.getenv(name) for name in env_markers):
+            return True
+
+        aws_dir = Path.home() / ".aws"
+        return (aws_dir / "credentials").exists() or (aws_dir / "config").exists()
 
 
 __all__ = ["WelcomeStage"]

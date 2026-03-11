@@ -170,6 +170,49 @@ class APIKeyDialog(QDialog):
 
         scroll_layout.addWidget(bedrock_group)
 
+        gateway_group = QGroupBox("Pydantic AI Gateway")
+        gateway_layout = QFormLayout(gateway_group)
+
+        gateway_info = QLabel(
+            "Optional custom base URL for a self-hosted gateway. Leave blank to use the managed gateway "
+            "or the environment variable override."
+        )
+        gateway_info.setWordWrap(True)
+        gateway_layout.addRow(gateway_info)
+
+        gateway_key_row = QHBoxLayout()
+        self.gateway_api_key = QLineEdit()
+        self.gateway_api_key.setEchoMode(QLineEdit.Password)
+        self.gateway_api_key.setPlaceholderText("Enter Pydantic AI Gateway API key...")
+        self.api_fields["pydantic_ai_gateway"] = self.gateway_api_key
+        gateway_key_row.addWidget(self.gateway_api_key)
+
+        gateway_show_btn = QPushButton("Show")
+        gateway_show_btn.setCheckable(True)
+        gateway_show_btn.setMaximumWidth(60)
+        gateway_show_btn.toggled.connect(
+            lambda checked: self.gateway_api_key.setEchoMode(
+                QLineEdit.Normal if checked else QLineEdit.Password
+            )
+        )
+        gateway_key_row.addWidget(gateway_show_btn)
+        gateway_layout.addRow("API Key:", gateway_key_row)
+
+        self.gateway_base_url = QLineEdit()
+        self.gateway_base_url.setPlaceholderText("https://gateway.example.com")
+        gateway_layout.addRow("Base URL:", self.gateway_base_url)
+        self.config_fields["gateway_base_url"] = self.gateway_base_url
+
+        gateway_help = QLabel(
+            "Use the custom domain from your self-hosted gateway deployment, for example "
+            "<code>https://gateway.example.com</code>."
+        )
+        gateway_help.setWordWrap(True)
+        gateway_help.setTextFormat(Qt.RichText)
+        gateway_layout.addRow("", gateway_help)
+
+        scroll_layout.addWidget(gateway_group)
+
         scroll_layout.addStretch()
         scroll.setWidget(scroll_widget)
         scroll.setWidgetResizable(True)
@@ -451,6 +494,11 @@ class APIKeyDialog(QDialog):
 
         self._refresh_bedrock_models(force=False, preferred_model=preferred_model)
 
+        gateway_settings = self.settings.get("pydantic_ai_gateway_settings", {}) or {}
+        base_url = str(gateway_settings.get("base_url") or "").strip()
+        if base_url:
+            self.gateway_base_url.setText(base_url)
+
         # Load Phoenix settings
         phoenix_settings = self.settings.get("phoenix_settings", {})
         self.phoenix_enabled.setChecked(phoenix_settings.get("enabled", False))
@@ -521,6 +569,12 @@ class APIKeyDialog(QDialog):
         }
         self.settings.set("aws_bedrock_settings", bedrock_settings)
         AnthropicBedrockProvider.reset_backoff()
+
+        gateway_base_url = self.gateway_base_url.text().strip()
+        self.settings.set(
+            "pydantic_ai_gateway_settings",
+            {"base_url": gateway_base_url or None},
+        )
 
         # Save Phoenix settings
         phoenix_settings = {

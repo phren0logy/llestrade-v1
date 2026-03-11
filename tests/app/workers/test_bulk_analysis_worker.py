@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Sequence
 
@@ -20,6 +21,7 @@ from src.app.workers.bulk_analysis_worker import (
     _save_manifest,
     _should_process_document,
 )
+from src.app.workers.llm_backend import LLMExecutionBackend, LLMInvocationRequest, LLMInvocationResult
 
 
 class _FakeProvider:
@@ -33,6 +35,72 @@ class _FakeProvider:
     def count_tokens(self, text=None, messages=None):  # noqa: ANN001
         content = text or ""
         return {"success": True, "token_count": max(len(content) // 4, 1)}
+
+
+class _NoNativeBackend(LLMExecutionBackend):
+    def requires_native_provider(self) -> bool:
+        return False
+
+    def invoke(self, provider, request: LLMInvocationRequest) -> LLMInvocationResult:  # noqa: ANN001
+        return LLMInvocationResult(
+            success=True,
+            content="summary",
+            error=None,
+            usage={"output_tokens": 1},
+            provider="gateway/anthropic",
+            model=request.model,
+            raw={},
+        )
+
+
+class _ResultBackend(LLMExecutionBackend):
+    def __init__(self, result: LLMInvocationResult) -> None:
+        self._result = result
+
+    def requires_native_provider(self) -> bool:
+        return False
+
+    def invoke(self, provider, request: LLMInvocationRequest) -> LLMInvocationResult:  # noqa: ANN001
+        _ = provider, request
+        return self._result
+
+
+class _CountingBackend(LLMExecutionBackend):
+    def __init__(self, *, token_count: int) -> None:
+        self.token_count = token_count
+        self.invoked = False
+
+    def requires_native_provider(self) -> bool:
+        return False
+
+    def count_input_tokens(self, provider, request: LLMInvocationRequest) -> int | None:  # noqa: ANN001
+        _ = provider, request
+        return self.token_count
+
+    def invoke(self, provider, request: LLMInvocationRequest) -> LLMInvocationResult:  # noqa: ANN001
+        _ = provider, request
+        self.invoked = True
+        return LLMInvocationResult(
+            success=True,
+            content="summary",
+            error=None,
+            usage={},
+            provider="gateway/anthropic",
+            model="claude",
+            raw={},
+        )
+
+
+def _capture_traces(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, dict[str, object] | None]]:
+    recorded: list[tuple[str, dict[str, object] | None]] = []
+
+    @contextmanager
+    def _fake_trace_operation(name: str, attributes=None):  # noqa: ANN001
+        recorded.append((name, dict(attributes) if attributes is not None else None))
+        yield None
+
+    monkeypatch.setattr(worker_module, "trace_operation", _fake_trace_operation)
+    return recorded
 
 
 def test_should_process_document_handles_skips(tmp_path: Path) -> None:
@@ -88,6 +156,202 @@ def test_compute_prompt_hash_changes_on_prompt_and_settings() -> None:
     metadata.case_name = "Case B"
     fourth = _compute_prompt_hash(bundle, config_alt, group, metadata)
     assert third != fourth
+
+
+def test_bulk_map_create_provider_skips_native_bootstrap_for_no_native_backend(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    group = BulkAnalysisGroup.create("Group")
+    worker = BulkAnalysisWorker(
+        project_dir=tmp_path,
+        group=group,
+        files=[],
+        metadata=ProjectMetadata(case_name="Case"),
+        force_rerun=False,
+        llm_backend=_NoNativeBackend(),
+    )
+
+    def _fail_create_provider(**_kwargs):  # noqa: ANN001
+        raise AssertionError("create_provider should not be called for no-native backend")
+
+    monkeypatch.setattr(worker_module, "create_provider", _fail_create_provider, raising=False)
+    provider = worker._create_provider(
+        ProviderConfig(provider_id="anthropic", model=None),
+        "system prompt",
+    )
+
+    assert provider.provider_name == "anthropic"
+    assert provider.default_model
+
+
+@pytest.mark.parametrize(
+    ("result", "message"),
+    [
+        (
+            LLMInvocationResult(
+                success=False,
+                content="",
+                error="Gateway timeout",
+                usage={},
+                provider="gateway/anthropic",
+                model="claude",
+                raw={},
+            ),
+            "Gateway timeout",
+        ),
+        (
+            LLMInvocationResult(
+                success=True,
+                content="   ",
+                error=None,
+                usage={},
+                provider="gateway/anthropic",
+                model="claude",
+                raw={},
+            ),
+            "LLM returned empty response",
+        ),
+    ],
+)
+def test_bulk_map_invoke_provider_raises_for_failed_or_empty_backend_result(
+    tmp_path: Path,
+    result: LLMInvocationResult,
+    message: str,
+) -> None:
+    group = BulkAnalysisGroup.create("Group")
+    worker = BulkAnalysisWorker(
+        project_dir=tmp_path,
+        group=group,
+        files=[],
+        metadata=ProjectMetadata(case_name="Case"),
+        force_rerun=False,
+        llm_backend=_ResultBackend(result),
+    )
+
+    with pytest.raises(RuntimeError, match=message):
+        worker._invoke_provider(
+            provider=object(),
+            provider_config=ProviderConfig(provider_id="anthropic", model="claude"),
+            prompt="Prompt",
+            system_prompt="System",
+        )
+
+
+def test_bulk_map_invoke_provider_raises_cancelled_when_worker_cancelled(tmp_path: Path) -> None:
+    group = BulkAnalysisGroup.create("Group")
+    worker = BulkAnalysisWorker(
+        project_dir=tmp_path,
+        group=group,
+        files=[],
+        metadata=ProjectMetadata(case_name="Case"),
+        force_rerun=False,
+    )
+    worker.cancel()
+
+    with pytest.raises(worker_module.BulkAnalysisCancelled):
+        worker._invoke_provider(
+            provider=object(),
+            provider_config=ProviderConfig(provider_id="anthropic", model="claude"),
+            prompt="Prompt",
+            system_prompt="System",
+        )
+
+
+def test_bulk_map_trace_attributes_match_between_legacy_and_gateway(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    group = BulkAnalysisGroup.create("Group")
+    group.slug = "group-slug"
+    config = ProviderConfig(provider_id="anthropic", model="claude")
+
+    legacy_worker = BulkAnalysisWorker(
+        project_dir=tmp_path,
+        group=group,
+        files=[],
+        metadata=ProjectMetadata(case_name="Case"),
+        force_rerun=False,
+    )
+    legacy_traces = _capture_traces(monkeypatch)
+    legacy_result = legacy_worker._invoke_provider(
+        provider=_FakeProvider(),
+        provider_config=config,
+        prompt="Prompt",
+        system_prompt="System",
+        context_label="document 'doc.md'",
+    )
+
+    gateway_worker = BulkAnalysisWorker(
+        project_dir=tmp_path,
+        group=group,
+        files=[],
+        metadata=ProjectMetadata(case_name="Case"),
+        force_rerun=False,
+        llm_backend=_ResultBackend(
+            LLMInvocationResult(
+                success=True,
+                content="summary",
+                error=None,
+                usage={"output_tokens": 1},
+                provider="gateway/anthropic",
+                model="claude",
+                raw={},
+            )
+        ),
+    )
+    gateway_traces = _capture_traces(monkeypatch)
+    gateway_result = gateway_worker._invoke_provider(
+        provider=object(),
+        provider_config=config,
+        prompt="Prompt",
+        system_prompt="System",
+        context_label="document 'doc.md'",
+    )
+
+    assert legacy_result == "summary"
+    assert gateway_result == "summary"
+    assert legacy_traces == gateway_traces == [
+        (
+            "bulk_analysis.invoke_llm",
+            {
+                "llestrade.provider_id": "anthropic",
+                "llestrade.model": "claude",
+                "llestrade.max_tokens": 32000,
+                "llestrade.temperature": 0.1,
+                "llestrade.worker": "bulk_analysis",
+                "llestrade.stage": "bulk_map",
+                "llestrade.group_id": group.group_id,
+                "llestrade.group_name": "Group",
+                "llestrade.group_slug": "group-slug",
+                "llestrade.context_label": "document 'doc.md'",
+            },
+        )
+    ]
+
+
+def test_bulk_worker_uses_backend_token_count_for_gateway_preflight(tmp_path: Path) -> None:
+    group = BulkAnalysisGroup.create("Group")
+    backend = _CountingBackend(token_count=500)
+    worker = BulkAnalysisWorker(
+        project_dir=tmp_path,
+        group=group,
+        files=[],
+        metadata=ProjectMetadata(case_name="Case"),
+        force_rerun=False,
+        llm_backend=backend,
+    )
+
+    with pytest.raises(RuntimeError, match="500 tokens > 400 budget"):
+        worker._invoke_provider(
+            provider=worker._create_provider(ProviderConfig(provider_id="anthropic", model="claude"), "System"),
+            provider_config=ProviderConfig(provider_id="anthropic", model="claude"),
+            prompt="Prompt",
+            system_prompt="System",
+            input_budget=400,
+        )
+
+    assert backend.invoked is False
 
 
 def test_bulk_worker_force_rerun_reprocesses(tmp_path: Path, qtbot, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -386,3 +650,62 @@ def test_process_document_forces_chunking_when_full_prompt_exceeds_budget(
     assert run_details["chunking"] is True
     assert run_details["chunk_count"] == 2
     assert run_details["full_prompt_tokens"] == 80_000
+
+
+def test_bulk_worker_surfaces_gateway_spend_limit_rejection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_dir = tmp_path
+    converted = project_dir / "converted_documents"
+    converted.mkdir(parents=True, exist_ok=True)
+    source_path = converted / "doc.md"
+    source_path.write_text("Body text", encoding="utf-8")
+
+    group = BulkAnalysisGroup.create("Group", files=["doc.md"])
+    metadata = ProjectMetadata(case_name="Case")
+
+    monkeypatch.setattr(
+        worker_module,
+        "load_prompts",
+        lambda *_args, **_kwargs: PromptBundle("System", "Analyze {document_content}"),
+    )
+    monkeypatch.setattr(
+        BulkAnalysisWorker,
+        "_resolve_provider",
+        lambda self: ProviderConfig(provider_id="anthropic", model="claude"),
+    )
+    monkeypatch.setattr(
+        BulkAnalysisWorker,
+        "_create_provider",
+        lambda self, *_: object(),
+    )
+
+    worker = BulkAnalysisWorker(
+        project_dir=project_dir,
+        group=group,
+        files=["doc.md"],
+        metadata=metadata,
+        force_rerun=True,
+        llm_backend=_ResultBackend(
+            LLMInvocationResult(
+                success=False,
+                content="",
+                error="Gateway spend limit exceeded",
+                usage={},
+                provider="gateway/anthropic",
+                model="claude",
+                raw={},
+            )
+        ),
+    )
+
+    failures: list[tuple[str, str]] = []
+    finished: list[tuple[int, int]] = []
+    worker.file_failed.connect(lambda path, error: failures.append((path, error)))
+    worker.finished.connect(lambda successes, failure_count: finished.append((successes, failure_count)))
+
+    worker._run()
+
+    assert failures == [("doc.md", "Gateway spend limit exceeded")]
+    assert finished == [(0, 1)]

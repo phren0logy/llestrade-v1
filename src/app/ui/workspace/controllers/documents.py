@@ -20,12 +20,22 @@ from src.app.core.conversion_manager import (
 from src.app.core.file_tracker import WorkspaceMetrics
 from src.app.core.project_manager import ProjectManager
 from src.app.ui.workspace.documents_tab import DocumentsTab
-from src.app.ui.workspace.qt_flags import (
-    ITEM_IS_ENABLED,
-    ITEM_IS_TRISTATE,
-    ITEM_IS_USER_CHECKABLE,
+from .documents_tree_state import (
+    apply_directory_flags as apply_directory_flags_item,
+    cascade_source_check_state as cascade_tree_check_state,
+    collect_selected_directories_from_item as collect_checked_directories_from_item,
+    is_path_tracked as is_tree_path_tracked,
+    normalise_relative_path as normalise_tree_relative_path,
+    should_skip_source_entry as should_skip_tree_entry,
+    update_parent_source_state as update_parent_tree_state,
 )
-from src.app.ui.widgets import BannerAction
+from .documents_view import (
+    set_root_warning as render_root_warning,
+    update_bulk_banner as render_bulk_banner,
+    update_highlights_banner as render_highlights_banner,
+    update_last_scan_label as render_last_scan_label,
+    update_source_root_label as render_source_root_label,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - type checking only
     from src.app.ui.stages.project_workspace import ProjectWorkspace
@@ -94,10 +104,15 @@ class DocumentsController:
         metrics = self.refresh_file_tracker()
         return metrics
 
-    def trigger_conversion(self, auto_run: bool) -> None:
+    def trigger_conversion(
+        self,
+        auto_run: bool,
+        *,
+        show_no_new_notice: bool = True,
+    ) -> bool:
         project_manager = self._project_manager
         if not project_manager:
-            return
+            return False
         workspace = self._workspace
         if workspace._conversion_running:
             QMessageBox.information(
@@ -105,15 +120,15 @@ class DocumentsController:
                 "Conversion Running",
                 "Document conversion is already in progress.",
             )
-            return
+            return False
 
         jobs, duplicates = self.collect_conversion_jobs(workspace._inflight_sources)
         if duplicates:
             self.show_duplicate_notice(duplicates)
         if not jobs:
-            if not auto_run and not duplicates:
+            if show_no_new_notice and not auto_run and not duplicates:
                 QMessageBox.information(workspace, "Conversion", "No new files detected.")
-            return
+            return False
 
         if not auto_run:
             reply = QMessageBox.question(
@@ -124,9 +139,10 @@ class DocumentsController:
                 QMessageBox.Yes,
             )
             if reply != QMessageBox.Yes:
-                return
+                return False
 
         self._run_conversion(jobs)
+        return True
 
     def collect_conversion_jobs(
         self,
@@ -205,11 +221,7 @@ class DocumentsController:
 
     def update_source_root_label(self) -> None:
         root_path = self.resolve_source_root()
-        label = self._tab.source_root_label
-        if not root_path or not root_path.exists():
-            label.setText("Source root: not set")
-        else:
-            label.setText(f"Source root: {root_path}")
+        render_source_root_label(self._tab.source_root_label, root_path)
 
     def update_last_scan_label(self) -> None:
         label = self._tab.last_scan_label
@@ -227,15 +239,7 @@ class DocumentsController:
             except ValueError:
                 last_scan = project_manager.source_state.last_scan
 
-        if not last_scan:
-            label.setText("Last scan: never")
-            return
-
-        if isinstance(last_scan, datetime):
-            display = last_scan.strftime("Last scan: %Y-%m-%d %H:%M")
-        else:
-            display = f"Last scan: {last_scan}"
-        label.setText(display)
+        render_last_scan_label(label, last_scan)
 
     def populate_source_tree(self) -> None:
         tree = self._tab.source_tree
@@ -396,52 +400,20 @@ class DocumentsController:
     # Banner helpers
     # ------------------------------------------------------------------
     def _update_highlights_banner(self, missing: Sequence[str], pending_count: int) -> None:
-        banner = self._tab.highlights_banner
-        if not missing:
-            banner.reset()
-            return
-
-        total = pending_count or len(missing)
-        plural = "s" if total != 1 else ""
-        banner.set_role("warning")
-        banner.set_message(
-            f"Highlights pending for {total} PDF{plural}.",
-            "Review the queue to see which documents still need highlights.",
+        render_highlights_banner(
+            self._tab.highlights_banner,
+            missing,
+            pending_count,
+            self._workspace.show_pending_highlights,
         )
-        banner.set_actions(
-            [
-                BannerAction(
-                    label="Review list",
-                    callback=self._workspace.show_pending_highlights,
-                    is_default=True,
-                )
-            ]
-        )
-        banner.show()
 
     def _update_bulk_banner(self, missing: Sequence[str], pending_count: int) -> None:
-        banner = self._tab.bulk_banner
-        if not missing:
-            banner.reset()
-            return
-
-        total = pending_count or len(missing)
-        plural = "s" if total != 1 else ""
-        banner.set_role("warning")
-        banner.set_message(
-            f"Bulk analysis pending for {total} document{plural}.",
-            "Open the Bulk Analysis tab to create or refresh group runs.",
+        render_bulk_banner(
+            self._tab.bulk_banner,
+            missing,
+            pending_count,
+            self._workspace.show_bulk_analysis_tab,
         )
-        banner.set_actions(
-            [
-                BannerAction(
-                    label="Open Bulk Analysis",
-                    callback=self._workspace.show_bulk_analysis_tab,
-                    is_default=True,
-                )
-            ]
-        )
-        banner.show()
 
     # ------------------------------------------------------------------
     # Tree helpers (adapted from original ProjectWorkspace implementation)
@@ -511,35 +483,16 @@ class DocumentsController:
         return results
 
     def normalise_relative_path(self, path: str) -> str:
-        if not path:
-            return ""
-        return Path(path.strip("/")).as_posix()
+        return normalise_tree_relative_path(path)
 
     def apply_directory_flags(self, item: QTreeWidgetItem) -> None:
-        flags = item.flags()
-        flags |= ITEM_IS_ENABLED | ITEM_IS_USER_CHECKABLE
-        flags &= ~ITEM_IS_TRISTATE
-        item.setFlags(flags)
+        apply_directory_flags_item(item)
 
     def should_skip_source_entry(self, entry: Path) -> bool:
-        return any(
-            part in {".azure-di", ".azure_di"} or part.startswith(".azure-di") or part.startswith(".azure_di")
-            for part in entry.parts
-        )
+        return should_skip_tree_entry(entry)
 
     def is_path_tracked(self, relative: str, tracked: Set[str]) -> bool:
-        candidate = self.normalise_relative_path(relative)
-        if not candidate:
-            return "" in tracked
-        while True:
-            if candidate in tracked:
-                return True
-            if "/" not in candidate:
-                candidate = ""
-            else:
-                candidate = candidate.rsplit("/", 1)[0]
-            if candidate == "":
-                return "" in tracked
+        return is_tree_path_tracked(relative, tracked)
 
     def compute_new_directories(
         self,
@@ -700,31 +653,10 @@ class DocumentsController:
                     shutil.rmtree(candidate, ignore_errors=True)
 
     def cascade_source_check_state(self, item: QTreeWidgetItem, state: Qt.CheckState) -> None:
-        for index in range(item.childCount()):
-            child = item.child(index)
-            if child.flags() & Qt.ItemIsUserCheckable:
-                child.setCheckState(0, state)
-            self.cascade_source_check_state(child, state)
+        cascade_tree_check_state(item, state)
 
     def update_parent_source_state(self, item: Optional[QTreeWidgetItem]) -> None:
-        while item is not None and item.flags() & Qt.ItemIsUserCheckable:
-            checked = unchecked = 0
-            for index in range(item.childCount()):
-                child_state = item.child(index).checkState(0)
-                if child_state == Qt.Checked:
-                    checked += 1
-                elif child_state == Qt.Unchecked:
-                    unchecked += 1
-                else:
-                    checked += 1
-                    unchecked += 1
-            if checked and unchecked:
-                item.setCheckState(0, Qt.PartiallyChecked)
-            elif checked:
-                item.setCheckState(0, Qt.Checked)
-            else:
-                item.setCheckState(0, Qt.Unchecked)
-            item = item.parent()
+        update_parent_tree_state(item)
 
     def update_selected_folders_from_tree(self) -> None:
         project_manager = self._project_manager
@@ -754,28 +686,13 @@ class DocumentsController:
         return sorted(results)
 
     def collect_selected_directories_from_item(self, item: QTreeWidgetItem, results: Set[str]) -> None:
-        data = item.data(0, Qt.UserRole)
-        if not data:
-            return
-        node_type, relative = data
-        state = item.checkState(0)
-        if node_type == "dir" and state == Qt.Checked:
-            results.add(self.normalise_relative_path(relative))
-            return
-        for index in range(item.childCount()):
-            self.collect_selected_directories_from_item(item.child(index), results)
+        collect_checked_directories_from_item(item, results, self.normalise_relative_path)
 
     # ------------------------------------------------------------------
     # Warning helpers
     # ------------------------------------------------------------------
     def set_root_warning(self, warnings: List[str]) -> None:
-        label = self._tab.root_warning_label
-        if warnings:
-            label.setText("\n".join(warnings))
-            label.show()
-        else:
-            label.clear()
-            label.hide()
+        render_root_warning(self._tab.root_warning_label, warnings)
 
     def compute_root_warnings(self, root_path: Path) -> List[str]:
         warnings: List[str] = []

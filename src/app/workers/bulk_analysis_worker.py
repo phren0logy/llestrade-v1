@@ -36,6 +36,7 @@ from src.app.core.secure_settings import SecureSettings
 from src.common.llm.base import BaseLLMProvider
 from src.common.llm.factory import create_provider
 from src.common.llm.tokens import TokenCounter
+from src.config.observability import trace_operation
 from src.common.markdown import (
     PromptReference,
     SourceReference,
@@ -47,6 +48,14 @@ from src.common.markdown import (
 
 from .base import DashboardWorker
 from .checkpoint_manager import CheckpointManager, _sha256
+from .llm_backend import (
+    LLMExecutionBackend,
+    LLMInvocationRequest,
+    LegacyProviderBackend,
+    ProviderMetadata,
+    default_model_for_provider,
+)
+from .stage_contracts import BulkMapStageInput, stage_trace_attributes
 
 
 @dataclass(frozen=True)
@@ -215,6 +224,7 @@ class BulkAnalysisWorker(DashboardWorker):
         force_rerun: bool = False,
         placeholder_values: Mapping[str, str] | None = None,
         project_name: str = "",
+        llm_backend: LLMExecutionBackend | None = None,
     ) -> None:
         super().__init__(worker_name="bulk_analysis")
 
@@ -227,6 +237,7 @@ class BulkAnalysisWorker(DashboardWorker):
         self._base_placeholders = dict(placeholder_values or {})
         self._project_name = project_name
         self._run_timestamp = datetime.now(timezone.utc)
+        self._llm_backend: LLMExecutionBackend = llm_backend or LegacyProviderBackend()
         self._invoke_compat_warning_emitted = False
         try:
             self._citation_store: CitationStore | None = CitationStore(project_dir)
@@ -744,6 +755,8 @@ class BulkAnalysisWorker(DashboardWorker):
         provider_config: ProviderConfig,
         system_prompt: str,
         user_prompt: str,
+        *,
+        max_tokens: int = _DEFAULT_MAX_OUTPUT_TOKENS,
     ) -> int:
         combined_prompt = f"{system_prompt.strip()}\n\n{user_prompt.strip()}".strip()
         if not combined_prompt:
@@ -757,6 +770,24 @@ class BulkAnalysisWorker(DashboardWorker):
                     return counted
         except Exception:
             self.logger.debug("Provider token preflight failed; falling back to local estimate", exc_info=True)
+
+        backend_counter = getattr(self._llm_backend, "count_input_tokens", None)
+        if callable(backend_counter):
+            try:
+                counted = backend_counter(
+                    provider,
+                    LLMInvocationRequest(
+                        prompt=user_prompt,
+                        system_prompt=system_prompt,
+                        model=provider_config.model,
+                        temperature=0.1,
+                        max_tokens=max_tokens,
+                    ),
+                )
+                if counted is not None and counted >= 0:
+                    return int(counted)
+            except Exception:
+                self.logger.debug("Backend token preflight failed; falling back to local estimate", exc_info=True)
 
         token_info = TokenCounter.count(
             text=combined_prompt,
@@ -807,11 +838,12 @@ class BulkAnalysisWorker(DashboardWorker):
                     content=chunk,
                 )
                 prompt = self._append_citation_ledger(prompt, chunk_ledger)
-                prompt_tokens = self._count_prompt_tokens(
+                prompt_tokens = self._count_prompt_tokens_compat(
                     provider,
                     provider_config,
                     system_prompt,
                     prompt,
+                    max_tokens=_DEFAULT_MAX_OUTPUT_TOKENS,
                 )
                 if prompt_tokens > input_budget:
                     oversized.append((idx, prompt_tokens))
@@ -887,6 +919,42 @@ class BulkAnalysisWorker(DashboardWorker):
             **call_kwargs,
         )
 
+    def _count_prompt_tokens_compat(
+        self,
+        provider: BaseLLMProvider,
+        provider_config: ProviderConfig,
+        system_prompt: str,
+        user_prompt: str,
+        *,
+        max_tokens: int = _DEFAULT_MAX_OUTPUT_TOKENS,
+    ) -> int:
+        count_fn = self._count_prompt_tokens
+        try:
+            signature = inspect.signature(count_fn)
+        except (TypeError, ValueError):
+            signature = None
+
+        if signature is not None:
+            accepts_var_kw = any(
+                param.kind == inspect.Parameter.VAR_KEYWORD
+                for param in signature.parameters.values()
+            )
+            if not accepts_var_kw and "max_tokens" not in signature.parameters:
+                return count_fn(  # type: ignore[misc]
+                    provider,
+                    provider_config,
+                    system_prompt,
+                    user_prompt,
+                )
+
+        return count_fn(
+            provider,
+            provider_config,
+            system_prompt,
+            user_prompt,
+            max_tokens=max_tokens,
+        )
+
     def _invoke_provider(
         self,
         provider: BaseLLMProvider,
@@ -903,11 +971,12 @@ class BulkAnalysisWorker(DashboardWorker):
             raise BulkAnalysisCancelled
 
         if input_budget is not None:
-            prompt_tokens = self._count_prompt_tokens(
+            prompt_tokens = self._count_prompt_tokens_compat(
                 provider,
                 provider_config,
                 system_prompt,
                 prompt,
+                max_tokens=max_tokens,
             )
             if prompt_tokens > input_budget:
                 raise RuntimeError(
@@ -915,16 +984,31 @@ class BulkAnalysisWorker(DashboardWorker):
                     f"{prompt_tokens} tokens > {input_budget} budget"
                 )
 
-        response = provider.generate(
-            prompt=prompt,
+        stage_input = BulkMapStageInput(
+            group_id=self._group.group_id,
+            group_name=self._group.name,
+            group_slug=getattr(self._group, "slug", None) or self._group.folder_name,
+            provider_id=provider_config.provider_id,
             model=provider_config.model,
-            system_prompt=system_prompt,
-            temperature=temperature,
+            context_label=context_label,
             max_tokens=max_tokens,
+            temperature=temperature,
         )
-        if not response.get("success"):
-            raise RuntimeError(response.get("error", "Unknown LLM error"))
-        content = (response.get("content") or "").strip()
+        trace_attributes = stage_trace_attributes(stage_input)
+        with trace_operation("bulk_analysis.invoke_llm", trace_attributes):
+            response = self._llm_backend.invoke(
+                provider,
+                LLMInvocationRequest(
+                    prompt=prompt,
+                    model=provider_config.model,
+                    system_prompt=system_prompt,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                ),
+            )
+        if not response.success:
+            raise RuntimeError(response.error or "Unknown LLM error")
+        content = response.content.strip()
         if not content:
             raise RuntimeError("LLM returned empty response")
         return content
@@ -938,7 +1022,13 @@ class BulkAnalysisWorker(DashboardWorker):
         self,
         config: ProviderConfig,
         system_prompt: str,
-    ) -> Optional[BaseLLMProvider]:
+    ) -> object:
+        if not self._llm_backend.requires_native_provider():
+            return ProviderMetadata(
+                provider_name=config.provider_id,
+                default_model=config.model or default_model_for_provider(config.provider_id),
+            )
+
         settings = SecureSettings()
         api_key = settings.get_api_key(config.provider_id)
         kwargs = {

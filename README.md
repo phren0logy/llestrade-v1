@@ -270,6 +270,31 @@ The application stores settings in `var/app_settings.json` (created on first run
 }
 ```
 
+### Pydantic AI Gateway (Default Report + Bulk Path)
+
+Report draft/refinement and bulk map/reduce use a Gateway-backed execution backend by default.
+
+- Required auth for Gateway mode:
+  - `PYDANTIC_AI_GATEWAY_API_KEY=<your key>` (or `PAIG_API_KEY`)
+- Managed Gateway:
+  - no additional endpoint configuration required
+- Optional custom endpoint (self-hosted Gateway):
+  - `PYDANTIC_AI_GATEWAY_BASE_URL=<gateway base url>` (or `PAIG_BASE_URL`)
+  - `PYDANTIC_AI_GATEWAY_ROUTE=<route override>`
+- Fallback switch (force legacy native provider clients):
+  - `FRD_ENABLE_PYDANTIC_AI_GATEWAY=false`
+
+Gateway backend fallback behavior:
+
+- Unsupported provider IDs automatically use the legacy backend implementation.
+- Runtime Gateway errors are surfaced to workers with existing stage-level failure handling.
+
+Self-hosting notes:
+
+- Use a custom domain such as `https://gateway.example.com` for `PYDANTIC_AI_GATEWAY_BASE_URL`.
+- Keep the runtime gateway on API-key auth; the current desktop app does not participate in Cloudflare Access login flows.
+- The full Cloudflare/1Password operator workflow lives in [`gateway/README.md`](gateway/README.md).
+
 ### AWS Bedrock Credentials
 
 Claude models delivered through AWS Bedrock rely on the AWS CLI credential chain. Run `aws configure` (for long-term access keys) or `aws configure sso` (for IAM Identity Center) so credentials are written to `~/.aws/credentials` and `~/.aws/config`. Llestrade reads those settings automatically; no AWS secrets are stored in the application. Optional overrides for profile, region, and the default Bedrock Claude model can be set under **Settings → Configure API Keys → AWS Bedrock (Claude)**.
@@ -458,6 +483,8 @@ The active workspace flow is:
 3. Highlights (PDF-only extraction and tracking)
 4. Bulk Analysis (grouped per-document and combined runs)
 5. Reports (draft + refinement runs)
+
+Note: there is no standalone Progress tab in the dashboard workflow. Bulk Analysis inline logs are the canonical activity feed.
 
 Legacy transition notes and historical plans live under `docs/archive/` and are not the source of truth for current behavior.
 

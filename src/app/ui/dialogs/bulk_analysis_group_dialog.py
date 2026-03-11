@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
-from typing import Dict, Mapping, Optional, List, Tuple
+from typing import Dict, Mapping, Optional, List, Tuple, Sequence
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
@@ -61,6 +61,7 @@ class BulkAnalysisGroupDialog(QDialog):
         metadata: Optional[ProjectMetadata] = None,
         placeholder_values: Optional[Mapping[str, str]] = None,
         existing_group: Optional[BulkAnalysisGroup] = None,
+        existing_names: Optional[Sequence[str]] = None,
     ) -> None:
         super().__init__(parent)
         self._project_dir = project_dir
@@ -69,6 +70,11 @@ class BulkAnalysisGroupDialog(QDialog):
         self._placeholder_requirements: Dict[str, bool] = {}
         self._group: Optional[BulkAnalysisGroup] = None
         self._existing_group = existing_group
+        self._existing_names = {
+            str(value).strip()
+            for value in (existing_names or [])
+            if str(value).strip()
+        }
         self._tree_nodes: Dict[Tuple[str, bool], QTreeWidgetItem] = {}
         self._map_tree_nodes: Dict[Tuple[str, str], QTreeWidgetItem] = {}
         self.setWindowTitle("Edit Bulk Analysis" if existing_group else "New Bulk Analysis")
@@ -432,6 +438,17 @@ class BulkAnalysisGroupDialog(QDialog):
         name = self.name_edit.text().strip()
         if not name:
             QMessageBox.warning(self, "Missing Name", "Please provide a name for the bulk analysis group.")
+            return None
+        normalized_name = name.casefold()
+        existing_name = self._existing_group.name.strip() if self._existing_group else ""
+        existing_normalized = existing_name.casefold() if existing_name else ""
+        collision = any(candidate.casefold() == normalized_name for candidate in self._existing_names)
+        if collision and normalized_name != existing_normalized:
+            QMessageBox.warning(
+                self,
+                "Duplicate Name",
+                f"A bulk analysis group named '{name}' already exists. Choose a different name.",
+            )
             return None
 
         files, directories = self._collect_combined_converted_selection()

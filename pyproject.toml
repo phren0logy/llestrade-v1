@@ -21,6 +21,7 @@ dependencies = [
     "pypandoc==1.16.2",
     "pypandoc-binary==1.16.2",
     "pyside6==6.10.2",
+    "pydantic-ai-slim==1.67.0",
 ]
 
 [dependency-groups]

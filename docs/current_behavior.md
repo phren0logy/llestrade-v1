@@ -9,6 +9,7 @@ This document is the concise behavior baseline for cleanup, testing, and future 
 - Use Highlights tab to extract highlights from PDF-derived files.
 - Use Bulk Analysis tab to run grouped map/combined bulk analysis jobs.
 - Use Reports tab to generate and refine report drafts from project inputs.
+- There is no standalone Progress tab; Bulk Analysis inline logs are the canonical activity surface.
 
 ## File-System Expectations
 - Project data lives in project directory (`project.frpd`, `sources.json`).

@@ -183,6 +183,9 @@ class PhoenixObservability:
     def get_traces(self) -> Optional[list[Any]]:
         if not self.client:
             return None
+        self.logger.warning(
+            "Phoenix trace retrieval is not implemented; get_traces() currently returns an empty list."
+        )
         return []
 
     def shutdown(self) -> None:
