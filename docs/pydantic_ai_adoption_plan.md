@@ -27,7 +27,6 @@ Completed in the current worker/backend layer:
 
 Still open:
 
-- shared LLM operation settings and selector reuse across bulk analysis and reports
 - model-level instrumentation via Pydantic AI / InstrumentedModel
 - upstream failover via `FallbackModel` and/or Gateway routing groups
 - broader migration of non-worker legacy code under [`src/common/llm/`](../src/common/llm/) and [`src/config/app_config.py`](../src/config/app_config.py)
@@ -483,9 +482,8 @@ But Gateway does not remove the need for app-level policy around:
 
 Status against this sequence:
 
-- Steps 1-5 are largely complete for worker execution, except for the failover portion of step 4.
-- Shared bulk/report LLM settings are the next consolidation step above the backend seam.
-- Structured outputs are the next major adoption area after that, and they should follow targeted workflow selection rather than a broad rewrite.
+- Steps 1-6 are largely complete for worker execution and bulk/report settings consolidation, except for the failover portion of step 9.
+- Structured outputs are now the next major adoption area, and they should follow targeted workflow selection rather than a broad rewrite.
 - The biggest remaining platform gaps are failover, deeper instrumentation follow-through, and migration of non-worker legacy code.
 
 ## Sources
