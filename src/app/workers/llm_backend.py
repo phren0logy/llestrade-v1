@@ -156,6 +156,7 @@ class PydanticAIGatewayBackend:
     _RETRYABLE_STATUS_CODES: frozenset[int] = frozenset({408, 425, 429, 500, 502, 503, 504})
     _GATEWAY_RETRY_ATTEMPTS = 3
     _GATEWAY_RETRY_MAX_WAIT_SECONDS = 30.0
+    _DEFAULT_GATEWAY_MAX_CONCURRENCY = 4
 
     def __init__(
         self,
@@ -163,6 +164,7 @@ class PydanticAIGatewayBackend:
         api_key: str | None = None,
         base_url: str | None = None,
         route: str | None = None,
+        max_concurrency: int | None = None,
         fallback_backend: LLMExecutionBackend | None = None,
         fallback_on_error: bool = False,
     ) -> None:
@@ -179,9 +181,11 @@ class PydanticAIGatewayBackend:
             or self._load_base_url_from_settings()
         )
         self._route = route or os.getenv("PYDANTIC_AI_GATEWAY_ROUTE")
+        self._max_concurrency = self._resolve_max_concurrency(max_concurrency)
         self._fallback_backend = fallback_backend
         self._fallback_on_error = fallback_on_error
         self._http_client: Any | None = None
+        self._concurrency_limiter: Any | None = None
 
     @staticmethod
     def _load_base_url_from_settings() -> str | None:
@@ -335,11 +339,16 @@ class PydanticAIGatewayBackend:
 
     def _build_model(self, *, provider_id: str, model_name: str) -> Any:
         from pydantic_ai.models import infer_model
+        from pydantic_ai.models.concurrency import limit_model_concurrency
 
-        return infer_model(
+        model = infer_model(
             self._gateway_model_id(provider_id=provider_id, model_name=model_name),
             provider_factory=self._gateway_provider_factory,
         )
+        limiter = self._gateway_concurrency_limiter()
+        if limiter is None:
+            return model
+        return limit_model_concurrency(model, limiter=limiter)
 
     def _fallback_or_error(
         self,
@@ -435,6 +444,37 @@ class PydanticAIGatewayBackend:
             validate_response=self._raise_for_retryable_gateway_response,
         )
         return AsyncClient(transport=retry_transport)
+
+    @staticmethod
+    def _resolve_max_concurrency(value: int | None) -> int | None:
+        if value is not None:
+            return value if value > 0 else None
+
+        raw = os.getenv("PYDANTIC_AI_GATEWAY_MAX_CONCURRENCY")
+        if raw is None:
+            return PydanticAIGatewayBackend._DEFAULT_GATEWAY_MAX_CONCURRENCY
+
+        try:
+            parsed = int(raw)
+        except ValueError:
+            logger.warning("Invalid PYDANTIC_AI_GATEWAY_MAX_CONCURRENCY=%r; using default", raw)
+            return PydanticAIGatewayBackend._DEFAULT_GATEWAY_MAX_CONCURRENCY
+
+        return parsed if parsed > 0 else None
+
+    def _gateway_concurrency_limiter(self) -> Any | None:
+        if self._max_concurrency is None:
+            return None
+        if self._concurrency_limiter is not None:
+            return self._concurrency_limiter
+
+        from pydantic_ai.concurrency import ConcurrencyLimiter
+
+        self._concurrency_limiter = ConcurrencyLimiter(
+            self._max_concurrency,
+            name="pydantic-ai-gateway",
+        )
+        return self._concurrency_limiter
 
     @classmethod
     def _raise_for_retryable_gateway_response(cls, response: Any) -> None:

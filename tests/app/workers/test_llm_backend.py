@@ -554,6 +554,11 @@ def test_gateway_backend_build_model_uses_canonical_gateway_model_ids(
         captured["provider"] = provider_factory("gateway/gemini")
         return {"model": model}
 
+    def _fake_limit_model_concurrency(model: Any, limiter: Any) -> Any:
+        captured["limited_model"] = model
+        captured["limiter"] = limiter
+        return {"limited": model}
+
     def _fake_gateway_provider(
         upstream_provider: str,
         /,
@@ -572,17 +577,24 @@ def test_gateway_backend_build_model_uses_canonical_gateway_model_ids(
         }
 
     monkeypatch.setattr("pydantic_ai.models.infer_model", _fake_infer_model)
+    monkeypatch.setattr(
+        "pydantic_ai.models.concurrency.limit_model_concurrency",
+        _fake_limit_model_concurrency,
+    )
     monkeypatch.setattr("pydantic_ai.providers.gateway.gateway_provider", _fake_gateway_provider)
 
     backend = PydanticAIGatewayBackend(
         api_key="gateway-key",
         base_url="https://gateway.example.com",
         route="llestrade",
+        max_concurrency=2,
     )
     model = backend._build_model(provider_id="gemini", model_name="gemini-2.5-pro")
 
-    assert model == {"model": "gateway/gemini:gemini-2.5-pro"}
+    assert model == {"limited": {"model": "gateway/gemini:gemini-2.5-pro"}}
     assert captured["model"] == "gateway/gemini:gemini-2.5-pro"
+    assert captured["limited_model"] == {"model": "gateway/gemini:gemini-2.5-pro"}
+    assert captured["limiter"].max_running == 2
     assert captured["provider"] == {
         "upstream_provider": "gemini",
         "route": "llestrade",
@@ -600,6 +612,11 @@ def test_gateway_backend_only_marks_transient_gateway_statuses_for_retry() -> No
 
     non_retryable = httpx.Response(400, request=httpx.Request("POST", "https://gateway.example.com"))
     PydanticAIGatewayBackend._raise_for_retryable_gateway_response(non_retryable)
+
+
+def test_gateway_backend_can_disable_concurrency_limit() -> None:
+    backend = PydanticAIGatewayBackend(api_key="gateway-key", max_concurrency=0)
+    assert backend._gateway_concurrency_limiter() is None
 
 
 def test_gateway_backend_returns_error_when_provider_metadata_is_missing() -> None:
