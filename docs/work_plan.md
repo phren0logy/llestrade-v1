@@ -169,6 +169,7 @@ Note: Highlights denominator uses PDFs only (pending/highlights reflect PDF-elig
 - [x] Report pilot: implement a report-only Pydantic AI Gateway backend behind a feature flag.
 - [x] Bulk expansion: extend the Gateway backend to bulk map/reduce with parity on cancellation, checkpointing, and retry semantics.
 - [x] Cutover: make Gateway the default path for report and bulk workflows after parity tests pass.
+- [ ] Adoption cleanup: use `docs/pydantic_ai_adoption_plan.md` as the decision record for replacing custom provider/runtime code paths with upstream Pydantic AI utilities.
 - [ ] Cleanup: remove dead/duplicate orchestration paths and consolidate remaining provider wiring.
 
 ### Rollout Gates
