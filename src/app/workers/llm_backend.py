@@ -219,27 +219,12 @@ class PydanticAIGatewayBackend:
 
         try:
             model = self._build_model(provider_id=provider_id, model_name=model_name)
-            from pydantic_ai.messages import ModelRequest, SystemPromptPart, UserPromptPart
             from pydantic_ai.models import ModelRequestParameters
-
-            parts: list[Any] = []
-            if request.system_prompt:
-                parts.append(SystemPromptPart(content=request.system_prompt))
-            if request.prompt:
-                parts.append(UserPromptPart(content=request.prompt))
-
-            model_settings: Dict[str, Any] = {
-                "temperature": request.temperature,
-                "max_tokens": request.max_tokens,
-            }
-            for key in self._FORWARDED_SETTINGS:
-                if key in request.extra:
-                    model_settings[key] = request.extra[key]
 
             usage = asyncio.run(
                 model.count_tokens(
-                    [ModelRequest(parts=parts)],
-                    model_settings,
+                    self._build_messages(request),
+                    self._build_model_settings(request),
                     ModelRequestParameters(),
                 )
             )
@@ -275,26 +260,15 @@ class PydanticAIGatewayBackend:
 
         try:
             model = self._build_model(provider_id=provider_id, model_name=model_name)
-            from pydantic_ai import Agent
+            from pydantic_ai.direct import model_request_sync
 
-            model_settings: Dict[str, Any] = {
-                "temperature": request.temperature,
-                "max_tokens": request.max_tokens,
-            }
-            for key in self._FORWARDED_SETTINGS:
-                if key in request.extra:
-                    model_settings[key] = request.extra[key]
-
-            result = Agent(
-                model=model,
-                system_prompt=request.system_prompt or "",
-                retries=1,
-            ).run_sync(
-                request.prompt,
-                model_settings=model_settings,
+            response = model_request_sync(
+                model,
+                self._build_messages(request),
+                model_settings=self._build_model_settings(request),
             )
 
-            content = str(result.output or "").strip()
+            content = str(response.text or "").strip()
             if not content:
                 return LLMInvocationResult(
                     success=False,
@@ -306,7 +280,7 @@ class PydanticAIGatewayBackend:
                     raw={},
                 )
 
-            usage_obj = result.usage()
+            usage_obj = response.usage
             usage = {
                 "requests": int(getattr(usage_obj, "requests", 0) or 0),
                 "input_tokens": int(getattr(usage_obj, "input_tokens", 0) or 0),
@@ -318,10 +292,7 @@ class PydanticAIGatewayBackend:
             if isinstance(details, dict) and details:
                 usage["details"] = dict(details)
 
-            run_id = getattr(result, "run_id", None)
-            raw: Dict[str, Any] = {}
-            if run_id:
-                raw["run_id"] = str(run_id)
+            raw = self._response_metadata(response)
 
             return LLMInvocationResult(
                 success=True,
@@ -329,7 +300,7 @@ class PydanticAIGatewayBackend:
                 error=None,
                 usage=usage,
                 provider=f"gateway/{provider_id}",
-                model=model_name,
+                model=str(getattr(response, "model_name", None) or model_name),
                 raw=raw,
             )
         except Exception as exc:
@@ -347,41 +318,12 @@ class PydanticAIGatewayBackend:
             )
 
     def _build_model(self, *, provider_id: str, model_name: str) -> Any:
-        from pydantic_ai.providers.gateway import gateway_provider
+        from pydantic_ai.models import infer_model
 
-        if provider_id == "anthropic":
-            from pydantic_ai.models.anthropic import AnthropicModel
-
-            gateway = gateway_provider(
-                "anthropic", api_key=self._api_key, base_url=self._base_url, route=self._route
-            )
-            return AnthropicModel(model_name, provider=gateway)
-
-        if provider_id == "anthropic_bedrock":
-            from pydantic_ai.models.bedrock import BedrockConverseModel
-
-            gateway = gateway_provider(
-                "bedrock", api_key=self._api_key, base_url=self._base_url, route=self._route
-            )
-            return BedrockConverseModel(model_name, provider=gateway)
-
-        if provider_id == "gemini":
-            from pydantic_ai.models.google import GoogleModel
-
-            gateway = gateway_provider(
-                "google-vertex", api_key=self._api_key, base_url=self._base_url, route=self._route
-            )
-            return GoogleModel(model_name, provider=gateway)
-
-        if provider_id in {"openai", "azure_openai"}:
-            from pydantic_ai.models.openai import OpenAIChatModel
-
-            gateway = gateway_provider(
-                "openai", api_key=self._api_key, base_url=self._base_url, route=self._route
-            )
-            return OpenAIChatModel(model_name, provider=gateway)
-
-        raise RuntimeError(f"Provider '{provider_id}' is not supported by Pydantic AI Gateway backend")
+        return infer_model(
+            self._gateway_model_id(provider_id=provider_id, model_name=model_name),
+            provider_factory=self._gateway_provider_factory,
+        )
 
     def _fallback_or_error(
         self,
@@ -438,6 +380,76 @@ class PydanticAIGatewayBackend:
             return True
         generate = getattr(provider, "generate", None)
         return callable(generate)
+
+    def _gateway_provider_factory(self, provider_name: str) -> Any:
+        from pydantic_ai.providers.gateway import gateway_provider
+
+        upstream_provider = provider_name.removeprefix("gateway/")
+        return gateway_provider(
+            upstream_provider,
+            api_key=self._api_key,
+            base_url=self._base_url,
+            route=self._route,
+        )
+
+    @classmethod
+    def _gateway_model_id(cls, *, provider_id: str, model_name: str) -> str:
+        upstream_provider = cls._gateway_upstream_provider(provider_id)
+        if not upstream_provider:
+            raise RuntimeError(f"Provider '{provider_id}' is not supported by Pydantic AI Gateway backend")
+        return f"gateway/{upstream_provider}:{model_name}"
+
+    @staticmethod
+    def _gateway_upstream_provider(provider_id: str) -> str | None:
+        mapping = {
+            "anthropic": "anthropic",
+            "anthropic_bedrock": "bedrock",
+            "gemini": "gemini",
+            "openai": "openai",
+            "azure_openai": "openai",
+        }
+        return mapping.get(provider_id)
+
+    @staticmethod
+    def _build_messages(request: LLMInvocationRequest) -> list[Any]:
+        from pydantic_ai.messages import ModelRequest
+
+        return [
+            ModelRequest.user_text_prompt(
+                request.prompt,
+                instructions=request.system_prompt or None,
+            )
+        ]
+
+    def _build_model_settings(self, request: LLMInvocationRequest) -> Dict[str, Any]:
+        model_settings: Dict[str, Any] = {
+            "temperature": request.temperature,
+            "max_tokens": request.max_tokens,
+        }
+        for key in self._FORWARDED_SETTINGS:
+            if key in request.extra:
+                model_settings[key] = request.extra[key]
+        return model_settings
+
+    @staticmethod
+    def _response_metadata(response: Any) -> Dict[str, Any]:
+        raw: Dict[str, Any] = {}
+        provider_response_id = getattr(response, "provider_response_id", None)
+        finish_reason = getattr(response, "finish_reason", None)
+        provider_name = getattr(response, "provider_name", None)
+        provider_url = getattr(response, "provider_url", None)
+        if provider_response_id:
+            raw["provider_response_id"] = str(provider_response_id)
+        if finish_reason:
+            raw["finish_reason"] = str(finish_reason)
+        if provider_name:
+            raw["provider_name"] = str(provider_name)
+        if provider_url:
+            raw["provider_url"] = str(provider_url)
+        provider_details = getattr(response, "provider_details", None)
+        if isinstance(provider_details, dict) and provider_details:
+            raw["provider_details"] = dict(provider_details)
+        return raw
 
 
 __all__ = [

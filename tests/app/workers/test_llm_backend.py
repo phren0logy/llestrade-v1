@@ -6,6 +6,8 @@ from types import SimpleNamespace
 from typing import Any, Dict
 
 import pytest
+from pydantic_ai.messages import ModelResponse, TextPart
+from pydantic_ai.usage import RequestUsage
 
 from src.app.workers.llm_backend import (
     LLMInvocationRequest,
@@ -110,40 +112,34 @@ def test_invocation_result_normalizes_non_dict_usage() -> None:
 
 
 def test_gateway_backend_success_normalizes_response(monkeypatch: pytest.MonkeyPatch) -> None:
-    class _Usage:
-        requests = 1
-        input_tokens = 120
-        output_tokens = 45
-        details = {"cached": 0}
-
-    class _RunResult:
-        output = "Gateway response"
-        run_id = "run-123"
-
-        @staticmethod
-        def usage() -> _Usage:
-            return _Usage()
-
     captured: dict[str, Any] = {}
 
-    class _FakeAgent:
-        def __init__(self, *, model: Any, system_prompt: str, retries: int) -> None:
-            captured["init"] = {
-                "model": model,
-                "system_prompt": system_prompt,
-                "retries": retries,
-            }
+    def _fake_model_request_sync(
+        model: Any,
+        messages: Any,
+        *,
+        model_settings: Dict[str, Any],
+        model_request_parameters: Any = None,
+        instrument: Any = None,
+    ) -> ModelResponse:
+        captured["call"] = {
+            "model": model,
+            "messages": messages,
+            "model_settings": dict(model_settings),
+            "model_request_parameters": model_request_parameters,
+            "instrument": instrument,
+        }
+        return ModelResponse(
+            parts=[TextPart("Gateway response")],
+            usage=RequestUsage(input_tokens=120, output_tokens=45, details={"cached": 0}),
+            model_name="claude-sonnet-4-5",
+            provider_name="gateway/anthropic",
+            provider_url="https://gateway.example.com/anthropic",
+            provider_response_id="resp-123",
+            finish_reason="stop",
+        )
 
-        def run_sync(self, prompt: str, *, model_settings: Dict[str, Any]) -> _RunResult:
-            captured["run"] = {
-                "prompt": prompt,
-                "model_settings": dict(model_settings),
-            }
-            return _RunResult()
-
-    import pydantic_ai
-
-    monkeypatch.setattr(pydantic_ai, "Agent", _FakeAgent, raising=True)
+    monkeypatch.setattr("pydantic_ai.direct.model_request_sync", _fake_model_request_sync)
     backend = PydanticAIGatewayBackend(api_key="pylf_test_key")
     monkeypatch.setattr(
         backend,
@@ -172,12 +168,17 @@ def test_gateway_backend_success_normalizes_response(monkeypatch: pytest.MonkeyP
     assert result.usage["input_tokens"] == 120
     assert result.usage["output_tokens"] == 45
     assert result.usage["total_tokens"] == 165
-    assert result.raw == {"run_id": "run-123"}
-    assert captured["init"]["system_prompt"] == "System prompt"
-    assert captured["run"]["prompt"] == "Summarize this"
-    assert captured["run"]["model_settings"]["temperature"] == 0.2
-    assert captured["run"]["model_settings"]["max_tokens"] == 4096
-    assert captured["run"]["model_settings"]["reasoning_effort"] == "medium"
+    assert result.raw == {
+        "provider_response_id": "resp-123",
+        "finish_reason": "stop",
+        "provider_name": "gateway/anthropic",
+        "provider_url": "https://gateway.example.com/anthropic",
+    }
+    assert captured["call"]["messages"][0].instructions == "System prompt"
+    assert captured["call"]["messages"][0].parts[0].content == "Summarize this"
+    assert captured["call"]["model_settings"]["temperature"] == 0.2
+    assert captured["call"]["model_settings"]["max_tokens"] == 4096
+    assert captured["call"]["model_settings"]["reasoning_effort"] == "medium"
 
 
 def test_gateway_backend_uses_fallback_for_unsupported_provider() -> None:
@@ -289,10 +290,10 @@ def test_gateway_backend_count_input_tokens_uses_model_token_counter(
 
     assert token_count == 321
     assert len(captured["messages"]) == 1
+    assert captured["messages"][0].instructions == "System prompt"
     parts = captured["messages"][0].parts
-    assert [type(part).__name__ for part in parts] == ["SystemPromptPart", "UserPromptPart"]
-    assert parts[0].content == "System prompt"
-    assert parts[1].content == "User prompt"
+    assert [type(part).__name__ for part in parts] == ["UserPromptPart"]
+    assert parts[0].content == "User prompt"
     assert captured["model_settings"]["temperature"] == 0.2
     assert captured["model_settings"]["max_tokens"] == 2048
     assert captured["model_settings"]["reasoning_effort"] == "medium"
@@ -433,30 +434,22 @@ def test_gateway_backend_does_not_call_legacy_fallback_on_error_with_metadata_on
 def test_gateway_backend_reports_empty_output_as_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class _Usage:
-        requests = 1
-        input_tokens = 20
-        output_tokens = 0
-        details = {}
+    def _fake_model_request_sync(
+        model: Any,
+        messages: Any,
+        *,
+        model_settings: Dict[str, Any],
+        model_request_parameters: Any = None,
+        instrument: Any = None,
+    ) -> ModelResponse:
+        _ = model, messages, model_settings, model_request_parameters, instrument
+        return ModelResponse(
+            parts=[TextPart("   ")],
+            usage=RequestUsage(input_tokens=20, output_tokens=0),
+            model_name="claude-sonnet-4-5",
+        )
 
-    class _RunResult:
-        output = "   "
-        run_id = "run-empty"
-
-        @staticmethod
-        def usage() -> _Usage:
-            return _Usage()
-
-    class _FakeAgent:
-        def __init__(self, *, model: Any, system_prompt: str, retries: int) -> None:  # noqa: ARG002
-            pass
-
-        def run_sync(self, prompt: str, *, model_settings: Dict[str, Any]) -> _RunResult:  # noqa: ARG002
-            return _RunResult()
-
-    import pydantic_ai
-
-    monkeypatch.setattr(pydantic_ai, "Agent", _FakeAgent, raising=True)
+    monkeypatch.setattr("pydantic_ai.direct.model_request_sync", _fake_model_request_sync)
     backend = PydanticAIGatewayBackend(api_key="pylf_test_key")
     monkeypatch.setattr(
         backend,
@@ -479,6 +472,54 @@ def test_gateway_backend_reports_empty_output_as_failure(
     assert result.success is False
     assert result.error == "LLM returned empty response"
     assert result.provider == "gateway/anthropic"
+
+
+def test_gateway_backend_build_model_uses_canonical_gateway_model_ids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def _fake_infer_model(model: str, provider_factory: Any) -> Any:
+        captured["model"] = model
+        captured["provider"] = provider_factory("gateway/gemini")
+        return {"model": model}
+
+    def _fake_gateway_provider(
+        upstream_provider: str,
+        /,
+        *,
+        route: str | None = None,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        http_client: Any = None,
+    ) -> dict[str, Any]:
+        return {
+            "upstream_provider": upstream_provider,
+            "route": route,
+            "api_key": api_key,
+            "base_url": base_url,
+            "http_client": http_client,
+        }
+
+    monkeypatch.setattr("pydantic_ai.models.infer_model", _fake_infer_model)
+    monkeypatch.setattr("pydantic_ai.providers.gateway.gateway_provider", _fake_gateway_provider)
+
+    backend = PydanticAIGatewayBackend(
+        api_key="gateway-key",
+        base_url="https://gateway.example.com",
+        route="llestrade",
+    )
+    model = backend._build_model(provider_id="gemini", model_name="gemini-2.5-pro")
+
+    assert model == {"model": "gateway/gemini:gemini-2.5-pro"}
+    assert captured["model"] == "gateway/gemini:gemini-2.5-pro"
+    assert captured["provider"] == {
+        "upstream_provider": "gemini",
+        "route": "llestrade",
+        "api_key": "gateway-key",
+        "base_url": "https://gateway.example.com",
+        "http_client": None,
+    }
 
 
 def test_gateway_backend_returns_error_when_provider_metadata_is_missing() -> None:
