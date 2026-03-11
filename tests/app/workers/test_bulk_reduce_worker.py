@@ -365,20 +365,26 @@ def test_bulk_reduce_trace_attributes_match_between_legacy_and_gateway(
     group.slug = "group-slug"
     config = ProviderConfig(provider_id="anthropic", model="claude", temperature=0.1)
 
-    class _LegacyProvider:
-        def generate(self, **kwargs):  # noqa: ANN003, ANN001
-            _ = kwargs
-            return {"success": True, "content": "summary"}
-
     legacy_worker = BulkReduceWorker(
         project_dir=tmp_path,
         group=group,
         metadata=ProjectMetadata(case_name="Case"),
         force_rerun=False,
+        llm_backend=_ResultBackend(
+            LLMInvocationResult(
+                success=True,
+                content="summary",
+                error=None,
+                usage={"output_tokens": 1},
+                provider="anthropic",
+                model="claude",
+                raw={},
+            )
+        ),
     )
     legacy_traces = _capture_traces(monkeypatch)
     legacy_result = legacy_worker._invoke_provider(
-        provider=_LegacyProvider(),
+        provider=object(),
         provider_cfg=config,
         prompt="Prompt",
         system_prompt="System",

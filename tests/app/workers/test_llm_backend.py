@@ -23,83 +23,44 @@ from src.app.workers.llm_backend import (
 )
 
 
-class _StubProvider:
-    def __init__(self, response: Any) -> None:
-        self.response = response
-        self.calls: list[Dict[str, Any]] = []
-
-    def generate(self, **kwargs: Any) -> Any:
-        self.calls.append(dict(kwargs))
-        return self.response
-
-
 class _ProviderMeta:
     def __init__(self, name: str, default_model: str = "default-model") -> None:
         self.provider_name = name
         self.default_model = default_model
 
 
-def test_legacy_provider_backend_invokes_provider_and_normalizes_result() -> None:
-    provider = _StubProvider(
-        {
-            "success": True,
-            "content": "hello",
-            "usage": {"output_tokens": 42},
-            "provider": "anthropic",
-            "model": "claude-sonnet-4-5",
-        }
-    )
+def test_legacy_provider_backend_requires_direct_provider_metadata() -> None:
     backend = LegacyProviderBackend()
 
     result = backend.invoke(
-        provider,
+        object(),
         LLMInvocationRequest(
             prompt="summarize",
             system_prompt="system",
             model="claude-sonnet-4-5",
-            model_settings={
-                "temperature": 0.2,
-                "max_tokens": 2048,
-                "reasoning_effort": "medium",
-            },
-        ),
-    )
-
-    assert provider.calls == [
-        {
-            "prompt": "summarize",
-            "system_prompt": "system",
-            "model": "claude-sonnet-4-5",
-            "temperature": 0.2,
-            "max_tokens": 2048,
-            "reasoning_effort": "medium",
-        }
-    ]
-    assert result.success is True
-    assert result.content == "hello"
-    assert result.error is None
-    assert result.usage == {"output_tokens": 42}
-    assert result.provider == "anthropic"
-    assert result.model == "claude-sonnet-4-5"
-
-
-def test_legacy_provider_backend_handles_non_dict_provider_response() -> None:
-    provider = _StubProvider("unexpected")
-    backend = LegacyProviderBackend()
-
-    result = backend.invoke(
-        provider,
-        LLMInvocationRequest(
-            prompt="summarize",
-            system_prompt=None,
-            model=None,
-            model_settings={"temperature": 0.1, "max_tokens": 256},
+            model_settings={"temperature": 0.2, "max_tokens": 2048},
         ),
     )
 
     assert result.success is False
-    assert result.content == ""
-    assert result.error == "Provider returned non-dict response"
+    assert result.error == "Legacy provider backend requires DirectProviderMetadata"
+    assert result.model == "claude-sonnet-4-5"
+
+
+def test_legacy_provider_backend_count_input_tokens_requires_direct_provider_metadata() -> None:
+    backend = LegacyProviderBackend()
+
+    result = backend.count_input_tokens(
+        object(),
+        LLMInvocationRequest(
+            prompt="summarize",
+            system_prompt=None,
+            model=None,
+            model_settings={},
+        ),
+    )
+
+    assert result is None
 
 
 def test_invocation_result_normalizes_non_dict_usage() -> None:
@@ -165,6 +126,27 @@ def test_legacy_provider_backend_create_provider_loads_settings(monkeypatch: pyt
         "azure_endpoint": "https://azure.example.com",
         "api_version": "2025-01-01-preview",
     }
+
+
+def test_legacy_provider_backend_create_provider_rejects_unsupported_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _StubSettings:
+        def get_api_key(self, provider_id: str) -> str | None:  # noqa: ARG002
+            return None
+
+    monkeypatch.setattr("src.app.core.secure_settings.SecureSettings", _StubSettings)
+
+    backend = LegacyProviderBackend()
+
+    with pytest.raises(RuntimeError, match="not supported by the worker LLM backend"):
+        backend.create_provider(
+            LLMProviderRequest(
+                provider_id="unsupported_provider",
+                model="custom-model",
+                system_prompt="System prompt",
+            )
+        )
 
 
 def test_legacy_provider_backend_direct_provider_uses_pydantic_ai_requests(
@@ -403,26 +385,11 @@ def test_gateway_backend_success_normalizes_response(monkeypatch: pytest.MonkeyP
     assert captured["call"]["model_settings"]["reasoning_effort"] == "medium"
 
 
-def test_gateway_backend_uses_fallback_for_unsupported_provider() -> None:
-    provider = _StubProvider(
-        {
-            "success": True,
-            "content": "fallback content",
-            "usage": {"output_tokens": 7},
-            "provider": "legacy",
-            "model": "legacy-model",
-        }
-    )
-    provider.provider_name = "unsupported_provider"
-    provider.default_model = "legacy-model"
-
-    backend = PydanticAIGatewayBackend(
-        api_key="pylf_test_key",
-        fallback_backend=LegacyProviderBackend(),
-    )
+def test_gateway_backend_rejects_unsupported_provider() -> None:
+    backend = PydanticAIGatewayBackend(api_key="pylf_test_key")
 
     result = backend.invoke(
-        provider,
+        ProviderMetadata(provider_name="unsupported_provider", default_model="legacy-model"),
         LLMInvocationRequest(
             prompt="test",
             system_prompt="sys",
@@ -431,16 +398,12 @@ def test_gateway_backend_uses_fallback_for_unsupported_provider() -> None:
         ),
     )
 
-    assert result.success is True
-    assert result.content == "fallback content"
-    assert result.provider == "legacy"
+    assert result.success is False
+    assert "not supported by Pydantic AI Gateway backend" in (result.error or "")
 
 
-def test_gateway_backend_does_not_call_legacy_fallback_with_metadata_only_provider() -> None:
-    backend = PydanticAIGatewayBackend(
-        api_key="pylf_test_key",
-        fallback_backend=LegacyProviderBackend(),
-    )
+def test_gateway_backend_rejects_unsupported_provider_metadata() -> None:
+    backend = PydanticAIGatewayBackend(api_key="pylf_test_key")
 
     result = backend.invoke(
         ProviderMetadata(provider_name="unsupported_provider", default_model="custom-model"),
@@ -648,58 +611,12 @@ def test_gateway_backend_enforces_input_limit_after_response_when_precount_is_un
     assert "Exceeded the input_tokens_limit" in result.error
 
 
-def test_gateway_backend_can_fallback_on_error_when_enabled(
+def test_gateway_backend_reports_configuration_error_without_key(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("PYDANTIC_AI_GATEWAY_API_KEY", raising=False)
     monkeypatch.delenv("PAIG_API_KEY", raising=False)
-
-    provider = _StubProvider(
-        {
-            "success": True,
-            "content": "legacy fallback",
-            "usage": {"output_tokens": 9},
-            "provider": "legacy",
-            "model": "legacy-model",
-        }
-    )
-    provider.provider_name = "anthropic"
-    provider.default_model = "claude-sonnet-4-5"
-
-    backend = PydanticAIGatewayBackend(
-        api_key=None,
-        base_url=None,
-        fallback_backend=LegacyProviderBackend(),
-        fallback_on_error=True,
-    )
-
-    result = backend.invoke(
-        provider,
-        LLMInvocationRequest(
-            prompt="Summarize this",
-            system_prompt="System",
-            model="claude-sonnet-4-5",
-            model_settings={"temperature": 0.2, "max_tokens": 512},
-        ),
-    )
-
-    assert result.success is True
-    assert result.content == "legacy fallback"
-    assert result.provider == "legacy"
-
-
-def test_gateway_backend_does_not_call_legacy_fallback_on_error_with_metadata_only_provider(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.delenv("PYDANTIC_AI_GATEWAY_API_KEY", raising=False)
-    monkeypatch.delenv("PAIG_API_KEY", raising=False)
-
-    backend = PydanticAIGatewayBackend(
-        api_key=None,
-        base_url=None,
-        fallback_backend=LegacyProviderBackend(),
-        fallback_on_error=True,
-    )
+    backend = PydanticAIGatewayBackend(api_key=None, base_url=None)
 
     result = backend.invoke(
         ProviderMetadata(provider_name="anthropic", default_model="claude-sonnet-4-5"),

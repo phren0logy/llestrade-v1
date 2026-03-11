@@ -298,7 +298,7 @@ class LLMExecutionBackend(Protocol):
 
 
 class LegacyProviderBackend:
-    """Default backend that forwards directly to existing provider.generate calls."""
+    """Default backend that uses direct Pydantic AI providers for worker requests."""
 
     _PYDANTIC_PROVIDER_NAMES: Mapping[str, str] = {
         "anthropic": "anthropic",
@@ -316,99 +316,35 @@ class LegacyProviderBackend:
 
     def create_provider(self, request: LLMProviderRequest) -> object:
         from src.app.core.secure_settings import SecureSettings
-        from src.common.llm.factory import create_provider
 
         settings = SecureSettings()
         direct_provider = self._create_pydantic_provider_metadata(settings=settings, request=request)
         if direct_provider is not None:
             return direct_provider
 
-        provider_id = request.provider_id
-        api_key = settings.get_api_key(provider_id)
-        kwargs: Dict[str, Any] = {
-            "provider": provider_id,
-            "default_system_prompt": request.system_prompt,
-            "api_key": api_key,
-        }
-        if provider_id == "azure_openai":
-            azure_settings = settings.get("azure_openai_settings", {}) or {}
-            kwargs["azure_endpoint"] = azure_settings.get("endpoint")
-            kwargs["api_version"] = azure_settings.get("api_version")
-        elif provider_id == "anthropic_bedrock":
-            bedrock_settings = settings.get("aws_bedrock_settings", {}) or {}
-            kwargs["aws_region"] = bedrock_settings.get("region") or os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION")
-            kwargs["aws_profile"] = bedrock_settings.get("profile")
-
-        provider = create_provider(**kwargs)
-        if provider is None or not getattr(provider, "initialized", False):
-            raise RuntimeError(
-                f"Unable to initialise provider '{provider_id}'. Check API keys and model configuration in Settings."
-            )
-        return provider
+        supported = ", ".join(sorted(self._PYDANTIC_PROVIDER_NAMES))
+        raise RuntimeError(
+            f"Provider '{request.provider_id}' is not supported by the worker LLM backend. "
+            f"Supported providers: {supported}."
+        )
 
     def count_input_tokens(self, provider: Any, request: LLMInvocationRequest) -> int | None:
-        if isinstance(provider, DirectProviderMetadata):
-            return self._count_input_tokens_direct(provider, request)
-
-        count_tokens = getattr(provider, "count_tokens", None)
-        if not callable(count_tokens):
+        if not isinstance(provider, DirectProviderMetadata):
             return None
-
-        combined_prompt = self._combine_prompt(request)
-        if not combined_prompt:
-            return 0
-
-        try:
-            result = count_tokens(text=combined_prompt)
-        except Exception:
-            logger.debug("Native provider token preflight failed", exc_info=True)
-            return None
-
-        return self._extract_token_count(result)
+        return self._count_input_tokens_direct(provider, request)
 
     def invoke(self, provider: Any, request: LLMInvocationRequest) -> LLMInvocationResult:
-        if isinstance(provider, DirectProviderMetadata):
-            return self._invoke_direct(provider, request)
-
-        provider_id = self._resolve_provider_id(provider) or ""
-        kwargs: Dict[str, Any] = {
-            "prompt": request.prompt,
-            "model": self.resolve_model(provider_id, request.model) if request.model is not None else request.model,
-            "system_prompt": request.system_prompt,
-        }
-        kwargs.update(dict(request.model_settings))
-        response = provider.generate(**kwargs)
-        if not isinstance(response, dict):
-            response = {"success": False, "error": "Provider returned non-dict response"}
-        return LLMInvocationResult.from_provider_response(response)
-
-    @staticmethod
-    def _combine_prompt(request: LLMInvocationRequest) -> str:
-        return f"{(request.system_prompt or '').strip()}\n\n{request.prompt.strip()}".strip()
-
-    @staticmethod
-    def _extract_token_count(payload: Any) -> int | None:
-        if not isinstance(payload, Mapping):
-            return None
-        if not payload.get("success"):
-            return None
-        token_count = payload.get("token_count")
-        if token_count is None:
-            return None
-        counted = int(token_count or 0)
-        return counted if counted >= 0 else None
-
-    @staticmethod
-    def _resolve_provider_id(provider: Any) -> str | None:
-        value = getattr(provider, "provider_name", None)
-        if callable(value):
-            try:
-                value = value()
-            except Exception:
-                value = None
-        if not value:
-            return None
-        return str(value)
+        if not isinstance(provider, DirectProviderMetadata):
+            return LLMInvocationResult(
+                success=False,
+                content="",
+                error="Legacy provider backend requires DirectProviderMetadata",
+                usage={},
+                provider=None,
+                model=request.model,
+                raw={},
+            )
+        return self._invoke_direct(provider, request)
 
     def _create_pydantic_provider_metadata(
         self,
@@ -568,8 +504,6 @@ class PydanticAIGatewayBackend:
         base_url: str | None = None,
         route: str | None = None,
         max_concurrency: int | None = None,
-        fallback_backend: LLMExecutionBackend | None = None,
-        fallback_on_error: bool = False,
     ) -> None:
         self._api_key = (
             api_key
@@ -585,8 +519,6 @@ class PydanticAIGatewayBackend:
         )
         self._route = route or os.getenv("PYDANTIC_AI_GATEWAY_ROUTE")
         self._max_concurrency = self._resolve_max_concurrency(max_concurrency)
-        self._fallback_backend = fallback_backend
-        self._fallback_on_error = fallback_on_error
         self._http_client: Any | None = None
         self._concurrency_limiter: Any | None = None
 
@@ -648,10 +580,9 @@ class PydanticAIGatewayBackend:
     def invoke(self, provider: Any, request: LLMInvocationRequest) -> LLMInvocationResult:
         provider_id = self._resolve_provider_id(provider)
         if not provider_id:
-            return self._fallback_or_error(
-                provider=provider,
-                request=request,
+            return self._error_result(
                 reason="Unable to resolve provider ID for Gateway backend",
+                model=request.model,
             )
 
         model_name = self.resolve_model(
@@ -659,10 +590,9 @@ class PydanticAIGatewayBackend:
             request.model or self._resolve_default_model(provider),
         )
         if not model_name:
-            return self._fallback_or_error(
-                provider=provider,
-                request=request,
+            return self._error_result(
                 reason="No model configured for Gateway backend",
+                model=request.model,
             )
 
         try:
@@ -689,17 +619,9 @@ class PydanticAIGatewayBackend:
                 model_name=model_name,
             )
         except Exception as exc:
-            if "not supported by Pydantic AI Gateway backend" in str(exc):
-                return self._fallback_or_error(
-                    provider=provider,
-                    request=request,
-                    reason=f"Gateway invocation failed: {exc}",
-                )
-            return self._fallback_or_error(
-                provider=provider,
-                request=request,
+            return self._error_result(
                 reason=f"Gateway invocation failed: {exc}",
-                fallback_on_error=True,
+                model=model_name,
             )
 
     def _build_model(self, *, provider_id: str, model_name: str) -> Any:
@@ -715,27 +637,15 @@ class PydanticAIGatewayBackend:
             return model
         return limit_model_concurrency(model, limiter=limiter)
 
-    def _fallback_or_error(
-        self,
-        *,
-        provider: Any,
-        request: LLMInvocationRequest,
-        reason: str,
-        fallback_on_error: bool = False,
-    ) -> LLMInvocationResult:
-        if (
-            self._fallback_backend
-            and (not fallback_on_error or self._fallback_on_error)
-            and self._can_use_fallback_backend(provider)
-        ):
-            return self._fallback_backend.invoke(provider, request)
+    @staticmethod
+    def _error_result(*, reason: str, model: str | None) -> LLMInvocationResult:
         return LLMInvocationResult(
             success=False,
             content="",
             error=reason,
             usage={},
             provider=None,
-            model=request.model,
+            model=model,
             raw={},
         )
 
@@ -762,14 +672,6 @@ class PydanticAIGatewayBackend:
         if not value:
             return None
         return str(value)
-
-    def _can_use_fallback_backend(self, provider: Any) -> bool:
-        if not self._fallback_backend:
-            return False
-        if not isinstance(self._fallback_backend, LegacyProviderBackend):
-            return True
-        generate = getattr(provider, "generate", None)
-        return callable(generate)
 
     def _gateway_provider_factory(self, provider_name: str) -> Any:
         from pydantic_ai.providers.gateway import gateway_provider

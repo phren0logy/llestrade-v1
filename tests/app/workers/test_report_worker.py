@@ -23,14 +23,12 @@ from src.app.workers.llm_backend import (
     LLMInvocationRequest,
     LLMInvocationResult,
     LLMProviderRequest,
-    LegacyProviderBackend,
     ProviderMetadata,
     normalize_model_name,
     resolve_model_name,
 )
 from src.app.workers.report_worker import DraftReportWorker, ReportRefinementWorker
 from src.app.workers import report_common
-from src.common.llm.base import BaseLLMProvider
 
 
 @pytest.fixture(scope="module")
@@ -41,49 +39,41 @@ def qt_app() -> QApplication:
     return app
 
 
-class _StubProvider(BaseLLMProvider):
+class _StubBackend(LLMExecutionBackend):
     def __init__(self) -> None:
-        super().__init__(timeout=0, max_retries=0, default_system_prompt="stub", debug=False)
-        self.set_initialized(True)
         self._call_index = 0
         self.system_prompts: list[str] = []
 
-    def generate(  # type: ignore[override]
-        self,
-        prompt: str,
-        model: str | None = None,
-        max_tokens: int = 32000,
-        temperature: float = 0.1,
-        system_prompt: str | None = None,
-    ) -> dict:
+    def normalize_model(self, provider_id: str, model: str | None) -> str | None:
+        return normalize_model_name(provider_id, model)
+
+    def resolve_model(self, provider_id: str, model: str | None) -> str | None:
+        return resolve_model_name(provider_id, model)
+
+    def create_provider(self, request: LLMProviderRequest) -> object:
+        return ProviderMetadata(provider_name=request.provider_id, default_model=request.model or "default-model")
+
+    def invoke(self, provider, request: LLMInvocationRequest) -> LLMInvocationResult:  # noqa: ANN001
+        _ = provider
         self._call_index += 1
-        if system_prompt:
-            self.system_prompts.append(system_prompt)
-        lower_prompt = (prompt or "").lower()
+        if request.system_prompt:
+            self.system_prompts.append(request.system_prompt)
+        lower_prompt = (request.prompt or "").lower()
         if "<draft>" in lower_prompt or "refine" in lower_prompt:
             content = "Refined content"
             reasoning = "Reasoning trace"
         else:
             content = f"Section output {self._call_index}"
-            reasoning = ""
-        return {
-            "success": True,
-            "content": content,
-            "usage": {"output_tokens": 100 + self._call_index},
-            "reasoning": reasoning,
-        }
-
-    def count_tokens(self, text: str | None = None, messages: list[dict] | None = None) -> dict:  # noqa: ARG002
-        length = len(text or "")
-        return {"success": True, "token_count": max(length // 4, 1)}
-
-    @property
-    def provider_name(self) -> str:  # type: ignore[override]
-        return "stub"
-
-    @property
-    def default_model(self) -> str:  # type: ignore[override]
-        return "stub-model"
+            reasoning = None
+        return LLMInvocationResult(
+            success=True,
+            content=content,
+            error=None,
+            usage={"output_tokens": 100 + self._call_index},
+            provider="anthropic",
+            model=request.model,
+            raw={"reasoning": reasoning} if reasoning else {},
+        )
 
 
 class _NoNativeBackend(LLMExecutionBackend):
@@ -187,10 +177,6 @@ def _write_system_prompt(path: Path, message: str) -> None:
     path.write_text(message, encoding="utf-8")
 
 
-def _patch_worker_dependencies(monkeypatch: pytest.MonkeyPatch, provider: _StubProvider) -> None:
-    monkeypatch.setattr(LegacyProviderBackend, "create_provider", lambda self, request: provider)
-
-
 def _prepare_common_files(project_dir: Path) -> tuple[Path, Path, Path, Path]:
     converted_dir = project_dir / "converted_documents"
     converted_dir.mkdir(parents=True, exist_ok=True)
@@ -252,8 +238,7 @@ def test_draft_worker_generates_outputs(
         generation_system_prompt_path,
     ) = common_paths
 
-    stub_provider = _StubProvider()
-    _patch_worker_dependencies(monkeypatch, stub_provider)
+    stub_provider = _StubBackend()
 
     placeholder_values = {"client_name": "ACME Inc"}
 
@@ -271,6 +256,7 @@ def test_draft_worker_generates_outputs(
         metadata=ProjectMetadata(case_name="Case"),
         placeholder_values=placeholder_values,
         project_name="Case",
+        llm_backend=stub_provider,
     )
 
     finished_results: list[dict] = []
@@ -327,8 +313,7 @@ def test_refinement_worker_generates_outputs(
         generation_system_prompt_path,
     ) = common_paths
 
-    stub_provider = _StubProvider()
-    _patch_worker_dependencies(monkeypatch, stub_provider)
+    stub_provider = _StubBackend()
 
     draft_worker = DraftReportWorker(
         project_dir=project_dir,
@@ -344,6 +329,7 @@ def test_refinement_worker_generates_outputs(
         metadata=ProjectMetadata(case_name="Case"),
         placeholder_values={"client_name": "ACME Inc"},
         project_name="Case",
+        llm_backend=stub_provider,
     )
     draft_results: list[dict] = []
     draft_failures: list[str] = []
@@ -369,6 +355,7 @@ def test_refinement_worker_generates_outputs(
         metadata=ProjectMetadata(case_name="Case"),
         placeholder_values={"client_name": "ACME Inc"},
         project_name="Case",
+        llm_backend=stub_provider,
     )
 
     finished_results: list[dict] = []
@@ -413,8 +400,7 @@ def test_draft_worker_requires_generation_placeholders(
     )
     generation_system_prompt_path = project_dir / "system_prompts" / "generation.md"
 
-    stub_provider = _StubProvider()
-    _patch_worker_dependencies(monkeypatch, stub_provider)
+    stub_provider = _StubBackend()
 
     worker = DraftReportWorker(
         project_dir=project_dir,
@@ -428,6 +414,7 @@ def test_draft_worker_requires_generation_placeholders(
         generation_user_prompt_path=generation_user_prompt_path,
         generation_system_prompt_path=generation_system_prompt_path,
         metadata=ProjectMetadata(case_name="Case"),
+        llm_backend=stub_provider,
     )
 
     failures: list[str] = []
@@ -458,8 +445,7 @@ def test_refinement_worker_requires_refinement_placeholders(
     ) = common_paths
 
     # Generate a draft first
-    stub_provider = _StubProvider()
-    _patch_worker_dependencies(monkeypatch, stub_provider)
+    stub_provider = _StubBackend()
     draft_worker = DraftReportWorker(
         project_dir=project_dir,
         inputs=[(REPORT_CATEGORY_CONVERTED, "converted_documents/doc.md")],
@@ -472,6 +458,7 @@ def test_refinement_worker_requires_refinement_placeholders(
         generation_user_prompt_path=generation_user_prompt_path,
         generation_system_prompt_path=generation_system_prompt_path,
         metadata=ProjectMetadata(case_name="Case"),
+        llm_backend=stub_provider,
     )
     draft_worker.run()
     draft_manifest = list(project_dir.glob("reports/*-draft.manifest.json"))[0]
@@ -530,8 +517,7 @@ def test_draft_worker_supports_transcript_without_inputs(
     generation_system_prompt_path = system_prompt_dir / "generation.md"
     _write_system_prompt(generation_system_prompt_path, "Gen")
 
-    stub_provider = _StubProvider()
-    _patch_worker_dependencies(monkeypatch, stub_provider)
+    stub_provider = _StubBackend()
 
     worker = DraftReportWorker(
         project_dir=project_dir,
@@ -545,6 +531,7 @@ def test_draft_worker_supports_transcript_without_inputs(
         generation_user_prompt_path=generation_user_prompt_path,
         generation_system_prompt_path=generation_system_prompt_path,
         metadata=ProjectMetadata(case_name="Case"),
+        llm_backend=stub_provider,
     )
 
     finished_results: list[dict] = []
@@ -563,7 +550,6 @@ def test_draft_worker_supports_transcript_without_inputs(
 def test_gateway_backend_path_skips_native_provider_initialization(
     tmp_path: Path,
     qt_app: QApplication,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     assert qt_app is not None
     (common_paths, _refinement_system_prompt_path) = _prepare_common_files(tmp_path)
@@ -573,12 +559,6 @@ def test_gateway_backend_path_skips_native_provider_initialization(
         _refinement_user_prompt_path,
         generation_system_prompt_path,
     ) = common_paths
-
-    def _fail_create_provider(self, request):  # noqa: ANN001
-        _ = self, request
-        raise AssertionError("create_provider should not be called for no-native backends")
-
-    monkeypatch.setattr(LegacyProviderBackend, "create_provider", _fail_create_provider)
 
     worker = DraftReportWorker(
         project_dir=tmp_path,
@@ -657,7 +637,7 @@ def test_report_draft_trace_attributes_match_between_legacy_and_gateway(
         generation_system_prompt_path=generation_system_prompt_path,
         metadata=ProjectMetadata(case_name="Case"),
     )
-    monkeypatch.setattr(legacy_worker, "_create_provider", lambda _system_prompt: _StubProvider())
+    legacy_worker._llm_backend = _StubBackend()
     legacy_traces = _capture_traces(monkeypatch)
     legacy_outputs = legacy_worker._generate_section_outputs(
         sections=[section],
@@ -693,7 +673,6 @@ def test_report_draft_trace_attributes_match_between_legacy_and_gateway(
             )
         ),
     )
-    monkeypatch.setattr(gateway_worker, "_create_provider", lambda _system_prompt: object())
     gateway_traces = _capture_traces(monkeypatch)
     gateway_outputs = gateway_worker._generate_section_outputs(
         sections=[section],
@@ -813,7 +792,7 @@ def test_report_refine_trace_attributes_match_between_legacy_and_gateway(
         refinement_system_prompt_path=refinement_system_prompt_path,
         metadata=ProjectMetadata(case_name="Case"),
     )
-    monkeypatch.setattr(legacy_worker, "_create_provider", lambda _system_prompt: _StubProvider())
+    legacy_worker._llm_backend = _StubBackend()
     legacy_traces = _capture_traces(monkeypatch)
     legacy_result = legacy_worker._run_refinement(
         prompt="Prompt",
@@ -845,7 +824,6 @@ def test_report_refine_trace_attributes_match_between_legacy_and_gateway(
             )
         ),
     )
-    monkeypatch.setattr(gateway_worker, "_create_provider", lambda _system_prompt: object())
     gateway_traces = _capture_traces(monkeypatch)
     gateway_result = gateway_worker._run_refinement(
         prompt="Prompt",

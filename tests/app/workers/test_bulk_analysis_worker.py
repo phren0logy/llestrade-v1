@@ -32,19 +32,6 @@ from src.app.workers.llm_backend import (
 )
 
 
-class _FakeProvider:
-    def __init__(self) -> None:
-        self.calls: list[str] = []
-
-    def generate(self, *, prompt: str, model=None, system_prompt=None, temperature=0.1, max_tokens=32000):  # noqa: ANN001
-        self.calls.append(prompt)
-        return {"success": True, "content": "summary"}
-
-    def count_tokens(self, text=None, messages=None):  # noqa: ANN001
-        content = text or ""
-        return {"success": True, "token_count": max(len(content) // 4, 1)}
-
-
 class _NoNativeBackend(LLMExecutionBackend):
     def normalize_model(self, provider_id: str, model: str | None) -> str | None:
         return normalize_model_name(provider_id, model)
@@ -317,10 +304,21 @@ def test_bulk_map_trace_attributes_match_between_legacy_and_gateway(
         files=[],
         metadata=ProjectMetadata(case_name="Case"),
         force_rerun=False,
+        llm_backend=_ResultBackend(
+            LLMInvocationResult(
+                success=True,
+                content="summary",
+                error=None,
+                usage={"output_tokens": 1},
+                provider="anthropic",
+                model="claude",
+                raw={},
+            )
+        ),
     )
     legacy_traces = _capture_traces(monkeypatch)
     legacy_result = legacy_worker._invoke_provider(
-        provider=_FakeProvider(),
+        provider=object(),
         provider_config=config,
         prompt="Prompt",
         system_prompt="System",
@@ -561,9 +559,19 @@ def test_invoke_provider_rejects_over_budget_prompt(tmp_path: Path) -> None:
         files=[],
         metadata=ProjectMetadata(case_name="Case"),
         force_rerun=True,
+        llm_backend=_ResultBackend(
+            LLMInvocationResult(
+                success=True,
+                content="summary",
+                error=None,
+                usage={"output_tokens": 1},
+                provider="anthropic",
+                model="claude-sonnet-4-5-20250929",
+                raw={},
+            )
+        ),
     )
 
-    provider = _FakeProvider()
     config = ProviderConfig(provider_id="anthropic", model="claude-sonnet-4-5-20250929")
 
     def fake_count(*_args, **_kwargs):  # noqa: ANN001
@@ -573,7 +581,7 @@ def test_invoke_provider_rejects_over_budget_prompt(tmp_path: Path) -> None:
 
     with pytest.raises(RuntimeError, match="Prompt exceeds model input budget"):
         worker._invoke_provider(
-            provider,  # type: ignore[arg-type]
+            object(),
             config,
             "user prompt",
             "system prompt",
@@ -602,6 +610,17 @@ def test_process_document_forces_chunking_when_full_prompt_exceeds_budget(
         force_rerun=True,
         placeholder_values={},
         project_name="Project XYZ",
+        llm_backend=_ResultBackend(
+            LLMInvocationResult(
+                success=True,
+                content="summary",
+                error=None,
+                usage={"output_tokens": 1},
+                provider="anthropic",
+                model="claude-sonnet-4-5-20250929",
+                raw={},
+            )
+        ),
     )
 
     bundle = worker_module.PromptBundle(
@@ -609,7 +628,6 @@ def test_process_document_forces_chunking_when_full_prompt_exceeds_budget(
         user_template="Analyze {document_content}",
     )
     provider_config = ProviderConfig(provider_id="anthropic", model="claude-sonnet-4-5-20250929")
-    provider = _FakeProvider()
 
     monkeypatch.setattr(worker_module, "should_chunk", lambda *_args, **_kwargs: (False, 100, 130_000))
     monkeypatch.setattr(worker, "_max_input_budget", lambda **_kwargs: 50_000)
@@ -644,7 +662,7 @@ def test_process_document_forces_chunking_when_full_prompt_exceeds_budget(
     )
 
     summary, run_details, _ = worker._process_document(
-        provider=provider,  # type: ignore[arg-type]
+        provider=object(),
         provider_config=provider_config,
         bundle=bundle,
         system_prompt=system_prompt,

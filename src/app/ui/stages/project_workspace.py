@@ -99,9 +99,7 @@ class ProjectWorkspace(QWidget):
         self._documents_controller: DocumentsController | None = None
         self._highlight_service = HighlightsService(self._workers)
         if self._feature_flags.pydantic_ai_gateway_enabled:
-            llm_backend = PydanticAIGatewayBackend(
-                fallback_backend=LegacyProviderBackend(),
-            )
+            llm_backend = PydanticAIGatewayBackend()
         else:
             llm_backend = LegacyProviderBackend()
         self._bulk_service = BulkAnalysisService(self._workers, llm_backend=llm_backend)
