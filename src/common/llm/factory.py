@@ -66,20 +66,6 @@ def create_provider(
             logger.info("Successfully auto-selected Anthropic provider")
             return anthropic
 
-        logger.info("Anthropic cloud not available, trying Anthropic Bedrock provider...")
-        bedrock = AnthropicBedrockProvider(
-            timeout=timeout,
-            max_retries=max_retries,
-            default_system_prompt=default_system_prompt,
-            aws_region=aws_region,
-            aws_profile=aws_profile,
-            debug=debug,
-            parent=parent,
-        )
-        if bedrock.initialized:
-            logger.info("Successfully auto-selected Anthropic Bedrock provider")
-            return bedrock
-
         # Try Gemini
         logger.info("Anthropic not available, trying Gemini provider...")
         gemini = GeminiProvider(
@@ -184,18 +170,6 @@ def get_available_providers() -> List[Dict[str, Any]]:
         "default_model": anthropic.default_model,
         "supports_pdf": True,
         "supports_thinking": True,
-    })
-
-    # Check Anthropic Bedrock
-    anthropic_bedrock = AnthropicBedrockProvider()
-    providers.append({
-        "id": "anthropic_bedrock",
-        "name": "AWS Bedrock (Claude)",
-        "available": anthropic_bedrock.initialized,
-        "default_model": anthropic_bedrock.default_model,
-        "supports_pdf": True,
-        "supports_thinking": True,
-        "models": [model.model_id for model in anthropic_bedrock.available_models],
     })
 
     # Check Gemini

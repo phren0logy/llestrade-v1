@@ -279,54 +279,23 @@ def test_welcome_stage_refreshes_on_show_event(
         stage.deleteLater()
 
 
-def test_welcome_stage_bedrock_status_uses_profile_hint(
+def test_welcome_stage_excludes_bedrock_status(
     tmp_path: Path,
     qt_app: QApplication,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     assert qt_app is not None
-    monkeypatch.setenv("FRD_SETTINGS_DIR", str(tmp_path / "settings_bedrock_profile"))
-    monkeypatch.setattr("src.app.ui.stages.welcome_stage.Path.home", staticmethod(lambda: tmp_path))
-    monkeypatch.delenv("AWS_PROFILE", raising=False)
-    monkeypatch.delenv("AWS_DEFAULT_PROFILE", raising=False)
-    monkeypatch.delenv("AWS_ACCESS_KEY_ID", raising=False)
-    monkeypatch.delenv("AWS_WEB_IDENTITY_TOKEN_FILE", raising=False)
-    monkeypatch.delenv("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI", raising=False)
-    monkeypatch.delenv("AWS_CONTAINER_CREDENTIALS_FULL_URI", raising=False)
+    monkeypatch.setenv("FRD_SETTINGS_DIR", str(tmp_path / "settings_no_bedrock"))
 
     stage = WelcomeStage()
     try:
-        stage.settings.set(
-            "aws_bedrock_settings",
-            {"profile": "default", "region": None, "preferred_model": None},
-        )
-        assert stage._is_bedrock_available() is True
-    finally:
-        stage.deleteLater()
-
-
-def test_welcome_stage_bedrock_status_false_without_hints(
-    tmp_path: Path,
-    qt_app: QApplication,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    assert qt_app is not None
-    monkeypatch.setenv("FRD_SETTINGS_DIR", str(tmp_path / "settings_bedrock_empty"))
-    monkeypatch.setattr("src.app.ui.stages.welcome_stage.Path.home", staticmethod(lambda: tmp_path))
-    monkeypatch.delenv("AWS_PROFILE", raising=False)
-    monkeypatch.delenv("AWS_DEFAULT_PROFILE", raising=False)
-    monkeypatch.delenv("AWS_ACCESS_KEY_ID", raising=False)
-    monkeypatch.delenv("AWS_WEB_IDENTITY_TOKEN_FILE", raising=False)
-    monkeypatch.delenv("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI", raising=False)
-    monkeypatch.delenv("AWS_CONTAINER_CREDENTIALS_FULL_URI", raising=False)
-
-    stage = WelcomeStage()
-    try:
-        stage.settings.set(
-            "aws_bedrock_settings",
-            {"profile": None, "region": None, "preferred_model": None},
-        )
-        assert stage._is_bedrock_available() is False
+        labels = []
+        for index in range(stage._api_layout.count()):
+            item = stage._api_layout.itemAt(index)
+            widget = item.widget()
+            if isinstance(widget, QLabel):
+                labels.append(widget.text())
+        assert not any("Bedrock" in text for text in labels)
     finally:
         stage.deleteLater()
 

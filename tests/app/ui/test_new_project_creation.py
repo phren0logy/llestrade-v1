@@ -13,6 +13,7 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 
 _ = PySide6
 
+from src.app.core.llm_catalog import default_model_for_provider
 from src.app.core.conversion_manager import ConversionJob
 from src.app.core.project_manager import ProjectManager, ProjectMetadata
 from src.app.ui.dialogs.new_project_dialog import NewProjectDialog
@@ -214,6 +215,19 @@ def test_project_manager_update_conversion_helper_replaces_options(qt_app: QAppl
     manager.update_conversion_helper("azure_di")
     assert manager.conversion_settings.helper == "azure_di"
     assert manager.conversion_settings.options == {}
+
+
+def test_new_project_uses_catalog_backed_llm_defaults(tmp_path: Path, qt_app: QApplication) -> None:
+    assert qt_app is not None
+    manager = ProjectManager()
+
+    manager.create_project(tmp_path, ProjectMetadata(case_name="Default Model Demo"))
+
+    expected_model = default_model_for_provider("anthropic") or ""
+    assert manager.settings["llm_provider"] == "anthropic"
+    assert manager.settings["llm_model"] == expected_model
+    assert manager.report_state.last_provider == "anthropic"
+    assert manager.report_state.last_model == expected_model
 
 
 def test_file_tracker_counts_converted_documents(tmp_path: Path, qt_app: QApplication) -> None:

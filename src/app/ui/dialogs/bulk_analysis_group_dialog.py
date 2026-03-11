@@ -36,6 +36,7 @@ from src.config.paths import app_resource_root
 from src.app.core.azure_artifacts import is_azure_raw_artifact
 from src.app.core.bulk_paths import iter_map_outputs, iter_map_outputs_under, resolve_map_output_path
 from src.app.core.bulk_analysis_groups import BulkAnalysisGroup
+from src.app.core.llm_catalog import default_model_for_provider
 from src.app.core.project_manager import ProjectMetadata
 from src.app.core.placeholders.analyzer import find_placeholders
 from src.app.core.prompt_placeholders import get_prompt_spec
@@ -655,10 +656,11 @@ class BulkAnalysisGroupDialog(QDialog):
         self._refresh_combined_input_summary()
 
     def _apply_model_selection(self, group: BulkAnalysisGroup) -> None:
+        provider_id = group.provider_id or "anthropic"
         self.llm_settings_panel.set_settings(
             LLMOperationSettings(
-                provider_id=group.provider_id or "anthropic",
-                model_id=group.model or "claude-sonnet-4-5-20250929",
+                provider_id=provider_id,
+                model_id=group.model or default_model_for_provider(provider_id) or "",
                 context_window=group.model_context_window,
                 use_reasoning=group.use_reasoning,
             )

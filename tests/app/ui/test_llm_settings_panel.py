@@ -7,8 +7,10 @@ from PySide6.QtWidgets import QApplication
 
 _ = PySide6
 
+from src.app.core import llm_catalog
 from src.app.core.llm_operation_settings import LLMOperationSettings
 from src.app.ui.widgets import LLMSettingsPanel
+from src.app.ui.widgets import llm_settings_panel as llm_settings_panel_module
 
 
 @pytest.fixture(scope="module")
@@ -17,6 +19,74 @@ def qt_app() -> QApplication:
     if app is None:
         app = QApplication([])
     return app
+
+
+@pytest.fixture(autouse=True)
+def stub_catalog(monkeypatch: pytest.MonkeyPatch) -> None:
+    providers = (
+        llm_catalog.LLMProviderOption(
+            provider_id="anthropic",
+            label="Anthropic Claude",
+            models=(
+                llm_catalog.LLMModelOption(
+                    model_id="claude-sonnet-4-5",
+                    label="Claude Sonnet 4.5",
+                    context_window=200_000,
+                    input_price_label="$3/1M",
+                    output_price_label="$15/1M",
+                ),
+            ),
+        ),
+        llm_catalog.LLMProviderOption(
+            provider_id="openai",
+            label="OpenAI",
+            models=(
+                llm_catalog.LLMModelOption(
+                    model_id="gpt-4.1",
+                    label="GPT-4.1",
+                    context_window=1_047_576,
+                    input_price_label="$2/1M",
+                    output_price_label="$8/1M",
+                ),
+            ),
+        ),
+        llm_catalog.LLMProviderOption(
+            provider_id="gemini",
+            label="Google Gemini",
+            models=(
+                llm_catalog.LLMModelOption(
+                    model_id="gemini-2.5-pro",
+                    label="Gemini 2.5 Pro",
+                    context_window=1_048_576,
+                    input_price_label="$1.25/1M",
+                    output_price_label="$10/1M",
+                ),
+                llm_catalog.LLMModelOption(
+                    model_id="gemini-2.5-flash",
+                    label="Gemini 2.5 Flash",
+                    context_window=1_048_576,
+                    input_price_label="$0.3/1M",
+                    output_price_label="$2.5/1M",
+                ),
+            ),
+        ),
+    )
+    model_lookup = {
+        (provider.provider_id, model.model_id): model
+        for provider in providers
+        for model in provider.models
+    }
+
+    monkeypatch.setattr(
+        llm_settings_panel_module,
+        "default_provider_catalog",
+        lambda include_azure=False: providers,
+    )
+    monkeypatch.setattr(
+        llm_settings_panel_module,
+        "resolve_catalog_model",
+        lambda provider_id, model_id: model_lookup.get((provider_id, str(model_id or "").strip())),
+    )
 
 
 def test_panel_provider_switch_updates_model_options(qt_app: QApplication) -> None:

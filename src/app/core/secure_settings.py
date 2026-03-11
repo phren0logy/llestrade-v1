@@ -19,6 +19,7 @@ except ImportError:
     logging.warning("keyring module not available - API keys will be stored in plain text")
 
 from PySide6.QtCore import QObject, Signal, QSettings
+from src.app.core.llm_catalog import default_model_for_provider
 from src.config.paths import app_config_dir
 
 # Shared cache so multiple SecureSettings instances reuse a single keychain lookup.
@@ -92,7 +93,7 @@ class SecureSettings(QObject):
         return {
             "version": "1.0",
             "llm_provider": "anthropic",
-            "llm_model": "claude-sonnet-4-5-20250929",
+            "llm_model": default_model_for_provider("anthropic") or "",
             "pydantic_ai_gateway_settings": {
                 "base_url": None,
                 "route": None,

@@ -24,12 +24,14 @@ Completed in the current worker/backend layer:
 - The old worker-runtime fallback escape hatch has been removed. Worker execution no longer falls back to `src.common.llm.factory` or legacy `provider.generate(...)` paths.
 - The old `LegacyProviderBackend` name has been retired in favor of `PydanticAIDirectBackend`.
 - Full `ModelResponse` passthrough is implemented in the worker backend. Success paths return raw Pydantic AI responses and failure paths raise exceptions.
+- `genai-prices` now backs preset model catalogs, context windows, and run-cost calculation in the current bulk/report path.
+- Gemini preset selection now uses live Google model discovery with cached fallback, while `genai-prices` continues to supply pricing metadata when available.
 
 Still open:
 
 - model-level instrumentation via Pydantic AI / InstrumentedModel
 - upstream failover via `FallbackModel` and/or Gateway routing groups
-- broader migration of non-worker legacy code under [`src/common/llm/`](../src/common/llm/) and [`src/config/app_config.py`](../src/config/app_config.py)
+- residual cleanup in non-worker legacy code under [`src/common/llm/`](../src/common/llm/) and [`src/config/app_config.py`](../src/config/app_config.py)
 - later-phase items such as structured outputs, evals, toolsets, and durable execution
 
 ## Current State
@@ -42,7 +44,7 @@ The current LLM execution path is centered on custom abstractions:
 - [`src/common/llm/tokens.py`](../src/common/llm/tokens.py) implements mixed token-counting strategies, including provider-specific fallbacks and character-based estimates.
 - [`src/config/observability.py`](../src/config/observability.py) emits app-specific Phoenix/OpenTelemetry spans around worker stages.
 - The worker backend now uses Pydantic AI `direct` plus raw `ModelResponse` passthrough for worker execution. Remaining custom logic is primarily in prompt assembly, chunk planning, checkpointing, and the surrounding worker orchestration.
-- Above that worker backend seam, the app still duplicates provider/model selection, reasoning UX, and selection persistence between bulk-analysis UI and reports UI.
+- Above that worker backend seam, bulk-analysis and reports now share one selector/settings surface. The main remaining drift is in legacy bootstrap/settings code outside the shared worker path.
 
 This architecture is reasonable for a desktop app with long-running jobs and file-based checkpoints, but it currently duplicates several upstream capabilities that Pydantic AI already provides.
 
@@ -150,7 +152,7 @@ What it should replace:
 Initial scope:
 
 - one shared settings contract for `provider_id`, `model_id`, optional custom `context_window`, and `use_reasoning`
-- one shared selector UI for Anthropic, Anthropic Bedrock, OpenAI, and Gemini
+- one shared selector UI for Anthropic, OpenAI, and Gemini, backed by `genai-prices`
 - binary `use_reasoning` as the primary control in both workflows
 - an “Advanced reasoning settings” affordance that uses provider defaults when no richer stable controls are exposed
 
@@ -163,6 +165,8 @@ Out of scope:
 Replacement status:
 
 - Implemented for the bulk/report UI and persistence layer above the worker backend seam.
+- Preset model metadata in the shared selector now comes from `genai-prices`, with Gemini availability and context windows refined by live Google model discovery plus cached fallback.
+- Bedrock remains supported in backend/legacy paths but is not part of the shared preset selector.
 - Workflow-specific execution defaults such as report and bulk token/temperature settings remain intentionally separate.
 
 ### 6. Use ConcurrencyLimitedModel for Shared Provider/Gateway Throughput Caps
@@ -396,7 +400,8 @@ Do not remove current worker/stage observability just because Pydantic AI can em
 ### Confirmed Current Baseline
 
 - Installed locally: `pydantic-ai-slim 1.67.0`
-- Confirmed current app providers: Anthropic, Gemini, OpenAI, Azure OpenAI, Anthropic Bedrock
+- Confirmed current app/backend providers: Anthropic, Gemini, OpenAI, Azure OpenAI, Anthropic Bedrock
+- Current shared bulk/report preset selector providers: Anthropic, OpenAI, Gemini
 
 ### Real Token Preflight
 
@@ -482,9 +487,11 @@ But Gateway does not remove the need for app-level policy around:
 
 Status against this sequence:
 
-- Steps 1-6 are largely complete for worker execution and bulk/report settings consolidation, except for the failover portion of step 9.
-- Structured outputs are now the next major adoption area, and they should follow targeted workflow selection rather than a broad rewrite.
-- The biggest remaining platform gaps are failover, deeper instrumentation follow-through, and migration of non-worker legacy code.
+- Steps 1-6 are functionally complete on this branch for worker execution and bulk/report settings consolidation.
+- The remaining work on this branch is merge-readiness work: manual app smoke, small residual cleanup, and doc/status sync.
+- Structured outputs are the next major adoption area, but they should be handled in a follow-up branch after this refactor branch lands.
+- Pydantic Evals should follow that structured-output work rather than being mixed into this refactor branch.
+- The biggest remaining platform gaps after this branch are failover and deeper instrumentation follow-through.
 
 ## Sources
 

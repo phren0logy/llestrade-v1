@@ -53,12 +53,14 @@ def test_direct_gemini_provider():
         
         assert provider.initialized, "Gemini provider should be initialized"
         logging.info("Gemini provider initialized successfully")
+        model_name = provider.default_model
+        assert model_name, "Gemini provider should expose a default model"
         
         # Test simple request
         response = provider.generate(
             prompt="What is the capital of France?",
             system_prompt="You are a helpful assistant.",
-            model="gemini-2.5-pro-preview-05-06",
+            model=model_name,
             temperature=0.1
         )
         

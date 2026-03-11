@@ -15,6 +15,7 @@ from dataclasses import dataclass, asdict, field
 
 from PySide6.QtCore import QObject, Signal, QTimer
 
+from src.app.core.llm_catalog import default_model_for_provider
 from src.app.core.llm_operation_settings import settings_from_report_preferences
 
 if TYPE_CHECKING:
@@ -23,6 +24,10 @@ if TYPE_CHECKING:
 from .secure_settings import SecureSettings
 from .file_tracker import DashboardMetrics, WorkspaceMetrics, build_workspace_metrics
 from .placeholders import PlaceholderEntry, ProjectPlaceholders, SYSTEM_PLACEHOLDERS, system_placeholder_map
+
+
+def _default_primary_model() -> str:
+    return default_model_for_provider("anthropic") or ""
 
 
 @dataclass
@@ -275,7 +280,7 @@ class ReportState:
 
     last_selected_inputs: List[str] = field(default_factory=list)
     last_provider: str = "anthropic"
-    last_model: str = "claude-sonnet-4-5-20250929"
+    last_model: str = field(default_factory=_default_primary_model)
     last_custom_model: Optional[str] = None
     last_context_window: Optional[int] = None
     last_use_reasoning: bool = False
@@ -332,7 +337,7 @@ class ReportState:
         )
         llm_settings = settings_from_report_preferences(
             provider_id=str(data.get("last_provider", "anthropic")),
-            model=str(data.get("last_model", "claude-sonnet-4-5-20250929")),
+            model=str(data.get("last_model", _default_primary_model())),
             custom_model=data.get("last_custom_model"),
             context_window=(
                 int(data["last_context_window"])
@@ -452,7 +457,7 @@ class ProjectManager(QObject):
         self.workflow_state = WorkflowState()
         self.settings = {
             "llm_provider": "anthropic",
-            "llm_model": "claude-sonnet-4-5-20250929",
+            "llm_model": _default_primary_model(),
             "template_id": "standard_competency"
         }
         self.source_state = SourceTreeState()

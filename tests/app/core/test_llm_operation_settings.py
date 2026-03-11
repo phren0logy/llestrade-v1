@@ -1,3 +1,4 @@
+from src.app.core import llm_catalog
 from src.app.core.llm_operation_settings import (
     default_provider_catalog,
     infer_provider_id_from_model,
@@ -27,7 +28,20 @@ def test_infer_provider_id_from_model_supports_current_selector_families() -> No
     assert infer_provider_id_from_model("gpt-4.1") == "openai"
 
 
-def test_default_provider_catalog_exposes_openai_and_gemini_but_not_azure() -> None:
+def test_default_provider_catalog_exposes_openai_and_gemini_but_not_azure(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        llm_catalog,
+        "_gemini_runtime_models",
+        lambda: (
+            llm_catalog.LLMModelOption(
+                model_id="gemini-2.5-pro",
+                label="Gemini 2.5 Pro",
+                context_window=1_048_576,
+            ),
+        ),
+    )
     provider_ids = {option.provider_id for option in default_provider_catalog()}
 
     assert "anthropic" in provider_ids

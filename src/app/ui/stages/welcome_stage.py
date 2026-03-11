@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import os
 import shutil
 from datetime import datetime
 from pathlib import Path
@@ -410,15 +409,11 @@ class WelcomeStage(QWidget):
 
         providers = [
             ("anthropic", "Anthropic (Claude)", "🤖"),
-            ("anthropic_bedrock", "AWS Bedrock (Claude)", "🛡️"),
             ("gemini", "Google Gemini", "✨"),
             ("azure_openai", "Azure OpenAI", "☁️"),
         ]
         for provider_id, label, icon in providers:
-            if provider_id == "anthropic_bedrock":
-                available = self._is_bedrock_available()
-            else:
-                available = self.settings.has_api_key(provider_id)
+            available = self.settings.has_api_key(provider_id)
             row = QLabel(f"{icon} {label} — {'Configured' if available else 'Missing'}")
             color = "#4caf50" if available else "#f44336"
             row.setStyleSheet(f"color: {color};")
@@ -434,30 +429,6 @@ class WelcomeStage(QWidget):
     def cleanup(self) -> None:
         pass
 
-    def _is_bedrock_available(self) -> bool:
-        try:
-            bedrock_settings = self.settings.get("aws_bedrock_settings", {}) or {}
-        except Exception:
-            bedrock_settings = {}
-
-        profile = str(bedrock_settings.get("profile") or "").strip()
-        if profile:
-            return True
-
-        # Consider standard AWS credential hints as "configured" for welcome-stage status.
-        env_markers = (
-            "AWS_PROFILE",
-            "AWS_DEFAULT_PROFILE",
-            "AWS_ACCESS_KEY_ID",
-            "AWS_WEB_IDENTITY_TOKEN_FILE",
-            "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
-            "AWS_CONTAINER_CREDENTIALS_FULL_URI",
-        )
-        if any(os.getenv(name) for name in env_markers):
-            return True
-
-        aws_dir = Path.home() / ".aws"
-        return (aws_dir / "credentials").exists() or (aws_dir / "config").exists()
 
 
 __all__ = ["WelcomeStage"]

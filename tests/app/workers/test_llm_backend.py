@@ -81,7 +81,18 @@ def test_normalize_model_name_translates_bedrock_aliases() -> None:
     assert normalize_model_name("anthropic", "claude-sonnet-4-5") == "claude-sonnet-4-5"
 
 
-def test_resolve_model_name_uses_provider_defaults() -> None:
+def test_resolve_model_name_uses_provider_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    defaults = {
+        "anthropic": "claude-sonnet-4-5",
+        "openai": "gpt-4.1",
+        "gemini": "gemini-2.5-pro",
+        "azure_openai": None,
+        "anthropic_bedrock": None,
+    }
+    monkeypatch.setattr(
+        "src.app.workers.llm_backend.default_model_for_provider",
+        lambda provider_id: defaults.get(provider_id),
+    )
     assert str(resolve_model_name("anthropic", None)).startswith("claude")
     assert str(resolve_model_name("openai", None)).startswith(("gpt-", "o"))
     assert str(resolve_model_name("gemini", None)).startswith("gemini")

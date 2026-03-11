@@ -42,9 +42,11 @@ def test_both_clients():
     if anthropic_working:
         try:
             logging.info("Testing Anthropic response...")
+            anthropic_model = anthropic_client.default_model
+            assert anthropic_model, "Anthropic client should expose a default model"
             response = anthropic_client.generate(
                 prompt="What is the capital of France?",
-                model="claude-sonnet-4-5-20250929",
+                model=anthropic_model,
                 temperature=0.1
             )
             
@@ -61,9 +63,11 @@ def test_both_clients():
     if gemini_working:
         try:
             logging.info("Testing Gemini response...")
+            gemini_model = gemini_client.default_model
+            assert gemini_model, "Gemini client should expose a default model"
             response = gemini_client.generate(
                 prompt="What is the capital of France?",
-                model="gemini-2.5-pro-preview-05-06",
+                model=gemini_model,
                 temperature=0.1
             )
             

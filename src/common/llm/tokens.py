@@ -5,8 +5,6 @@ Token counting utilities for LLM providers.
 import logging
 from typing import Dict, List, Optional, Any
 
-from src.app.core.llm_catalog import resolve_model_context_window
-
 logger = logging.getLogger(__name__)
 
 MODEL_CONTEXT_WINDOWS: dict[str, int] = {}
@@ -58,6 +56,8 @@ class TokenCounter:
         """Return the raw (max) context window for a model."""
         if not model_name:
             raise RuntimeError("A model name is required to resolve the context window.")
+
+        from src.app.core.llm_catalog import resolve_model_context_window
 
         raw_window = resolve_model_context_window(provider_id or "", model_name)
         if raw_window:

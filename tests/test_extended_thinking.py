@@ -28,6 +28,8 @@ def test_gemini_thinking():
     
     assert provider.initialized, "Failed to initialize Gemini provider"
     logging.info("✅ Gemini provider initialized successfully")
+    model_name = provider.default_model
+    assert model_name, "Gemini provider should expose a default model"
     
     # Test extended thinking
     # Complex prompt that should trigger multi-step thinking
@@ -42,7 +44,7 @@ def test_gemini_thinking():
     
     response = provider.generate_with_thinking(
         prompt=complex_prompt,
-        model="gemini-2.5-pro-preview-05-06",
+        model=model_name,
         temperature=0.7,
         thinking_budget=2000,
     )

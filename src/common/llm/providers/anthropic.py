@@ -80,7 +80,11 @@ class AnthropicProvider(BaseLLMProvider):
 
     @property
     def default_model(self) -> str:
-        return os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-5-20250929")
+        if env_model := os.getenv("ANTHROPIC_MODEL"):
+            return env_model
+        from src.app.core.llm_catalog import runtime_default_model_for_provider
+
+        return runtime_default_model_for_provider("anthropic") or ""
 
     def _extract_text_from_blocks(self, blocks: Any) -> str:
         if not blocks:

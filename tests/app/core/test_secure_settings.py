@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from src.app.core.llm_catalog import default_model_for_provider
 from src.app.core.secure_settings import SecureSettings
 from src.config.paths import app_user_root
 
@@ -49,3 +50,10 @@ def test_get_recent_projects_prunes_missing_entries(tmp_path: Path) -> None:
 
     assert recent == [{"path": str(existing_project), "name": "Project A", "last_modified": ""}]
     assert settings.get("recent_projects") == recent
+
+
+def test_secure_settings_defaults_use_catalog_backed_llm_model(tmp_path: Path) -> None:
+    settings = SecureSettings(settings_dir=tmp_path / "settings")
+
+    assert settings.get("llm_provider") == "anthropic"
+    assert settings.get("llm_model") == (default_model_for_provider("anthropic") or "")
