@@ -123,6 +123,121 @@ def resolve_model_name(provider_id: str, model: Optional[str]) -> str | None:
     return normalize_model_name(provider_id, fallback)
 
 
+def _build_messages(request: LLMInvocationRequest) -> list[Any]:
+    from pydantic_ai.messages import ModelRequest
+
+    return [
+        ModelRequest.user_text_prompt(
+            request.prompt,
+            instructions=request.system_prompt or None,
+        )
+    ]
+
+
+def _build_model_settings(request: LLMInvocationRequest) -> ModelSettings:
+    return dict(request.model_settings)
+
+
+def _count_tokens_with_model(
+    *,
+    model: Any,
+    request: LLMInvocationRequest,
+    provider_id: str,
+    model_name: str,
+    error_prefix: str,
+) -> int | None:
+    if not request.prompt and not request.system_prompt:
+        return 0
+
+    try:
+        from pydantic_ai.models import ModelRequestParameters
+
+        usage = asyncio.run(
+            model.count_tokens(
+                _build_messages(request),
+                _build_model_settings(request),
+                ModelRequestParameters(),
+            )
+        )
+        counted = int(getattr(usage, "input_tokens", 0) or 0)
+        return counted if counted >= 0 else None
+    except NotImplementedError:
+        return None
+    except Exception:
+        logger.debug(
+            "%s for provider=%s model=%s",
+            error_prefix,
+            provider_id,
+            model_name,
+            exc_info=True,
+        )
+        return None
+
+
+def _response_usage(response: Any) -> Dict[str, Any]:
+    usage_obj = response.usage
+    usage = {
+        "requests": int(getattr(usage_obj, "requests", 0) or 0),
+        "input_tokens": int(getattr(usage_obj, "input_tokens", 0) or 0),
+        "output_tokens": int(getattr(usage_obj, "output_tokens", 0) or 0),
+        "total_tokens": int(getattr(usage_obj, "input_tokens", 0) or 0)
+        + int(getattr(usage_obj, "output_tokens", 0) or 0),
+    }
+    details = getattr(usage_obj, "details", None)
+    if isinstance(details, dict) and details:
+        usage["details"] = dict(details)
+    return usage
+
+
+def _response_metadata(response: Any) -> Dict[str, Any]:
+    raw: Dict[str, Any] = {}
+    provider_response_id = getattr(response, "provider_response_id", None)
+    finish_reason = getattr(response, "finish_reason", None)
+    provider_name = getattr(response, "provider_name", None)
+    provider_url = getattr(response, "provider_url", None)
+    if provider_response_id:
+        raw["provider_response_id"] = str(provider_response_id)
+    if finish_reason:
+        raw["finish_reason"] = str(finish_reason)
+    if provider_name:
+        raw["provider_name"] = str(provider_name)
+    if provider_url:
+        raw["provider_url"] = str(provider_url)
+    provider_details = getattr(response, "provider_details", None)
+    if isinstance(provider_details, dict) and provider_details:
+        raw["provider_details"] = dict(provider_details)
+    return raw
+
+
+def _success_result_from_response(
+    *,
+    response: Any,
+    provider_name: str,
+    model_name: str,
+) -> LLMInvocationResult:
+    content = str(response.text or "").strip()
+    if not content:
+        return LLMInvocationResult(
+            success=False,
+            content="",
+            error="LLM returned empty response",
+            usage={},
+            provider=provider_name,
+            model=model_name,
+            raw={},
+        )
+
+    return LLMInvocationResult(
+        success=True,
+        content=content,
+        error=None,
+        usage=_response_usage(response),
+        provider=provider_name,
+        model=str(getattr(response, "model_name", None) or model_name),
+        raw=_response_metadata(response),
+    )
+
+
 class LLMExecutionBackend(Protocol):
     """Contract for pluggable LLM execution backends."""
 
@@ -324,32 +439,13 @@ class LegacyProviderBackend:
         model_name = self.resolve_model(provider.app_provider_id, request.model or provider.default_model)
         if not model_name:
             return None
-        if not request.prompt and not request.system_prompt:
-            return 0
-
-        try:
-            model = self._build_direct_model(provider=provider, model_name=model_name)
-            from pydantic_ai.models import ModelRequestParameters
-
-            usage = asyncio.run(
-                model.count_tokens(
-                    PydanticAIGatewayBackend._build_messages(request),
-                    self._build_model_settings(request),
-                    ModelRequestParameters(),
-                )
-            )
-            counted = int(getattr(usage, "input_tokens", 0) or 0)
-            return counted if counted >= 0 else None
-        except NotImplementedError:
-            return None
-        except Exception:
-            logger.debug(
-                "Direct provider token preflight failed for provider=%s model=%s",
-                provider.app_provider_id,
-                model_name,
-                exc_info=True,
-            )
-            return None
+        return _count_tokens_with_model(
+            model=self._build_direct_model(provider=provider, model_name=model_name),
+            request=request,
+            provider_id=provider.app_provider_id,
+            model_name=model_name,
+            error_prefix="Direct provider token preflight failed",
+        )
 
     def _invoke_direct(
         self,
@@ -373,41 +469,13 @@ class LegacyProviderBackend:
 
             response = model_request_sync(
                 self._build_direct_model(provider=provider, model_name=model_name),
-                PydanticAIGatewayBackend._build_messages(request),
-                model_settings=self._build_model_settings(request),
+                _build_messages(request),
+                model_settings=_build_model_settings(request),
             )
-            content = str(response.text or "").strip()
-            if not content:
-                return LLMInvocationResult(
-                    success=False,
-                    content="",
-                    error="LLM returned empty response",
-                    usage={},
-                    provider=provider.app_provider_id,
-                    model=model_name,
-                    raw={},
-                )
-
-            usage_obj = response.usage
-            usage = {
-                "requests": int(getattr(usage_obj, "requests", 0) or 0),
-                "input_tokens": int(getattr(usage_obj, "input_tokens", 0) or 0),
-                "output_tokens": int(getattr(usage_obj, "output_tokens", 0) or 0),
-                "total_tokens": int(getattr(usage_obj, "input_tokens", 0) or 0)
-                + int(getattr(usage_obj, "output_tokens", 0) or 0),
-            }
-            details = getattr(usage_obj, "details", None)
-            if isinstance(details, dict) and details:
-                usage["details"] = dict(details)
-
-            return LLMInvocationResult(
-                success=True,
-                content=content,
-                error=None,
-                usage=usage,
-                provider=provider.app_provider_id,
-                model=str(getattr(response, "model_name", None) or model_name),
-                raw=PydanticAIGatewayBackend._response_metadata(response),
+            return _success_result_from_response(
+                response=response,
+                provider_name=provider.app_provider_id,
+                model_name=model_name,
             )
         except Exception as exc:
             return LLMInvocationResult(
@@ -419,11 +487,6 @@ class LegacyProviderBackend:
                 model=model_name,
                 raw={},
             )
-
-    @staticmethod
-    def _build_model_settings(request: LLMInvocationRequest) -> ModelSettings:
-        return dict(request.model_settings)
-
     @staticmethod
     def _build_direct_model(*, provider: DirectProviderMetadata, model_name: str) -> Any:
         from pydantic_ai.models import infer_model
@@ -522,33 +585,13 @@ class PydanticAIGatewayBackend:
         )
         if not model_name:
             return None
-
-        if not request.prompt and not request.system_prompt:
-            return 0
-
-        try:
-            model = self._build_model(provider_id=provider_id, model_name=model_name)
-            from pydantic_ai.models import ModelRequestParameters
-
-            usage = asyncio.run(
-                model.count_tokens(
-                    self._build_messages(request),
-                    self._build_model_settings(request),
-                    ModelRequestParameters(),
-                )
-            )
-            counted = int(getattr(usage, "input_tokens", 0) or 0)
-            return counted if counted >= 0 else None
-        except NotImplementedError:
-            return None
-        except Exception:
-            logger.debug(
-                "Gateway token preflight failed for provider=%s model=%s",
-                provider_id,
-                model_name,
-                exc_info=True,
-            )
-            return None
+        return _count_tokens_with_model(
+            model=self._build_model(provider_id=provider_id, model_name=model_name),
+            request=request,
+            provider_id=provider_id,
+            model_name=model_name,
+            error_prefix="Gateway token preflight failed",
+        )
 
     def invoke(self, provider: Any, request: LLMInvocationRequest) -> LLMInvocationResult:
         provider_id = self._resolve_provider_id(provider)
@@ -585,46 +628,15 @@ class PydanticAIGatewayBackend:
 
             response = model_request_sync(
                 model,
-                self._build_messages(request),
-                model_settings=self._build_model_settings(request),
+                _build_messages(request),
+                model_settings=_build_model_settings(request),
             )
             if usage_limits is not None:
                 self._check_after_response(response=response, usage_limits=usage_limits)
-
-            content = str(response.text or "").strip()
-            if not content:
-                return LLMInvocationResult(
-                    success=False,
-                    content="",
-                    error="LLM returned empty response",
-                    usage={},
-                    provider=f"gateway/{provider_id}",
-                    model=model_name,
-                    raw={},
-                )
-
-            usage_obj = response.usage
-            usage = {
-                "requests": int(getattr(usage_obj, "requests", 0) or 0),
-                "input_tokens": int(getattr(usage_obj, "input_tokens", 0) or 0),
-                "output_tokens": int(getattr(usage_obj, "output_tokens", 0) or 0),
-                "total_tokens": int(getattr(usage_obj, "input_tokens", 0) or 0)
-                + int(getattr(usage_obj, "output_tokens", 0) or 0),
-            }
-            details = getattr(usage_obj, "details", None)
-            if isinstance(details, dict) and details:
-                usage["details"] = dict(details)
-
-            raw = self._response_metadata(response)
-
-            return LLMInvocationResult(
-                success=True,
-                content=content,
-                error=None,
-                usage=usage,
-                provider=f"gateway/{provider_id}",
-                model=str(getattr(response, "model_name", None) or model_name),
-                raw=raw,
+            return _success_result_from_response(
+                response=response,
+                provider_name=f"gateway/{provider_id}",
+                model_name=model_name,
             )
         except Exception as exc:
             if "not supported by Pydantic AI Gateway backend" in str(exc):
@@ -802,40 +814,6 @@ class PydanticAIGatewayBackend:
             "azure_openai": "openai",
         }
         return mapping.get(provider_id)
-
-    @staticmethod
-    def _build_messages(request: LLMInvocationRequest) -> list[Any]:
-        from pydantic_ai.messages import ModelRequest
-
-        return [
-            ModelRequest.user_text_prompt(
-                request.prompt,
-                instructions=request.system_prompt or None,
-            )
-        ]
-
-    def _build_model_settings(self, request: LLMInvocationRequest) -> ModelSettings:
-        return dict(request.model_settings)
-
-    @staticmethod
-    def _response_metadata(response: Any) -> Dict[str, Any]:
-        raw: Dict[str, Any] = {}
-        provider_response_id = getattr(response, "provider_response_id", None)
-        finish_reason = getattr(response, "finish_reason", None)
-        provider_name = getattr(response, "provider_name", None)
-        provider_url = getattr(response, "provider_url", None)
-        if provider_response_id:
-            raw["provider_response_id"] = str(provider_response_id)
-        if finish_reason:
-            raw["finish_reason"] = str(finish_reason)
-        if provider_name:
-            raw["provider_name"] = str(provider_name)
-        if provider_url:
-            raw["provider_url"] = str(provider_url)
-        provider_details = getattr(response, "provider_details", None)
-        if isinstance(provider_details, dict) and provider_details:
-            raw["provider_details"] = dict(provider_details)
-        return raw
 
     @staticmethod
     def _supports_pre_request_count(provider_id: str) -> bool:
