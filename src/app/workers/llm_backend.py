@@ -165,6 +165,58 @@ def _build_model_settings(request: LLMInvocationRequest) -> ModelSettings:
     return dict(request.model_settings)
 
 
+def _reasoning_budget_tokens(max_tokens: int) -> int:
+    return min(max(max_tokens // 8, 1_024), 8_192)
+
+
+def build_model_settings(
+    provider_id: str,
+    model: Optional[str],
+    *,
+    temperature: float,
+    max_tokens: int,
+    use_reasoning: bool = False,
+    base_settings: ModelSettings | None = None,
+) -> ModelSettings:
+    """Build provider-shaped model settings for a single request."""
+
+    settings: ModelSettings = dict(base_settings or {})
+    settings["temperature"] = temperature
+    settings["max_tokens"] = max_tokens
+
+    if not use_reasoning:
+        return settings
+
+    capabilities = provider_capabilities(provider_id, model)
+    if not capabilities.supports_reasoning:
+        raise RuntimeError(
+            f"Provider '{provider_id}' does not support reasoning mode in the current LLM backend."
+        )
+
+    if provider_id == "anthropic":
+        settings["anthropic_thinking"] = {
+            "type": "enabled",
+            "budget_tokens": _reasoning_budget_tokens(max_tokens),
+        }
+        settings["anthropic_effort"] = "medium"
+    elif provider_id == "anthropic_bedrock":
+        settings["bedrock_additional_model_requests_fields"] = {
+            "thinking": {
+                "type": "enabled",
+                "budget_tokens": _reasoning_budget_tokens(max_tokens),
+            }
+        }
+    elif provider_id == "gemini":
+        settings["gemini_thinking_config"] = {
+            "include_thoughts": True,
+        }
+    elif provider_id in {"openai", "azure_openai"}:
+        settings["openai_reasoning_effort"] = "medium"
+        settings["openai_reasoning_summary"] = "detailed"
+
+    return settings
+
+
 def supported_direct_provider_ids() -> tuple[str, ...]:
     return tuple(sorted(_DIRECT_PROVIDER_NAMES))
 
@@ -311,6 +363,18 @@ class LLMExecutionBackend(Protocol):
     def capabilities(self, provider_id: str, model: Optional[str]) -> LLMProviderCapabilities:
         """Describe backend capabilities for the given provider/model."""
 
+    def build_model_settings(
+        self,
+        provider_id: str,
+        model: Optional[str],
+        *,
+        temperature: float,
+        max_tokens: int,
+        use_reasoning: bool = False,
+        base_settings: ModelSettings | None = None,
+    ) -> ModelSettings:
+        """Build provider-shaped model settings for a request."""
+
     def count_input_tokens(self, provider: Any, request: LLMInvocationRequest) -> int | None:
         """Return input token count when the backend can measure it."""
 
@@ -331,6 +395,25 @@ class PydanticAIDirectBackend:
 
     def capabilities(self, provider_id: str, model: Optional[str]) -> LLMProviderCapabilities:
         return provider_capabilities(provider_id, model)
+
+    def build_model_settings(
+        self,
+        provider_id: str,
+        model: Optional[str],
+        *,
+        temperature: float,
+        max_tokens: int,
+        use_reasoning: bool = False,
+        base_settings: ModelSettings | None = None,
+    ) -> ModelSettings:
+        return build_model_settings(
+            provider_id,
+            model,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            use_reasoning=use_reasoning,
+            base_settings=base_settings,
+        )
 
     def create_provider(self, request: LLMProviderRequest) -> object:
         from src.app.core.secure_settings import SecureSettings
@@ -546,6 +629,25 @@ class PydanticAIGatewayBackend:
     def capabilities(self, provider_id: str, model: Optional[str]) -> LLMProviderCapabilities:
         return provider_capabilities(provider_id, model)
 
+    def build_model_settings(
+        self,
+        provider_id: str,
+        model: Optional[str],
+        *,
+        temperature: float,
+        max_tokens: int,
+        use_reasoning: bool = False,
+        base_settings: ModelSettings | None = None,
+    ) -> ModelSettings:
+        return build_model_settings(
+            provider_id,
+            model,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            use_reasoning=use_reasoning,
+            base_settings=base_settings,
+        )
+
     def create_provider(self, request: LLMProviderRequest) -> object:
         if request.provider_id not in _GATEWAY_UPSTREAM_PROVIDERS:
             supported = ", ".join(supported_gateway_provider_ids())
@@ -734,6 +836,7 @@ __all__ = [
     "PydanticAIDirectBackend",
     "PydanticAIGatewayBackend",
     "default_model_for_provider",
+    "build_model_settings",
     "normalize_model_name",
     "provider_capabilities",
     "resolve_model_name",

@@ -16,6 +16,7 @@ from src.app.workers.llm_backend import (
     LLMProviderCapabilities,
     LLMProviderRequest,
     ProviderMetadata,
+    build_model_settings,
     normalize_model_name,
     provider_capabilities,
     resolve_model_name,
@@ -46,6 +47,9 @@ class _NoNativeBackend(LLMExecutionBackend):
     def capabilities(self, provider_id: str, model: str | None):
         return provider_capabilities(provider_id, model)
 
+    def build_model_settings(self, provider_id: str, model: str | None, **kwargs):
+        return build_model_settings(provider_id, model, **kwargs)
+
     def create_provider(self, request: LLMProviderRequest) -> object:
         return ProviderMetadata(provider_name=request.provider_id, default_model=request.model or "default-model")
 
@@ -66,6 +70,9 @@ class _ResultBackend(LLMExecutionBackend):
 
     def capabilities(self, provider_id: str, model: str | None):
         return provider_capabilities(provider_id, model)
+
+    def build_model_settings(self, provider_id: str, model: str | None, **kwargs):
+        return build_model_settings(provider_id, model, **kwargs)
 
     def create_provider(self, request: LLMProviderRequest) -> object:
         return ProviderMetadata(provider_name=request.provider_id, default_model=request.model or "default-model")
@@ -91,6 +98,9 @@ class _CapturingBackend(LLMExecutionBackend):
     def capabilities(self, provider_id: str, model: str | None):
         return provider_capabilities(provider_id, model)
 
+    def build_model_settings(self, provider_id: str, model: str | None, **kwargs):
+        return build_model_settings(provider_id, model, **kwargs)
+
     def create_provider(self, request: LLMProviderRequest) -> object:
         return ProviderMetadata(provider_name=request.provider_id, default_model=request.model or "default-model")
 
@@ -111,6 +121,13 @@ class _NoReasoningBackend(_NoNativeBackend):
             reasoning_mode="none",
             supports_pre_request_token_count=caps.supports_pre_request_token_count,
         )
+
+    def build_model_settings(self, provider_id: str, model: str | None, **kwargs):
+        if kwargs.get("use_reasoning"):
+            raise RuntimeError(
+                f"Provider '{provider_id}' does not support reasoning mode in the current LLM backend."
+            )
+        return super().build_model_settings(provider_id, model, **kwargs)
 
 
 def _capture_traces(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, dict[str, object] | None]]:
@@ -318,7 +335,7 @@ def test_bulk_reduce_resolve_provider_normalizes_bedrock_model(tmp_path: Path) -
     assert config.model == "anthropic.claude-sonnet-4-5-v1"
 
 
-def test_bulk_reduce_resolve_provider_rejects_unsupported_reasoning_mode(tmp_path: Path) -> None:
+def test_bulk_reduce_invoke_provider_rejects_unsupported_reasoning_mode(tmp_path: Path) -> None:
     group = BulkAnalysisGroup.create("Group")
     group.provider_id = "azure_openai"
     group.model = "gpt-4.1"
@@ -332,7 +349,12 @@ def test_bulk_reduce_resolve_provider_rejects_unsupported_reasoning_mode(tmp_pat
     )
 
     with pytest.raises(RuntimeError, match="does not support reasoning mode"):
-        worker._resolve_provider()
+        worker._invoke_provider(
+            provider=object(),
+            provider_cfg=ProviderConfig(provider_id="azure_openai", model="gpt-4.1", temperature=0.1),
+            prompt="Prompt",
+            system_prompt="System",
+        )
 
 
 @pytest.mark.parametrize(
@@ -482,6 +504,34 @@ def test_bulk_reduce_passes_computed_input_budget_to_backend(
     assert result == "summary"
     assert len(backend.requests) == 1
     assert backend.requests[0].input_tokens_limit == 67_000
+
+
+def test_bulk_reduce_applies_reasoning_settings_to_llm_request(tmp_path: Path) -> None:
+    group = BulkAnalysisGroup.create("Group")
+    group.use_reasoning = True
+    backend = _CapturingBackend(
+        _model_response("summary", model_name="claude", output_tokens=1)
+    )
+    worker = BulkReduceWorker(
+        project_dir=tmp_path,
+        group=group,
+        metadata=ProjectMetadata(case_name="Case"),
+        force_rerun=False,
+        llm_backend=backend,
+    )
+
+    result = worker._invoke_provider(
+        provider=object(),
+        provider_cfg=ProviderConfig(provider_id="anthropic", model="claude", temperature=0.1),
+        prompt="Prompt",
+        system_prompt="System",
+    )
+
+    assert result == "summary"
+    assert backend.requests[0].model_settings["anthropic_thinking"] == {
+        "type": "enabled",
+        "budget_tokens": 4000,
+    }
 
 
 def test_bulk_reduce_worker_surfaces_gateway_timeout(

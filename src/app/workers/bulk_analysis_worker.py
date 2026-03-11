@@ -763,10 +763,13 @@ class BulkAnalysisWorker(DashboardWorker):
                     prompt=user_prompt,
                     system_prompt=system_prompt,
                     model=provider_config.model,
-                    model_settings={
-                        "temperature": 0.1,
-                        "max_tokens": max_tokens,
-                    },
+                    model_settings=self._llm_backend.build_model_settings(
+                        provider_config.provider_id,
+                        provider_config.model,
+                        temperature=0.1,
+                        max_tokens=max_tokens,
+                        use_reasoning=getattr(self._group, "use_reasoning", False),
+                    ),
                 ),
             )
             if counted is not None and counted >= 0:
@@ -901,10 +904,13 @@ class BulkAnalysisWorker(DashboardWorker):
                     prompt=prompt,
                     model=provider_config.model,
                     system_prompt=system_prompt,
-                    model_settings={
-                        "temperature": temperature,
-                        "max_tokens": max_tokens,
-                    },
+                    model_settings=self._llm_backend.build_model_settings(
+                        provider_config.provider_id,
+                        provider_config.model,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        use_reasoning=getattr(self._group, "use_reasoning", False),
+                    ),
                     input_tokens_limit=input_budget,
                 ),
             )

@@ -925,11 +925,6 @@ class BulkReduceWorker(DashboardWorker):
     def _resolve_provider(self) -> ProviderConfig:
         provider_id = self._group.provider_id or "anthropic"
         model = self._llm_backend.normalize_model(provider_id, self._group.model or None)
-        capabilities = self._llm_backend.capabilities(provider_id, model)
-        if getattr(self._group, "use_reasoning", False) and not capabilities.supports_reasoning:
-            raise RuntimeError(
-                f"Provider '{provider_id}' does not support reasoning mode in the current LLM backend."
-            )
         temperature = 0.1
         return ProviderConfig(provider_id=provider_id, model=model, temperature=temperature)
 
@@ -970,10 +965,13 @@ class BulkReduceWorker(DashboardWorker):
                     prompt=prompt,
                     model=provider_cfg.model,
                     system_prompt=system_prompt,
-                    model_settings={
-                        "temperature": provider_cfg.temperature,
-                        "max_tokens": max_tokens,
-                    },
+                    model_settings=self._llm_backend.build_model_settings(
+                        provider_cfg.provider_id,
+                        provider_cfg.model,
+                        temperature=provider_cfg.temperature,
+                        max_tokens=max_tokens,
+                        use_reasoning=getattr(self._group, "use_reasoning", False),
+                    ),
                     input_tokens_limit=input_budget,
                 ),
             )

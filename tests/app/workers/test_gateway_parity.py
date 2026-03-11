@@ -28,6 +28,7 @@ from src.app.workers.llm_backend import (
     LLMInvocationRequest,
     LLMProviderRequest,
     ProviderMetadata,
+    build_model_settings,
     normalize_model_name,
     provider_capabilities,
     resolve_model_name,
@@ -84,6 +85,9 @@ class _SequenceBackend(LLMExecutionBackend):
 
     def capabilities(self, provider_id: str, model: str | None):
         return provider_capabilities(provider_id, model)
+
+    def build_model_settings(self, provider_id: str, model: str | None, **kwargs):
+        return build_model_settings(provider_id, model, **kwargs)
 
     def create_provider(self, request: LLMProviderRequest) -> object:
         return ProviderMetadata(provider_name=request.provider_id, default_model=request.model or "default-model")

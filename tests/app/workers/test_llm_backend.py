@@ -18,6 +18,7 @@ from src.app.workers.llm_backend import (
     PydanticAIDirectBackend,
     PydanticAIGatewayBackend,
     ProviderMetadata,
+    build_model_settings,
     normalize_model_name,
     provider_capabilities,
     resolve_model_name,
@@ -92,6 +93,52 @@ def test_provider_capabilities_centralize_reasoning_and_preflight_support() -> N
         reasoning_mode="openai",
         supports_pre_request_token_count=False,
     )
+
+
+def test_build_model_settings_adds_provider_specific_reasoning_controls() -> None:
+    assert build_model_settings(
+        "anthropic",
+        "claude-sonnet-4-5",
+        temperature=0.2,
+        max_tokens=32_000,
+        use_reasoning=True,
+    )["anthropic_thinking"] == {"type": "enabled", "budget_tokens": 4000}
+    assert build_model_settings(
+        "anthropic_bedrock",
+        "anthropic.claude-sonnet-4-5-v1",
+        temperature=0.2,
+        max_tokens=32_000,
+        use_reasoning=True,
+    )["bedrock_additional_model_requests_fields"] == {
+        "thinking": {"type": "enabled", "budget_tokens": 4000}
+    }
+    assert build_model_settings(
+        "gemini",
+        "gemini-2.5-pro",
+        temperature=0.2,
+        max_tokens=32_000,
+        use_reasoning=True,
+    )["gemini_thinking_config"] == {"include_thoughts": True}
+    openai_settings = build_model_settings(
+        "openai",
+        "gpt-4.1",
+        temperature=0.2,
+        max_tokens=32_000,
+        use_reasoning=True,
+    )
+    assert openai_settings["openai_reasoning_effort"] == "medium"
+    assert openai_settings["openai_reasoning_summary"] == "detailed"
+
+
+def test_build_model_settings_rejects_unsupported_reasoning_provider() -> None:
+    with pytest.raises(RuntimeError, match="does not support reasoning mode"):
+        build_model_settings(
+            "unsupported_provider",
+            "custom-model",
+            temperature=0.2,
+            max_tokens=1024,
+            use_reasoning=True,
+        )
 
 
 def test_direct_provider_backend_create_provider_loads_settings(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -480,6 +527,13 @@ def test_direct_backend_capabilities_delegate_to_shared_capability_map() -> None
 
     assert backend.capabilities("anthropic_bedrock", "claude-sonnet-4-5").reasoning_mode == "anthropic"
     assert backend.capabilities("anthropic_bedrock", "claude-sonnet-4-5").supports_pre_request_token_count is True
+    assert backend.build_model_settings(
+        "gemini",
+        "gemini-2.5-pro",
+        temperature=0.2,
+        max_tokens=1024,
+        use_reasoning=True,
+    )["gemini_thinking_config"] == {"include_thoughts": True}
 
 
 def test_gateway_backend_capabilities_delegate_to_shared_capability_map() -> None:
@@ -487,6 +541,14 @@ def test_gateway_backend_capabilities_delegate_to_shared_capability_map() -> Non
 
     assert backend.capabilities("openai", "gpt-4.1").reasoning_mode == "openai"
     assert backend.capabilities("openai", "gpt-4.1").supports_pre_request_token_count is False
+    settings = backend.build_model_settings(
+        "openai",
+        "gpt-4.1",
+        temperature=0.2,
+        max_tokens=1024,
+        use_reasoning=True,
+    )
+    assert settings["openai_reasoning_effort"] == "medium"
 
 
 def test_gateway_backend_rejects_unsupported_provider_metadata() -> None:

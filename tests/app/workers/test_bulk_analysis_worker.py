@@ -28,6 +28,7 @@ from src.app.workers.llm_backend import (
     LLMInvocationRequest,
     LLMProviderRequest,
     ProviderMetadata,
+    build_model_settings,
     normalize_model_name,
     provider_capabilities,
     resolve_model_name,
@@ -57,6 +58,9 @@ class _NoNativeBackend(LLMExecutionBackend):
     def capabilities(self, provider_id: str, model: str | None):
         return provider_capabilities(provider_id, model)
 
+    def build_model_settings(self, provider_id: str, model: str | None, **kwargs):
+        return build_model_settings(provider_id, model, **kwargs)
+
     def create_provider(self, request: LLMProviderRequest) -> object:
         return ProviderMetadata(provider_name=request.provider_id, default_model=request.model or "default-model")
 
@@ -78,6 +82,9 @@ class _ResultBackend(LLMExecutionBackend):
     def capabilities(self, provider_id: str, model: str | None):
         return provider_capabilities(provider_id, model)
 
+    def build_model_settings(self, provider_id: str, model: str | None, **kwargs):
+        return build_model_settings(provider_id, model, **kwargs)
+
     def create_provider(self, request: LLMProviderRequest) -> object:
         return ProviderMetadata(provider_name=request.provider_id, default_model=request.model or "default-model")
 
@@ -92,6 +99,7 @@ class _CountingBackend(LLMExecutionBackend):
     def __init__(self, *, token_count: int) -> None:
         self.token_count = token_count
         self.invoked = False
+        self.requests: list[LLMInvocationRequest] = []
 
     def normalize_model(self, provider_id: str, model: str | None) -> str | None:
         return normalize_model_name(provider_id, model)
@@ -101,6 +109,9 @@ class _CountingBackend(LLMExecutionBackend):
 
     def capabilities(self, provider_id: str, model: str | None):
         return provider_capabilities(provider_id, model)
+
+    def build_model_settings(self, provider_id: str, model: str | None, **kwargs):
+        return build_model_settings(provider_id, model, **kwargs)
 
     def create_provider(self, request: LLMProviderRequest) -> object:
         return ProviderMetadata(provider_name=request.provider_id, default_model=request.model or "default-model")
@@ -112,6 +123,7 @@ class _CountingBackend(LLMExecutionBackend):
     def invoke_response(self, provider, request: LLMInvocationRequest) -> ModelResponse:  # noqa: ANN001
         _ = provider, request
         self.invoked = True
+        self.requests.append(request)
         return _model_response("summary", model_name="claude", output_tokens=1)
 
 
@@ -373,6 +385,34 @@ def test_bulk_worker_uses_backend_token_count_for_gateway_preflight(tmp_path: Pa
         )
 
     assert backend.invoked is False
+
+
+def test_bulk_worker_applies_reasoning_settings_to_llm_request(tmp_path: Path) -> None:
+    group = BulkAnalysisGroup.create("Group")
+    group.use_reasoning = True
+    backend = _CountingBackend(token_count=10)
+    worker = BulkAnalysisWorker(
+        project_dir=tmp_path,
+        group=group,
+        files=[],
+        metadata=ProjectMetadata(case_name="Case"),
+        force_rerun=False,
+        llm_backend=backend,
+    )
+
+    result = worker._invoke_provider(
+        provider=worker._create_provider(ProviderConfig(provider_id="anthropic", model="claude")),
+        provider_config=ProviderConfig(provider_id="anthropic", model="claude"),
+        prompt="Prompt",
+        system_prompt="System",
+    )
+
+    assert result == "summary"
+    assert backend.invoked is True
+    assert backend.requests[0].model_settings["anthropic_thinking"] == {
+        "type": "enabled",
+        "budget_tokens": 4000,
+    }
 
 
 def test_bulk_worker_force_rerun_reprocesses(tmp_path: Path, qtbot, monkeypatch: pytest.MonkeyPatch) -> None:
