@@ -95,6 +95,7 @@ class SecureSettings(QObject):
             "llm_model": "claude-sonnet-4-5-20250929",
             "pydantic_ai_gateway_settings": {
                 "base_url": None,
+                "route": None,
             },
             "phoenix_settings": {
                 "enabled": False,

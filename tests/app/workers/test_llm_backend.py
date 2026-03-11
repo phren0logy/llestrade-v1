@@ -557,6 +557,24 @@ def test_gateway_backend_loads_base_url_from_secure_settings(
     assert backend._base_url == "https://gateway.example.com"
 
 
+def test_gateway_backend_loads_route_from_secure_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("PYDANTIC_AI_GATEWAY_ROUTE", raising=False)
+
+    class _FakeSecureSettings:
+        def get(self, key: str, default: Any = None) -> Any:
+            if key == "pydantic_ai_gateway_settings":
+                return {"route": "llestrade"}
+            return default
+
+    monkeypatch.setattr("src.app.core.secure_settings.SecureSettings", _FakeSecureSettings)
+
+    backend = PydanticAIGatewayBackend(api_key="pylf_test_key", base_url="https://gateway.example.com")
+
+    assert backend._route == "llestrade"
+
+
 def test_gateway_backend_loads_api_key_from_secure_settings(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

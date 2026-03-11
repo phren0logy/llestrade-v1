@@ -546,6 +546,8 @@ class PydanticAIGatewayBackend:
             or self._load_base_url_from_settings()
         )
         self._route = route or os.getenv("PYDANTIC_AI_GATEWAY_ROUTE")
+        if not self._route:
+            self._route = self._load_route_from_settings()
         self._max_concurrency = self._resolve_max_concurrency(max_concurrency)
         self._http_client: Any | None = None
         self._concurrency_limiter: Any | None = None
@@ -571,6 +573,18 @@ class PydanticAIGatewayBackend:
             api_key = settings.get_api_key("pydantic_ai_gateway")
             value = str(api_key or "").strip()
             return value or None
+        except Exception:
+            return None
+
+    @staticmethod
+    def _load_route_from_settings() -> str | None:
+        try:
+            from src.app.core.secure_settings import SecureSettings
+
+            settings = SecureSettings()
+            gateway_settings = settings.get("pydantic_ai_gateway_settings", {}) or {}
+            route = str(gateway_settings.get("route") or "").strip()
+            return route or None
         except Exception:
             return None
 

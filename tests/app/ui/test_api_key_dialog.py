@@ -40,16 +40,24 @@ def test_api_key_dialog_loads_and_saves_gateway_settings(
     monkeypatch.setattr(APIKeyDialog, "_refresh_bedrock_models", _stub_refresh)
 
     settings = SecureSettings()
-    settings.set("pydantic_ai_gateway_settings", {"base_url": "https://gateway.example.com"})
+    settings.set(
+        "pydantic_ai_gateway_settings",
+        {
+            "base_url": "https://gateway.example.com",
+            "route": "llestrade",
+        },
+    )
     settings.set_api_key("pydantic_ai_gateway", "gateway-key-1")
 
     dialog = APIKeyDialog(settings)
     try:
         assert dialog.gateway_base_url.text() == "https://gateway.example.com"
+        assert dialog.gateway_route.text() == "llestrade"
         assert dialog.gateway_api_key.property("has_saved_key") is True
         assert dialog.gateway_api_key.text() == "*" * 20
 
         dialog.gateway_base_url.setText("https://gateway.internal.example.com")
+        dialog.gateway_route.setText("bulk")
         dialog.gateway_api_key.setText("gateway-key-2")
         dialog.save_keys()
     finally:
@@ -57,7 +65,8 @@ def test_api_key_dialog_loads_and_saves_gateway_settings(
 
     reloaded = SecureSettings()
     assert reloaded.get("pydantic_ai_gateway_settings") == {
-        "base_url": "https://gateway.internal.example.com"
+        "base_url": "https://gateway.internal.example.com",
+        "route": "bulk",
     }
     assert reloaded.get_api_key("pydantic_ai_gateway") == "gateway-key-2"
 

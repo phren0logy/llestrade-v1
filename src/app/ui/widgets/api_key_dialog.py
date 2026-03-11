@@ -208,9 +208,15 @@ class APIKeyDialog(QDialog):
         gateway_layout.addRow("Base URL:", self.gateway_base_url)
         self.config_fields["gateway_base_url"] = self.gateway_base_url
 
+        self.gateway_route = QLineEdit()
+        self.gateway_route.setPlaceholderText("Optional routing group or route override")
+        gateway_layout.addRow("Route:", self.gateway_route)
+        self.config_fields["gateway_route"] = self.gateway_route
+
         gateway_help = QLabel(
             "Use the custom domain from your self-hosted gateway deployment, for example "
-            "<code>https://gateway.example.com</code>."
+            "<code>https://gateway.example.com</code>. Set a route only if your self-hosted "
+            "gateway uses named routing groups or a non-default route."
         )
         gateway_help.setWordWrap(True)
         gateway_help.setTextFormat(Qt.RichText)
@@ -527,6 +533,9 @@ class APIKeyDialog(QDialog):
         base_url = str(gateway_settings.get("base_url") or "").strip()
         if base_url:
             self.gateway_base_url.setText(base_url)
+        route = str(gateway_settings.get("route") or "").strip()
+        if route:
+            self.gateway_route.setText(route)
 
         # Load Phoenix settings
         phoenix_settings = self.settings.get("phoenix_settings", {})
@@ -606,9 +615,13 @@ class APIKeyDialog(QDialog):
         AnthropicBedrockProvider.reset_backoff()
 
         gateway_base_url = self.gateway_base_url.text().strip()
+        gateway_route = self.gateway_route.text().strip()
         self.settings.set(
             "pydantic_ai_gateway_settings",
-            {"base_url": gateway_base_url or None},
+            {
+                "base_url": gateway_base_url or None,
+                "route": gateway_route or None,
+            },
         )
 
         # Save Phoenix settings
