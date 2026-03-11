@@ -29,6 +29,7 @@ class ReportDraftJobConfig:
     generation_user_prompt_path: Path
     generation_system_prompt_path: Path
     metadata: ProjectMetadata
+    use_reasoning: bool = False
     max_report_tokens: int = 60_000
     placeholder_values: Mapping[str, str] | None = None
     project_name: str = ""
@@ -50,6 +51,7 @@ class ReportRefinementJobConfig:
     refinement_user_prompt_path: Path
     refinement_system_prompt_path: Path
     metadata: ProjectMetadata
+    use_reasoning: bool = False
     max_report_tokens: int = 60_000
     placeholder_values: Mapping[str, str] | None = None
     project_name: str = ""
@@ -102,6 +104,7 @@ class ReportsService:
             model=config.model,
             custom_model=config.custom_model,
             context_window=config.context_window,
+            use_reasoning=config.use_reasoning,
             template_path=config.template_path,
             transcript_path=config.transcript_path,
             generation_user_prompt_path=config.generation_user_prompt_path,
@@ -147,6 +150,7 @@ class ReportsService:
             model=config.model,
             custom_model=config.custom_model,
             context_window=config.context_window,
+            use_reasoning=config.use_reasoning,
             template_path=config.template_path,
             transcript_path=config.transcript_path,
             refinement_user_prompt_path=config.refinement_user_prompt_path,

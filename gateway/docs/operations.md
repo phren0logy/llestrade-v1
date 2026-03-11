@@ -21,6 +21,8 @@ Verification includes:
 - `/status/` returns `401` without auth
 - `/status/` returns `200` with `STATUS_AUTH_API_KEY`
 - a live `pydantic_ai` Anthropic request succeeds against the custom domain
+- a live `pydantic_ai` OpenAI request succeeds against the custom domain
+- a live `pydantic_ai` Google Vertex request succeeds against the custom domain
 
 ## Tail Logs
 

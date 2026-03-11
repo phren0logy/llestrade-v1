@@ -48,7 +48,7 @@ gateway/scripts/bootstrap.sh
 
 - clones or updates the pinned upstream `pydantic-ai-gateway` repo into `var/gateway/upstream/pydantic-ai-gateway`
 - copies the full upstream repo into `var/gateway/rendered/pydantic-ai-gateway/`
-- renders `src/config.ts` with the shared app API key and Anthropic-only routing
+- renders `src/config.ts` with the shared app API key and Anthropic/OpenAI/Google Vertex routing
 - creates the D1 database and KV namespace if they are not already tracked in `var/gateway/state.json`
 - renders `wrangler.jsonc` for the custom domain
 - installs the upstream Worker dependencies with `npm install`

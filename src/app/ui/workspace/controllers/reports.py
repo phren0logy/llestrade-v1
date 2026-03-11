@@ -11,6 +11,10 @@ from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QFileDialog, QMessageBox, QTreeWidgetItem, QWidget
 
 from src.app.core.project_manager import ProjectManager, ProjectMetadata
+from src.app.core.llm_operation_settings import (
+    LLMOperationSettings,
+    settings_from_report_preferences,
+)
 from src.app.core.prompt_placeholders import format_prompt, placeholder_summary, get_prompt_spec
 from src.app.core.placeholders.analyzer import analyse_prompts
 from src.app.core.prompt_preview import PromptPreview
@@ -60,9 +64,6 @@ from src.config.prompt_store import (
     get_custom_dir,
     get_template_custom_dir,
 )
-from src.app.core.secure_settings import SecureSettings
-from src.common.llm.bedrock_catalog import DEFAULT_BEDROCK_MODELS, list_bedrock_models
-
 
 class ReportsController:
     """Coordinate report generation UI and worker orchestration."""
@@ -84,7 +85,6 @@ class ReportsController:
         self._report_running = False
         self._active_run_kind: Optional[str] = None
 
-        self._populate_model_options()
         self._connect_signals()
         self._initialise_prompt_tooltips()
 
@@ -204,7 +204,7 @@ class ReportsController:
     # Signal wiring
     # ------------------------------------------------------------------
     def _connect_signals(self) -> None:
-        self._tab.model_combo.currentIndexChanged.connect(self._on_report_model_changed)
+        self._tab.llm_settings_panel.settings_changed.connect(self._update_report_controls)
         self._tab.template_browse_button.clicked.connect(self._browse_report_template)
         self._tab.transcript_browse_button.clicked.connect(self._browse_report_transcript)
         self._tab.generation_user_prompt_browse.clicked.connect(self._browse_generation_prompt)
@@ -225,35 +225,6 @@ class ReportsController:
         self._tab.open_manifest_button.clicked.connect(lambda: self._open_report_history_file("manifest"))
         self._tab.open_inputs_button.clicked.connect(lambda: self._open_report_history_file("inputs"))
 
-    def _populate_model_options(self) -> None:
-        combo = self._tab.model_combo
-        if combo.count() > 0:
-            return
-        combo.addItem("Custom…", ("custom", ""))
-        combo.addItem(
-            "Anthropic Claude (claude-sonnet-4-5-20250929)",
-            ("anthropic", "claude-sonnet-4-5-20250929"),
-        )
-        combo.addItem(
-            "Anthropic Claude (claude-opus-4-6)",
-            ("anthropic", "claude-opus-4-6"),
-        )
-
-        try:
-            settings = SecureSettings()
-            bedrock_settings = settings.get("aws_bedrock_settings", {}) or {}
-            bedrock_models = list_bedrock_models(
-                region=bedrock_settings.get("region"),
-                profile=bedrock_settings.get("profile"),
-            )
-        except Exception:
-            bedrock_models = list(DEFAULT_BEDROCK_MODELS)
-
-        for model in bedrock_models:
-            label = f"AWS Bedrock Claude ({model.name})"
-            combo.addItem(label, ("anthropic_bedrock", model.model_id))
-
-
     def _initialise_prompt_tooltips(self) -> None:
         self._tab.generation_system_prompt_edit.setToolTip(
             placeholder_summary("report_generation_system_prompt")
@@ -272,24 +243,14 @@ class ReportsController:
 
         state = manager.report_state
         self._selected_inputs = set(state.last_selected_inputs or [])
-
-        provider = state.last_provider or "anthropic"
-        model = state.last_model or "claude-sonnet-4-5-20250929"
-        for index in range(self._tab.model_combo.count()):
-            data = self._tab.model_combo.itemData(index)
-            if not data:
-                continue
-            if data[0] == "custom" and state.last_custom_model:
-                self._tab.model_combo.setCurrentIndex(index)
-                self._tab.custom_model_edit.setText(state.last_custom_model or "")
-                if state.last_context_window:
-                    self._tab.custom_context_spin.setValue(int(state.last_context_window))
-                break
-            if data[0] == provider and data[1] == model:
-                self._tab.model_combo.setCurrentIndex(index)
-                break
-        else:
-            self._tab.model_combo.setCurrentIndex(0)
+        llm_settings = settings_from_report_preferences(
+            provider_id=state.last_provider,
+            model=state.last_model,
+            custom_model=state.last_custom_model,
+            context_window=state.last_context_window,
+            use_reasoning=state.last_use_reasoning,
+        )
+        self._tab.llm_settings_panel.set_settings(llm_settings)
 
         if state.last_template:
             self._tab.template_edit.setText(state.last_template)
@@ -311,10 +272,7 @@ class ReportsController:
     def _save_preferences(
         self,
         *,
-        provider_id: str,
-        model: str,
-        custom_model: Optional[str],
-        context_window: Optional[int],
+        llm_settings: LLMOperationSettings,
         template_path: Optional[Path],
         transcript_path: Optional[Path],
         generation_user_prompt: Optional[Path],
@@ -329,10 +287,11 @@ class ReportsController:
 
         manager.update_report_preferences(
             selected_inputs=sorted(self._selected_inputs),
-            provider_id=provider_id,
-            model=model,
-            custom_model=custom_model,
-            context_window=context_window,
+            provider_id=llm_settings.provider_id,
+            model=llm_settings.model_id,
+            custom_model=llm_settings.custom_model_id,
+            context_window=llm_settings.context_window,
+            use_reasoning=llm_settings.use_reasoning,
             template_path=str(template_path) if template_path else None,
             transcript_path=str(transcript_path) if transcript_path else None,
             generation_user_prompt=str(generation_user_prompt) if generation_user_prompt else None,
@@ -460,18 +419,6 @@ class ReportsController:
     # ------------------------------------------------------------------
     # Event handlers
     # ------------------------------------------------------------------
-    def _on_report_model_changed(self) -> None:
-        data = self._tab.model_combo.currentData()
-        is_custom = bool(data) and data[0] == "custom"
-        for widget in (
-            self._tab.custom_model_label,
-            self._tab.custom_model_edit,
-            self._tab.custom_context_label,
-            self._tab.custom_context_spin,
-        ):
-            widget.setVisible(is_custom)
-        self._update_report_controls()
-
     def _on_report_input_changed(self, item: QTreeWidgetItem, column: int) -> None:  # noqa: ARG002
         data = item.data(0, Qt.UserRole)
         if not data:
@@ -750,8 +697,8 @@ class ReportsController:
         if not self._validate_placeholders_before_run(include_generation=True, include_refinement=False):
             return
 
-        provider_id, model_id, custom_model, context_window = self._resolve_model_selection()
-        if provider_id is None:
+        llm_settings = self._resolve_llm_settings()
+        if llm_settings is None:
             return
 
         template_path = self._validate_required_path(
@@ -802,10 +749,7 @@ class ReportsController:
         metadata = manager.metadata or ProjectMetadata(case_name=manager.project_name or "")
 
         self._save_preferences(
-            provider_id=provider_id,
-            model=model_id,
-            custom_model=custom_model,
-            context_window=context_window,
+            llm_settings=llm_settings,
             template_path=template_path,
             transcript_path=transcript_path,
             generation_user_prompt=gen_user_path,
@@ -818,10 +762,11 @@ class ReportsController:
         config = ReportDraftJobConfig(
             project_dir=project_dir,
             inputs=selected_pairs,
-            provider_id=provider_id,
-            model=model_id,
-            custom_model=custom_model,
-            context_window=context_window,
+            provider_id=llm_settings.provider_id,
+            model=llm_settings.model_id,
+            custom_model=llm_settings.custom_model_id,
+            context_window=llm_settings.context_window,
+            use_reasoning=llm_settings.use_reasoning,
             template_path=template_path,
             transcript_path=transcript_path,
             generation_user_prompt_path=gen_user_path,
@@ -866,8 +811,8 @@ class ReportsController:
         if not self._validate_placeholders_before_run(include_generation=False, include_refinement=True):
             return
 
-        provider_id, model_id, custom_model, context_window = self._resolve_model_selection()
-        if provider_id is None:
+        llm_settings = self._resolve_llm_settings()
+        if llm_settings is None:
             return
 
         draft_path = self._validate_required_path(
@@ -919,10 +864,7 @@ class ReportsController:
         metadata = manager.metadata or ProjectMetadata(case_name=manager.project_name or "")
 
         self._save_preferences(
-            provider_id=provider_id,
-            model=model_id,
-            custom_model=custom_model,
-            context_window=context_window,
+            llm_settings=llm_settings,
             template_path=template_path,
             transcript_path=transcript_path,
             generation_user_prompt=self._optional_path(self._tab.generation_user_prompt_edit.text()),
@@ -936,10 +878,11 @@ class ReportsController:
             project_dir=project_dir,
             draft_path=draft_path,
             inputs=selected_pairs,
-            provider_id=provider_id,
-            model=model_id,
-            custom_model=custom_model,
-            context_window=context_window,
+            provider_id=llm_settings.provider_id,
+            model=llm_settings.model_id,
+            custom_model=llm_settings.custom_model_id,
+            context_window=llm_settings.context_window,
+            use_reasoning=llm_settings.use_reasoning,
             template_path=template_path,
             transcript_path=transcript_path,
             refinement_user_prompt_path=ref_user_path,
@@ -1159,23 +1102,16 @@ class ReportsController:
             workspace=self._workspace,
         )
 
-    def _resolve_model_selection(self) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[int]]:
-        data = self._tab.model_combo.currentData()
-        if not data:
-            return "anthropic", "claude-sonnet-4-5-20250929", None, None
-        if data[0] != "custom":
-            return data[0], data[1], None, None
-
-        custom_model = self._tab.custom_model_edit.text().strip()
-        if not custom_model:
-            QMessageBox.warning(
-                self._workspace,
-                "Report Generator",
-                "Enter a model id for the custom option.",
-            )
-            return None, None, None, None
-        context_window = int(self._tab.custom_context_spin.value())
-        return "custom", "", custom_model, context_window
+    def _resolve_llm_settings(self) -> Optional[LLMOperationSettings]:
+        settings, error = self._tab.llm_settings_panel.current_settings()
+        if settings is not None:
+            return settings
+        QMessageBox.warning(
+            self._workspace,
+            "Report Generator",
+            error or "Select a provider and model before continuing.",
+        )
+        return None
 
     def _resolve_selected_inputs(self) -> List[tuple[str, str]]:
         return resolve_selected_inputs(self._selected_inputs)

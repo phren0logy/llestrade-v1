@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 PySide6 = pytest.importorskip("PySide6")
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMessageBox
 
 _ = PySide6
 
@@ -38,6 +38,8 @@ def test_api_key_dialog_loads_and_saves_gateway_settings(
                 self.bedrock_model_combo.setCurrentIndex(index)
 
     monkeypatch.setattr(APIKeyDialog, "_refresh_bedrock_models", _stub_refresh)
+    monkeypatch.setattr(QMessageBox, "information", lambda *args, **kwargs: QMessageBox.Ok)
+    monkeypatch.setattr(QMessageBox, "warning", lambda *args, **kwargs: QMessageBox.Ok)
 
     settings = SecureSettings()
     settings.set(
@@ -88,6 +90,8 @@ def test_api_key_dialog_loads_and_saves_phoenix_content_policy(
                 self.bedrock_model_combo.setCurrentIndex(index)
 
     monkeypatch.setattr(APIKeyDialog, "_refresh_bedrock_models", _stub_refresh)
+    monkeypatch.setattr(QMessageBox, "information", lambda *args, **kwargs: QMessageBox.Ok)
+    monkeypatch.setattr(QMessageBox, "warning", lambda *args, **kwargs: QMessageBox.Ok)
 
     settings = SecureSettings()
     settings.set(

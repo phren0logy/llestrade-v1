@@ -27,6 +27,7 @@ Completed in the current worker/backend layer:
 
 Still open:
 
+- shared LLM operation settings and selector reuse across bulk analysis and reports
 - model-level instrumentation via Pydantic AI / InstrumentedModel
 - upstream failover via `FallbackModel` and/or Gateway routing groups
 - broader migration of non-worker legacy code under [`src/common/llm/`](../src/common/llm/) and [`src/config/app_config.py`](../src/config/app_config.py)
@@ -42,6 +43,7 @@ The current LLM execution path is centered on custom abstractions:
 - [`src/common/llm/tokens.py`](../src/common/llm/tokens.py) implements mixed token-counting strategies, including provider-specific fallbacks and character-based estimates.
 - [`src/config/observability.py`](../src/config/observability.py) emits app-specific Phoenix/OpenTelemetry spans around worker stages.
 - The worker backend now uses Pydantic AI `direct` plus raw `ModelResponse` passthrough for worker execution. Remaining custom logic is primarily in prompt assembly, chunk planning, checkpointing, and the surrounding worker orchestration.
+- Above that worker backend seam, the app still duplicates provider/model selection, reasoning UX, and selection persistence between bulk-analysis UI and reports UI.
 
 This architecture is reasonable for a desktop app with long-running jobs and file-based checkpoints, but it currently duplicates several upstream capabilities that Pydantic AI already provides.
 
@@ -130,7 +132,41 @@ Provider caveat:
 - In the current installed version, Anthropic, Google, and Bedrock support real `count_tokens(...)` preflight.
 - Installed `OpenAIChatModel` still raises `NotImplementedError` for pre-request token counting, so OpenAI and Azure OpenAI must continue to use fallback counting for this specific feature.
 
-### 5. Use ConcurrencyLimitedModel for Shared Provider/Gateway Throughput Caps
+### 5. Unify LLM Operation Settings Across Bulk Analysis and Reports
+
+Use one shared LLM operation settings contract plus one shared selector surface above the worker backend seam.
+
+Why:
+
+- Bulk and reports already share the same worker backend, but still duplicate provider/model selection, reasoning enablement, and persistence adapters.
+- This is the next useful consolidation step after backend cutover because it removes UI and controller drift without forcing worker-orchestration unification.
+- It keeps the app aligned with the current backend architecture: one shared provider-capability layer with workflow-specific orchestration above it.
+
+What it should replace:
+
+- duplicated provider/model selector construction in bulk and report UI
+- report-specific fake `custom` provider handling and bulk-specific silent Anthropic custom-model coercion
+- separate reasoning UX policy above the backend seam for bulk and reports
+
+Initial scope:
+
+- one shared settings contract for `provider_id`, `model_id`, optional custom `context_window`, and `use_reasoning`
+- one shared selector UI for Anthropic, Anthropic Bedrock, OpenAI, and Gemini
+- binary `use_reasoning` as the primary control in both workflows
+- an “Advanced reasoning settings” affordance that uses provider defaults when no richer stable controls are exposed
+
+Out of scope:
+
+- unifying report and bulk worker orchestration
+- changing workflow-specific prompt assembly, checkpointing, manifests, or chunk planning
+- exposing Azure OpenAI in the shared selector before the non-Azure providers are validated in the unified UI
+
+Replacement status:
+
+- Implemented for the bulk/report UI and persistence layer above the worker backend seam.
+- Workflow-specific execution defaults such as report and bulk token/temperature settings remain intentionally separate.
+
+### 6. Use ConcurrencyLimitedModel for Shared Provider/Gateway Throughput Caps
 
 Adopt [`ConcurrencyLimitedModel`](https://ai.pydantic.dev/api/concurrency/) for model-level concurrency limits.
 
@@ -148,7 +184,7 @@ Replacement status:
 - Implemented for the worker backend layer.
 - Keep the current worker orchestration and job coordination; model-level concurrency is now used only for network request limiting.
 
-### 6. Use Instrumented Models for LLM-Layer Telemetry
+### 7. Use Instrumented Models for LLM-Layer Telemetry
 
 Adopt Pydantic AI's [Debugging and Monitoring / Logfire integration](https://ai.pydantic.dev/logfire/) and [`InstrumentedModel`](https://ai.pydantic.dev/api/models/instrumented/) for model-level telemetry.
 
@@ -166,7 +202,7 @@ Replacement status:
 - Partial replacement.
 - Keep current app-level worker/stage spans in [`src/config/observability.py`](../src/config/observability.py). They express domain workflow context that model instrumentation does not replace.
 
-### 7. Use Pydantic AI Retry Transports for Pydantic-AI-Backed Provider Paths
+### 8. Use Pydantic AI Retry Transports for Pydantic-AI-Backed Provider Paths
 
 Use the retry utilities in [HTTP Request Retries](https://ai.pydantic.dev/retries/) for paths that are executed through Pydantic AI providers or Gateway providers.
 
@@ -184,7 +220,7 @@ Replacement status:
 - Implemented for Gateway-backed worker execution, and standardized for the direct Pydantic AI worker backend as well.
 - Keep custom retry behavior when it is tied to provider SDK semantics or worker-level resume/cancellation behavior.
 
-### 8. Use FallbackModel and Gateway Routing for Cross-Provider Failover
+### 9. Use FallbackModel and Gateway Routing for Cross-Provider Failover
 
 Prefer [`FallbackModel`](https://ai.pydantic.dev/api/models/fallback/) and Gateway routing groups over app-specific failover logic.
 
@@ -391,6 +427,8 @@ Implication:
 
 - the app should keep `use_reasoning` as a product-level intent flag
 - provider-specific reasoning settings should be centralized in the backend
+- the primary UX should stay binary: reasoning off/on
+- provider-specific advanced reasoning controls should live behind an affordance and default to safe backend-provided settings when unset
 - the app should not expect a single provider-agnostic reasoning-mode switch yet
 
 Roadmap reading:
@@ -438,14 +476,16 @@ But Gateway does not remove the need for app-level policy around:
 3. Standardize token preflight on backend-supported `count_tokens(...)` plus `UsageLimits`, while keeping app-specific chunk planning.
 4. Add model-level concurrency limits, standardized retry transports, and provider/gateway failover through upstream abstractions.
 5. Replace flattened worker response handling with full `ModelResponse` passthrough and exception-based failure handling.
-6. Adopt structured outputs and validators for selected workflows that currently depend on fragile text parsing.
-7. Add Pydantic Evals and span-based regression coverage after model-level instrumentation is stable.
-8. Revisit durable execution only if the product moves beyond the current desktop/file-checkpoint model.
+6. Unify bulk/report LLM operation settings above the backend seam, including provider/model selection, reasoning UX, and shared persistence adapters.
+7. Adopt structured outputs and validators for selected workflows that currently depend on fragile text parsing.
+8. Add Pydantic Evals and span-based regression coverage after model-level instrumentation is stable.
+9. Revisit durable execution only if the product moves beyond the current desktop/file-checkpoint model.
 
 Status against this sequence:
 
 - Steps 1-5 are largely complete for worker execution, except for the failover portion of step 4.
-- Structured outputs are the next major adoption area, but they should follow targeted workflow selection rather than a broad rewrite.
+- Shared bulk/report LLM settings are the next consolidation step above the backend seam.
+- Structured outputs are the next major adoption area after that, and they should follow targeted workflow selection rather than a broad rewrite.
 - The biggest remaining platform gaps are failover, deeper instrumentation follow-through, and migration of non-worker legacy code.
 
 ## Sources

@@ -102,7 +102,7 @@ def test_workspace_run_executes_worker_and_updates_ui(tmp_path: Path, qt_app: QA
     monkeypatch.setattr(
         bulk_analysis_worker.BulkAnalysisWorker,
         "_create_provider",
-        lambda self, config, system_prompt: object(),
+        lambda self, config: object(),
     )
     monkeypatch.setattr(
         bulk_analysis_worker.BulkAnalysisWorker,

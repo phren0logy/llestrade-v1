@@ -788,6 +788,54 @@ def test_report_draft_passes_computed_input_budget_to_backend(
     assert backend.requests[0].input_tokens_limit == 79_000
 
 
+def test_report_draft_applies_reasoning_settings_to_backend_request(
+    tmp_path: Path,
+    qt_app: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert qt_app is not None
+    (common_paths, _refinement_system_prompt_path) = _prepare_common_files(tmp_path)
+    (
+        template_path,
+        generation_user_prompt_path,
+        _refinement_user_prompt_path,
+        generation_system_prompt_path,
+    ) = common_paths
+    section = TemplateSection(title="Section One", body="Describe the findings.")
+    backend = _CapturingBackend(_model_response("stub output"))
+    worker = DraftReportWorker(
+        project_dir=tmp_path,
+        inputs=[(REPORT_CATEGORY_CONVERTED, "converted_documents/doc.md")],
+        provider_id="anthropic",
+        model="claude-sonnet-4-5",
+        custom_model=None,
+        context_window=100_000,
+        template_path=template_path,
+        transcript_path=None,
+        generation_user_prompt_path=generation_user_prompt_path,
+        generation_system_prompt_path=generation_system_prompt_path,
+        metadata=ProjectMetadata(case_name="Case"),
+        use_reasoning=True,
+        llm_backend=backend,
+    )
+    monkeypatch.setattr(worker, "_create_provider", lambda: object())
+
+    worker._generate_section_outputs(
+        sections=[section],
+        user_prompt_template="Write {template_section}\n\n{additional_documents}",
+        additional_documents="Documents",
+        transcript_text="",
+        system_prompt="System prompt",
+        placeholder_map={},
+        evidence_ledger="",
+    )
+
+    assert backend.requests[0].model_settings["anthropic_thinking"] == {
+        "type": "enabled",
+        "budget_tokens": 7500,
+    }
+
+
 def test_report_refine_trace_attributes_match_between_legacy_and_gateway(
     tmp_path: Path,
     qt_app: QApplication,
@@ -912,6 +960,50 @@ def test_report_refine_passes_computed_input_budget_to_backend(
     assert reasoning is None
     assert len(backend.requests) == 1
     assert backend.requests[0].input_tokens_limit == 79_000
+
+
+def test_report_refine_applies_openai_reasoning_settings(
+    tmp_path: Path,
+    qt_app: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert qt_app is not None
+    (common_paths, refinement_system_prompt_path) = _prepare_common_files(tmp_path)
+    (
+        template_path,
+        _generation_user_prompt_path,
+        refinement_user_prompt_path,
+        _generation_system_prompt_path,
+    ) = common_paths
+    draft_path = tmp_path / "reports" / "draft.md"
+    draft_path.parent.mkdir(parents=True, exist_ok=True)
+    draft_path.write_text("---\n---\nDraft content", encoding="utf-8")
+    backend = _CapturingBackend(_model_response("stub output"))
+    worker = ReportRefinementWorker(
+        project_dir=tmp_path,
+        draft_path=draft_path,
+        inputs=[(REPORT_CATEGORY_CONVERTED, "converted_documents/doc.md")],
+        provider_id="openai",
+        model="gpt-4.1",
+        custom_model=None,
+        context_window=100_000,
+        template_path=template_path,
+        transcript_path=None,
+        refinement_user_prompt_path=refinement_user_prompt_path,
+        refinement_system_prompt_path=refinement_system_prompt_path,
+        metadata=ProjectMetadata(case_name="Case"),
+        use_reasoning=True,
+        llm_backend=backend,
+    )
+    monkeypatch.setattr(worker, "_create_provider", lambda: object())
+
+    worker._run_refinement(
+        prompt="Prompt",
+        system_prompt="System prompt",
+    )
+
+    assert backend.requests[0].model_settings["openai_reasoning_effort"] == "medium"
+    assert backend.requests[0].model_settings["openai_reasoning_summary"] == "detailed"
 
 
 @pytest.mark.parametrize("message", ["Gateway timeout", "Gateway spend limit exceeded"])

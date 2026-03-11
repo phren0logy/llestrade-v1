@@ -38,6 +38,7 @@ class ReportWorkerBase(DashboardWorker):
         model: str,
         custom_model: Optional[str],
         context_window: Optional[int],
+        use_reasoning: bool,
         metadata: ProjectMetadata,
         placeholder_values: Mapping[str, str] | None,
         project_name: str,
@@ -53,6 +54,7 @@ class ReportWorkerBase(DashboardWorker):
         raw_custom = custom_model.strip() if custom_model else None
         self._custom_model = self._llm_backend.normalize_model(provider_id, raw_custom)
         self._context_window = context_window
+        self._use_reasoning = use_reasoning
         self._metadata = metadata
         self._max_report_tokens = max_report_tokens
         self._base_placeholders = dict(placeholder_values or {})

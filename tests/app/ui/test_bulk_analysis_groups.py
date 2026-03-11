@@ -19,11 +19,12 @@ def test_bulk_analysis_group_save_and_load(project_manager: ProjectManager):
         name="Clinical Records",
         files=["medical/doc1.md"],
         directories=["medical"],
-        provider_id="anthropic",
-        model="claude-sonnet-4-5-20250929",
+        provider_id="openai",
+        model="gpt-4.1",
         system_prompt_path="resources/prompts/system.md",
         user_prompt_path="resources/prompts/user.md",
     )
+    group.use_reasoning = True
 
     saved = project_manager.save_bulk_analysis_group(group)
     assert saved.group_id in {g.group_id for g in project_manager.list_bulk_analysis_groups()}
@@ -36,7 +37,8 @@ def test_bulk_analysis_group_save_and_load(project_manager: ProjectManager):
     assert loaded_group.directories == ["medical"]
     assert loaded_group.system_prompt_path == "resources/prompts/system.md"
     assert loaded_group.user_prompt_path == "resources/prompts/user.md"
-    assert loaded_group.provider_id == "anthropic"
+    assert loaded_group.provider_id == "openai"
+    assert loaded_group.use_reasoning is True
 
 
 def test_bulk_analysis_group_slug_uniqueness(project_manager: ProjectManager):

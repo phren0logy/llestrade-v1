@@ -1,7 +1,7 @@
 import { env } from 'cloudflare:workers'
 import type { Config } from '@deploy/types'
 
-type ProviderKeys = 'anthropic'
+type ProviderKeys = 'anthropic' | 'openai' | 'google-vertex'
 
 const PROJECT_ID = 1
 const APP_API_KEY_ID = 100
@@ -15,6 +15,9 @@ export const config: Config<ProviderKeys> = {
   },
   routingGroups: {
     anthropic: [{ key: 'anthropic' }],
+    openai: [{ key: 'openai' }],
+    gemini: [{ key: 'google-vertex' }],
+    'google-vertex': [{ key: 'google-vertex' }],
   },
   providers: {
     anthropic: {
@@ -23,12 +26,24 @@ export const config: Config<ProviderKeys> = {
       injectCost: true,
       credentials: env.ANTHROPIC_API_KEY,
     },
+    openai: {
+      providerId: 'openai',
+      baseUrl: 'https://api.openai.com/v1',
+      injectCost: true,
+      credentials: env.OPENAI_API_KEY,
+    },
+    'google-vertex': {
+      providerId: 'google-vertex',
+      baseUrl: 'https://us-central1-aiplatform.googleapis.com',
+      injectCost: true,
+      credentials: env.GOOGLE_VERTEX_SERVICE_ACCOUNT_JSON,
+    },
   },
   apiKeys: {
     __APP_API_KEY__: {
       id: APP_API_KEY_ID,
       project: PROJECT_ID,
-      providers: ['anthropic'],
+      providers: ['anthropic', 'openai', 'google-vertex'],
     },
   },
 }
