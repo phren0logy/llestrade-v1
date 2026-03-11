@@ -93,6 +93,9 @@ class SecureSettings(QObject):
             "version": "1.0",
             "llm_provider": "anthropic",
             "llm_model": "claude-sonnet-4-5-20250929",
+            "pydantic_ai_gateway_settings": {
+                "base_url": None,
+            },
             "aws_bedrock_settings": {
                 "profile": None,
                 "region": None,

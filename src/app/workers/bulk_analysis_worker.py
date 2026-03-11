@@ -755,6 +755,8 @@ class BulkAnalysisWorker(DashboardWorker):
         provider_config: ProviderConfig,
         system_prompt: str,
         user_prompt: str,
+        *,
+        max_tokens: int = _DEFAULT_MAX_OUTPUT_TOKENS,
     ) -> int:
         combined_prompt = f"{system_prompt.strip()}\n\n{user_prompt.strip()}".strip()
         if not combined_prompt:
@@ -768,6 +770,24 @@ class BulkAnalysisWorker(DashboardWorker):
                     return counted
         except Exception:
             self.logger.debug("Provider token preflight failed; falling back to local estimate", exc_info=True)
+
+        backend_counter = getattr(self._llm_backend, "count_input_tokens", None)
+        if callable(backend_counter):
+            try:
+                counted = backend_counter(
+                    provider,
+                    LLMInvocationRequest(
+                        prompt=user_prompt,
+                        system_prompt=system_prompt,
+                        model=provider_config.model,
+                        temperature=0.1,
+                        max_tokens=max_tokens,
+                    ),
+                )
+                if counted is not None and counted >= 0:
+                    return int(counted)
+            except Exception:
+                self.logger.debug("Backend token preflight failed; falling back to local estimate", exc_info=True)
 
         token_info = TokenCounter.count(
             text=combined_prompt,
@@ -818,11 +838,12 @@ class BulkAnalysisWorker(DashboardWorker):
                     content=chunk,
                 )
                 prompt = self._append_citation_ledger(prompt, chunk_ledger)
-                prompt_tokens = self._count_prompt_tokens(
+                prompt_tokens = self._count_prompt_tokens_compat(
                     provider,
                     provider_config,
                     system_prompt,
                     prompt,
+                    max_tokens=_DEFAULT_MAX_OUTPUT_TOKENS,
                 )
                 if prompt_tokens > input_budget:
                     oversized.append((idx, prompt_tokens))
@@ -898,6 +919,42 @@ class BulkAnalysisWorker(DashboardWorker):
             **call_kwargs,
         )
 
+    def _count_prompt_tokens_compat(
+        self,
+        provider: BaseLLMProvider,
+        provider_config: ProviderConfig,
+        system_prompt: str,
+        user_prompt: str,
+        *,
+        max_tokens: int = _DEFAULT_MAX_OUTPUT_TOKENS,
+    ) -> int:
+        count_fn = self._count_prompt_tokens
+        try:
+            signature = inspect.signature(count_fn)
+        except (TypeError, ValueError):
+            signature = None
+
+        if signature is not None:
+            accepts_var_kw = any(
+                param.kind == inspect.Parameter.VAR_KEYWORD
+                for param in signature.parameters.values()
+            )
+            if not accepts_var_kw and "max_tokens" not in signature.parameters:
+                return count_fn(  # type: ignore[misc]
+                    provider,
+                    provider_config,
+                    system_prompt,
+                    user_prompt,
+                )
+
+        return count_fn(
+            provider,
+            provider_config,
+            system_prompt,
+            user_prompt,
+            max_tokens=max_tokens,
+        )
+
     def _invoke_provider(
         self,
         provider: BaseLLMProvider,
@@ -914,11 +971,12 @@ class BulkAnalysisWorker(DashboardWorker):
             raise BulkAnalysisCancelled
 
         if input_budget is not None:
-            prompt_tokens = self._count_prompt_tokens(
+            prompt_tokens = self._count_prompt_tokens_compat(
                 provider,
                 provider_config,
                 system_prompt,
                 prompt,
+                max_tokens=max_tokens,
             )
             if prompt_tokens > input_budget:
                 raise RuntimeError(

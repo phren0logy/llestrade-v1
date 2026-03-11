@@ -65,6 +65,32 @@ class _ResultBackend(LLMExecutionBackend):
         return self._result
 
 
+class _CountingBackend(LLMExecutionBackend):
+    def __init__(self, *, token_count: int) -> None:
+        self.token_count = token_count
+        self.invoked = False
+
+    def requires_native_provider(self) -> bool:
+        return False
+
+    def count_input_tokens(self, provider, request: LLMInvocationRequest) -> int | None:  # noqa: ANN001
+        _ = provider, request
+        return self.token_count
+
+    def invoke(self, provider, request: LLMInvocationRequest) -> LLMInvocationResult:  # noqa: ANN001
+        _ = provider, request
+        self.invoked = True
+        return LLMInvocationResult(
+            success=True,
+            content="summary",
+            error=None,
+            usage={},
+            provider="gateway/anthropic",
+            model="claude",
+            raw={},
+        )
+
+
 def _capture_traces(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, dict[str, object] | None]]:
     recorded: list[tuple[str, dict[str, object] | None]] = []
 
@@ -302,6 +328,30 @@ def test_bulk_map_trace_attributes_match_between_legacy_and_gateway(
             },
         )
     ]
+
+
+def test_bulk_worker_uses_backend_token_count_for_gateway_preflight(tmp_path: Path) -> None:
+    group = BulkAnalysisGroup.create("Group")
+    backend = _CountingBackend(token_count=500)
+    worker = BulkAnalysisWorker(
+        project_dir=tmp_path,
+        group=group,
+        files=[],
+        metadata=ProjectMetadata(case_name="Case"),
+        force_rerun=False,
+        llm_backend=backend,
+    )
+
+    with pytest.raises(RuntimeError, match="500 tokens > 400 budget"):
+        worker._invoke_provider(
+            provider=worker._create_provider(ProviderConfig(provider_id="anthropic", model="claude"), "System"),
+            provider_config=ProviderConfig(provider_id="anthropic", model="claude"),
+            prompt="Prompt",
+            system_prompt="System",
+            input_budget=400,
+        )
+
+    assert backend.invoked is False
 
 
 def test_bulk_worker_force_rerun_reprocesses(tmp_path: Path, qtbot, monkeypatch: pytest.MonkeyPatch) -> None:

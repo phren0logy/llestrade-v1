@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any, Dict
 
 import pytest
@@ -257,6 +258,106 @@ def test_gateway_backend_reports_configuration_error_without_key(
     assert result.success is False
     assert result.error is not None
     assert "Gateway invocation failed" in result.error
+
+
+def test_gateway_backend_count_input_tokens_uses_model_token_counter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    class _FakeModel:
+        async def count_tokens(self, messages: Any, model_settings: Any, model_request_parameters: Any) -> Any:
+            captured["messages"] = messages
+            captured["model_settings"] = model_settings
+            captured["model_request_parameters"] = model_request_parameters
+            return SimpleNamespace(input_tokens=321)
+
+    backend = PydanticAIGatewayBackend(api_key="pylf_test_key", base_url="https://gateway.example.com")
+    monkeypatch.setattr(backend, "_build_model", lambda **_kwargs: _FakeModel(), raising=True)
+
+    token_count = backend.count_input_tokens(
+        _ProviderMeta("anthropic", default_model="claude-sonnet-4-5"),
+        LLMInvocationRequest(
+            prompt="User prompt",
+            system_prompt="System prompt",
+            model="claude-sonnet-4-5",
+            temperature=0.2,
+            max_tokens=2048,
+            extra={"reasoning_effort": "medium"},
+        ),
+    )
+
+    assert token_count == 321
+    assert len(captured["messages"]) == 1
+    parts = captured["messages"][0].parts
+    assert [type(part).__name__ for part in parts] == ["SystemPromptPart", "UserPromptPart"]
+    assert parts[0].content == "System prompt"
+    assert parts[1].content == "User prompt"
+    assert captured["model_settings"]["temperature"] == 0.2
+    assert captured["model_settings"]["max_tokens"] == 2048
+    assert captured["model_settings"]["reasoning_effort"] == "medium"
+
+
+def test_gateway_backend_count_input_tokens_returns_none_when_model_does_not_support_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeModel:
+        async def count_tokens(self, messages: Any, model_settings: Any, model_request_parameters: Any) -> Any:  # noqa: ARG002
+            raise NotImplementedError("Token counting ahead of the request is not supported")
+
+    backend = PydanticAIGatewayBackend(api_key="pylf_test_key", base_url="https://gateway.example.com")
+    monkeypatch.setattr(backend, "_build_model", lambda **_kwargs: _FakeModel(), raising=True)
+
+    token_count = backend.count_input_tokens(
+        _ProviderMeta("openai", default_model="gpt-4.1"),
+        LLMInvocationRequest(
+            prompt="User prompt",
+            system_prompt="System prompt",
+            model="gpt-4.1",
+            temperature=0.2,
+            max_tokens=2048,
+        ),
+    )
+
+    assert token_count is None
+
+
+def test_gateway_backend_loads_base_url_from_secure_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("PYDANTIC_AI_GATEWAY_BASE_URL", raising=False)
+    monkeypatch.delenv("PAIG_BASE_URL", raising=False)
+
+    class _FakeSecureSettings:
+        def get(self, key: str, default: Any = None) -> Any:
+            if key == "pydantic_ai_gateway_settings":
+                return {"base_url": "https://gateway.example.com"}
+            return default
+
+    monkeypatch.setattr("src.app.core.secure_settings.SecureSettings", _FakeSecureSettings)
+
+    backend = PydanticAIGatewayBackend(api_key="pylf_test_key", base_url=None)
+
+    assert backend._base_url == "https://gateway.example.com"
+
+
+def test_gateway_backend_loads_api_key_from_secure_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("PYDANTIC_AI_GATEWAY_API_KEY", raising=False)
+    monkeypatch.delenv("PAIG_API_KEY", raising=False)
+
+    class _FakeSecureSettings:
+        def get_api_key(self, provider: str) -> Any:
+            if provider == "pydantic_ai_gateway":
+                return "gateway-key-from-settings"
+            return None
+
+    monkeypatch.setattr("src.app.core.secure_settings.SecureSettings", _FakeSecureSettings)
+
+    backend = PydanticAIGatewayBackend(api_key=None, base_url="https://gateway.example.com")
+
+    assert backend._api_key == "gateway-key-from-settings"
 
 
 def test_gateway_backend_can_fallback_on_error_when_enabled(

@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import os
 from dataclasses import dataclass, field
 from typing import Any, Dict, Mapping, Optional, Protocol
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,6 +77,9 @@ class LLMExecutionBackend(Protocol):
     def requires_native_provider(self) -> bool:
         """Whether worker code must initialize a native provider client."""
 
+    def count_input_tokens(self, provider: Any, request: LLMInvocationRequest) -> int | None:
+        """Return input token count when the backend can measure it."""
+
     def invoke(self, provider: Any, request: LLMInvocationRequest) -> LLMInvocationResult:
         """Execute `request` against the given provider."""
 
@@ -82,6 +89,23 @@ class LegacyProviderBackend:
 
     def requires_native_provider(self) -> bool:
         return True
+
+    def count_input_tokens(self, provider: Any, request: LLMInvocationRequest) -> int | None:
+        count_tokens = getattr(provider, "count_tokens", None)
+        if not callable(count_tokens):
+            return None
+
+        combined_prompt = self._combine_prompt(request)
+        if not combined_prompt:
+            return 0
+
+        try:
+            result = count_tokens(text=combined_prompt)
+        except Exception:
+            logger.debug("Native provider token preflight failed", exc_info=True)
+            return None
+
+        return self._extract_token_count(result)
 
     def invoke(self, provider: Any, request: LLMInvocationRequest) -> LLMInvocationResult:
         kwargs: Dict[str, Any] = {
@@ -96,6 +120,22 @@ class LegacyProviderBackend:
         if not isinstance(response, dict):
             response = {"success": False, "error": "Provider returned non-dict response"}
         return LLMInvocationResult.from_provider_response(response)
+
+    @staticmethod
+    def _combine_prompt(request: LLMInvocationRequest) -> str:
+        return f"{(request.system_prompt or '').strip()}\n\n{request.prompt.strip()}".strip()
+
+    @staticmethod
+    def _extract_token_count(payload: Any) -> int | None:
+        if not isinstance(payload, Mapping):
+            return None
+        if not payload.get("success"):
+            return None
+        token_count = payload.get("token_count")
+        if token_count is None:
+            return None
+        counted = int(token_count or 0)
+        return counted if counted >= 0 else None
 
 
 class PydanticAIGatewayBackend:
@@ -122,14 +162,99 @@ class PydanticAIGatewayBackend:
         fallback_backend: LLMExecutionBackend | None = None,
         fallback_on_error: bool = False,
     ) -> None:
-        self._api_key = api_key or os.getenv("PYDANTIC_AI_GATEWAY_API_KEY") or os.getenv("PAIG_API_KEY")
-        self._base_url = base_url or os.getenv("PYDANTIC_AI_GATEWAY_BASE_URL") or os.getenv("PAIG_BASE_URL")
+        self._api_key = (
+            api_key
+            or os.getenv("PYDANTIC_AI_GATEWAY_API_KEY")
+            or os.getenv("PAIG_API_KEY")
+            or self._load_api_key_from_settings()
+        )
+        self._base_url = (
+            base_url
+            or os.getenv("PYDANTIC_AI_GATEWAY_BASE_URL")
+            or os.getenv("PAIG_BASE_URL")
+            or self._load_base_url_from_settings()
+        )
         self._route = route or os.getenv("PYDANTIC_AI_GATEWAY_ROUTE")
         self._fallback_backend = fallback_backend
         self._fallback_on_error = fallback_on_error
 
+    @staticmethod
+    def _load_base_url_from_settings() -> str | None:
+        try:
+            from src.app.core.secure_settings import SecureSettings
+
+            settings = SecureSettings()
+            gateway_settings = settings.get("pydantic_ai_gateway_settings", {}) or {}
+            base_url = str(gateway_settings.get("base_url") or "").strip()
+            return base_url or None
+        except Exception:
+            return None
+
+    @staticmethod
+    def _load_api_key_from_settings() -> str | None:
+        try:
+            from src.app.core.secure_settings import SecureSettings
+
+            settings = SecureSettings()
+            api_key = settings.get_api_key("pydantic_ai_gateway")
+            value = str(api_key or "").strip()
+            return value or None
+        except Exception:
+            return None
+
     def requires_native_provider(self) -> bool:
         return False
+
+    def count_input_tokens(self, provider: Any, request: LLMInvocationRequest) -> int | None:
+        provider_id = self._resolve_provider_id(provider)
+        if not provider_id:
+            return None
+
+        model_name = request.model or self._resolve_default_model(provider)
+        if not model_name:
+            return None
+
+        if not request.prompt and not request.system_prompt:
+            return 0
+
+        try:
+            model = self._build_model(provider_id=provider_id, model_name=model_name)
+            from pydantic_ai.messages import ModelRequest, SystemPromptPart, UserPromptPart
+            from pydantic_ai.models import ModelRequestParameters
+
+            parts: list[Any] = []
+            if request.system_prompt:
+                parts.append(SystemPromptPart(content=request.system_prompt))
+            if request.prompt:
+                parts.append(UserPromptPart(content=request.prompt))
+
+            model_settings: Dict[str, Any] = {
+                "temperature": request.temperature,
+                "max_tokens": request.max_tokens,
+            }
+            for key in self._FORWARDED_SETTINGS:
+                if key in request.extra:
+                    model_settings[key] = request.extra[key]
+
+            usage = asyncio.run(
+                model.count_tokens(
+                    [ModelRequest(parts=parts)],
+                    model_settings,
+                    ModelRequestParameters(),
+                )
+            )
+            counted = int(getattr(usage, "input_tokens", 0) or 0)
+            return counted if counted >= 0 else None
+        except NotImplementedError:
+            return None
+        except Exception:
+            logger.debug(
+                "Gateway token preflight failed for provider=%s model=%s",
+                provider_id,
+                model_name,
+                exc_info=True,
+            )
+            return None
 
     def invoke(self, provider: Any, request: LLMInvocationRequest) -> LLMInvocationResult:
         provider_id = self._resolve_provider_id(provider)
