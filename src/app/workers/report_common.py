@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -12,9 +11,7 @@ from src.app.core.citations import CitationRecordStats, CitationStore, parse_cit
 from src.app.core.report_prompt_context import build_report_base_placeholders
 from src.app.core.project_manager import ProjectMetadata
 from src.app.core.report_inputs import category_display_name
-from src.app.core.secure_settings import SecureSettings
 from src.common.llm.budgets import compute_input_token_budget
-from src.common.llm.factory import create_provider
 from src.common.llm.tokens import TokenCounter
 from src.common.markdown import PromptReference, SourceReference, compute_file_checksum
 
@@ -22,8 +19,7 @@ from .base import DashboardWorker
 from .llm_backend import (
     LegacyProviderBackend,
     LLMExecutionBackend,
-    ProviderMetadata,
-    default_model_for_provider,
+    LLMProviderRequest,
 )
 
 # Mapping of Anthropic cloud model slugs to their AWS Bedrock equivalents.
@@ -290,37 +286,13 @@ class ReportWorkerBase(DashboardWorker):
     # Provider helpers
     # ------------------------------------------------------------------
     def _create_provider(self, system_prompt: str):
-        if not self._llm_backend.requires_native_provider():
-            return ProviderMetadata(
-                provider_name=self._provider_id,
-                default_model=(
-                    self._custom_model
-                    or self._model
-                    or default_model_for_provider(self._provider_id)
-                ),
+        return self._llm_backend.create_provider(
+            LLMProviderRequest(
+                provider_id=self._provider_id,
+                model=self._custom_model or self._model,
+                system_prompt=system_prompt,
             )
-
-        settings = SecureSettings()
-        api_key = settings.get_api_key(self._provider_id)
-        kwargs = {
-            "provider": self._provider_id,
-            "default_system_prompt": system_prompt,
-            "api_key": api_key,
-        }
-        if self._provider_id == "azure_openai":
-            azure_settings = settings.get("azure_openai_settings", {}) or {}
-            kwargs["azure_endpoint"] = azure_settings.get("endpoint")
-            kwargs["api_version"] = azure_settings.get("api_version")
-        elif self._provider_id == "anthropic_bedrock":
-            bedrock_settings = settings.get("aws_bedrock_settings", {}) or {}
-            kwargs["aws_region"] = bedrock_settings.get("region") or os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION")
-            kwargs["aws_profile"] = bedrock_settings.get("profile")
-        provider = create_provider(**kwargs)
-        if provider is None or not getattr(provider, "initialized", False):
-            raise RuntimeError(
-                f"Unable to initialise provider '{self._provider_id}'. Check API keys and configuration."
-            )
-        return provider
+        )
 
     def _resolve_model_alias(self, model: Optional[str]) -> Optional[str]:
         """Translate known cloud model slugs into Bedrock IDs when needed."""

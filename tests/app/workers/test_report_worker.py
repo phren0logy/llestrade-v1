@@ -18,7 +18,14 @@ from src.app.core.project_manager import ProjectMetadata
 from src.app.core.report_inputs import REPORT_CATEGORY_CONVERTED
 from src.app.core.report_template_sections import TemplateSection
 from src.app.workers import report_worker
-from src.app.workers.llm_backend import LLMExecutionBackend, LLMInvocationRequest, LLMInvocationResult
+from src.app.workers.llm_backend import (
+    LLMExecutionBackend,
+    LLMInvocationRequest,
+    LLMInvocationResult,
+    LLMProviderRequest,
+    LegacyProviderBackend,
+    ProviderMetadata,
+)
 from src.app.workers.report_worker import DraftReportWorker, ReportRefinementWorker
 from src.app.workers import report_common
 from src.common.llm.base import BaseLLMProvider
@@ -30,14 +37,6 @@ def qt_app() -> QApplication:
     if app is None:
         app = QApplication([])
     return app
-
-
-class _StubSettings:
-    def get_api_key(self, provider: str) -> str | None:  # noqa: ARG002
-        return None
-
-    def get(self, key: str, default: object = None) -> object:  # noqa: ARG002
-        return default
 
 
 class _StubProvider(BaseLLMProvider):
@@ -89,6 +88,9 @@ class _NoNativeBackend(LLMExecutionBackend):
     def requires_native_provider(self) -> bool:
         return False
 
+    def create_provider(self, request: LLMProviderRequest) -> object:
+        return ProviderMetadata(provider_name=request.provider_id, default_model=request.model or "default-model")
+
     def invoke(self, provider, request: LLMInvocationRequest) -> LLMInvocationResult:  # noqa: ANN001
         return LLMInvocationResult(
             success=True,
@@ -108,6 +110,9 @@ class _ResultBackend(LLMExecutionBackend):
     def requires_native_provider(self) -> bool:
         return False
 
+    def create_provider(self, request: LLMProviderRequest) -> object:
+        return ProviderMetadata(provider_name=request.provider_id, default_model=request.model or "default-model")
+
     def invoke(self, provider, request: LLMInvocationRequest) -> LLMInvocationResult:  # noqa: ANN001
         _ = provider, request
         return self._result
@@ -120,6 +125,9 @@ class _CapturingBackend(LLMExecutionBackend):
 
     def requires_native_provider(self) -> bool:
         return False
+
+    def create_provider(self, request: LLMProviderRequest) -> object:
+        return ProviderMetadata(provider_name=request.provider_id, default_model=request.model or "default-model")
 
     def invoke(self, provider, request: LLMInvocationRequest) -> LLMInvocationResult:  # noqa: ANN001
         _ = provider
@@ -169,8 +177,7 @@ def _write_system_prompt(path: Path, message: str) -> None:
 
 
 def _patch_worker_dependencies(monkeypatch: pytest.MonkeyPatch, provider: _StubProvider) -> None:
-    monkeypatch.setattr(report_common, "create_provider", lambda **_: provider, raising=False)
-    monkeypatch.setattr(report_common, "SecureSettings", lambda: _StubSettings(), raising=False)
+    monkeypatch.setattr(LegacyProviderBackend, "create_provider", lambda self, request: provider)
 
 
 def _prepare_common_files(project_dir: Path) -> tuple[Path, Path, Path, Path]:
@@ -556,10 +563,11 @@ def test_gateway_backend_path_skips_native_provider_initialization(
         generation_system_prompt_path,
     ) = common_paths
 
-    def _fail_create_provider(**_kwargs):  # noqa: ANN001
+    def _fail_create_provider(self, request):  # noqa: ANN001
+        _ = self, request
         raise AssertionError("create_provider should not be called for no-native backends")
 
-    monkeypatch.setattr(report_common, "create_provider", _fail_create_provider, raising=False)
+    monkeypatch.setattr(LegacyProviderBackend, "create_provider", _fail_create_provider)
 
     worker = DraftReportWorker(
         project_dir=tmp_path,

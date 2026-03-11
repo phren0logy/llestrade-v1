@@ -21,7 +21,14 @@ from src.app.core.report_inputs import REPORT_CATEGORY_CONVERTED
 from src.app.workers import bulk_analysis_worker, bulk_reduce_worker, report_common, report_worker
 from src.app.workers.bulk_analysis_worker import BulkAnalysisWorker
 from src.app.workers.bulk_reduce_worker import BulkReduceWorker
-from src.app.workers.llm_backend import LLMExecutionBackend, LLMInvocationRequest, LLMInvocationResult
+from src.app.workers.llm_backend import (
+    LLMExecutionBackend,
+    LLMInvocationRequest,
+    LLMInvocationResult,
+    LLMProviderRequest,
+    LegacyProviderBackend,
+    ProviderMetadata,
+)
 from src.app.workers.report_worker import DraftReportWorker, ReportRefinementWorker
 from src.common.llm.base import BaseLLMProvider
 from src.common.llm.tokens import TokenCounter
@@ -93,6 +100,9 @@ class _SequenceGatewayBackend(LLMExecutionBackend):
 
     def requires_native_provider(self) -> bool:
         return False
+
+    def create_provider(self, request: LLMProviderRequest) -> object:
+        return ProviderMetadata(provider_name=request.provider_id, default_model=request.model or "default-model")
 
     def invoke(self, provider, request: LLMInvocationRequest) -> LLMInvocationResult:  # noqa: ANN001
         _ = provider, request
@@ -304,7 +314,7 @@ def _run_report_pipeline(
                 {"success": True, "content": "Section output 2", "usage": {"output_tokens": 102}},
             ]
         )
-        monkeypatch.setattr(report_common, "create_provider", lambda **_: draft_provider, raising=False)
+        monkeypatch.setattr(LegacyProviderBackend, "create_provider", lambda self, request: draft_provider)
         draft_backend = None
     else:
         draft_backend = _SequenceGatewayBackend(
@@ -353,7 +363,7 @@ def _run_report_pipeline(
                 }
             ]
         )
-        monkeypatch.setattr(report_common, "create_provider", lambda **_: refine_provider, raising=False)
+        monkeypatch.setattr(LegacyProviderBackend, "create_provider", lambda self, request: refine_provider)
         refine_backend = None
     else:
         refine_backend = _SequenceGatewayBackend(
@@ -417,7 +427,7 @@ def _run_bulk_map(
 
     if legacy:
         provider = _SequenceLegacyProvider([{"success": True, "content": "summary", "usage": {"output_tokens": 7}}])
-        monkeypatch.setattr(bulk_analysis_worker, "create_provider", lambda **_: provider, raising=False)
+        monkeypatch.setattr(LegacyProviderBackend, "create_provider", lambda self, request: provider)
         llm_backend = None
     else:
         llm_backend = _SequenceGatewayBackend([_gateway_result("summary", output_tokens=7)])
@@ -453,7 +463,7 @@ def _run_bulk_reduce(
 
     if legacy:
         provider = _SequenceLegacyProvider([{"success": True, "content": "summary", "usage": {"output_tokens": 7}}])
-        monkeypatch.setattr(bulk_reduce_worker, "create_provider", lambda **_: provider, raising=False)
+        monkeypatch.setattr(LegacyProviderBackend, "create_provider", lambda self, request: provider)
         llm_backend = None
     else:
         llm_backend = _SequenceGatewayBackend([_gateway_result("summary", output_tokens=7)])

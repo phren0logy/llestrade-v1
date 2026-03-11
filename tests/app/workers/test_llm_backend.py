@@ -13,6 +13,7 @@ from pydantic_ai.usage import RequestUsage
 from src.app.workers.llm_backend import (
     LLMInvocationRequest,
     LLMInvocationResult,
+    LLMProviderRequest,
     LegacyProviderBackend,
     PydanticAIGatewayBackend,
     ProviderMetadata,
@@ -110,6 +111,65 @@ def test_invocation_result_normalizes_non_dict_usage() -> None:
     assert result.success is True
     assert result.content == "ok"
     assert result.usage == {}
+
+
+def test_legacy_provider_backend_create_provider_loads_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    class _StubSettings:
+        def get_api_key(self, provider_id: str) -> str | None:
+            assert provider_id == "azure_openai"
+            return "azure-key"
+
+        def get(self, key: str, default: object = None) -> object:
+            if key == "azure_openai_settings":
+                return {"endpoint": "https://azure.example.com", "api_version": "2025-01-01-preview"}
+            return default
+
+    class _InitializedProvider:
+        initialized = True
+
+    def _fake_create_provider(**kwargs: Any) -> object:
+        captured.update(kwargs)
+        return _InitializedProvider()
+
+    monkeypatch.setattr("src.app.core.secure_settings.SecureSettings", _StubSettings)
+    monkeypatch.setattr("src.common.llm.factory.create_provider", _fake_create_provider)
+
+    backend = LegacyProviderBackend()
+    provider = backend.create_provider(
+        LLMProviderRequest(
+            provider_id="azure_openai",
+            model="gpt-4.1",
+            system_prompt="System prompt",
+        )
+    )
+
+    assert getattr(provider, "initialized", False) is True
+    assert captured == {
+        "provider": "azure_openai",
+        "default_system_prompt": "System prompt",
+        "api_key": "azure-key",
+        "azure_endpoint": "https://azure.example.com",
+        "api_version": "2025-01-01-preview",
+    }
+
+
+def test_gateway_backend_create_provider_returns_metadata() -> None:
+    backend = PydanticAIGatewayBackend(api_key="gateway-key")
+
+    provider = backend.create_provider(
+        LLMProviderRequest(
+            provider_id="anthropic",
+            model="claude-sonnet-4-5",
+            system_prompt="System prompt",
+        )
+    )
+
+    assert provider == ProviderMetadata(
+        provider_name="anthropic",
+        default_model="claude-sonnet-4-5",
+    )
 
 
 def test_gateway_backend_success_normalizes_response(monkeypatch: pytest.MonkeyPatch) -> None:

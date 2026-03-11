@@ -8,13 +8,22 @@ import pytest
 from src.app.core.project_manager import ProjectMetadata
 from src.app.core.bulk_analysis_groups import BulkAnalysisGroup
 from src.app.workers import bulk_reduce_worker as reduce_module
-from src.app.workers.llm_backend import LLMExecutionBackend, LLMInvocationRequest, LLMInvocationResult
+from src.app.workers.llm_backend import (
+    LLMExecutionBackend,
+    LLMInvocationRequest,
+    LLMInvocationResult,
+    LLMProviderRequest,
+    ProviderMetadata,
+)
 from src.app.workers.bulk_reduce_worker import BulkReduceWorker, ProviderConfig
 
 
 class _NoNativeBackend(LLMExecutionBackend):
     def requires_native_provider(self) -> bool:
         return False
+
+    def create_provider(self, request: LLMProviderRequest) -> object:
+        return ProviderMetadata(provider_name=request.provider_id, default_model=request.model or "default-model")
 
     def invoke(self, provider, request: LLMInvocationRequest) -> LLMInvocationResult:  # noqa: ANN001
         return LLMInvocationResult(
@@ -35,6 +44,9 @@ class _ResultBackend(LLMExecutionBackend):
     def requires_native_provider(self) -> bool:
         return False
 
+    def create_provider(self, request: LLMProviderRequest) -> object:
+        return ProviderMetadata(provider_name=request.provider_id, default_model=request.model or "default-model")
+
     def invoke(self, provider, request: LLMInvocationRequest) -> LLMInvocationResult:  # noqa: ANN001
         _ = provider, request
         return self._result
@@ -47,6 +59,9 @@ class _CapturingBackend(LLMExecutionBackend):
 
     def requires_native_provider(self) -> bool:
         return False
+
+    def create_provider(self, request: LLMProviderRequest) -> object:
+        return ProviderMetadata(provider_name=request.provider_id, default_model=request.model or "default-model")
 
     def invoke(self, provider, request: LLMInvocationRequest) -> LLMInvocationResult:  # noqa: ANN001
         _ = provider

@@ -60,6 +60,15 @@ class ProviderMetadata:
     default_model: str
 
 
+@dataclass(frozen=True, slots=True)
+class LLMProviderRequest:
+    """Typed contract for initializing a provider or provider metadata."""
+
+    provider_id: str
+    model: Optional[str]
+    system_prompt: Optional[str]
+
+
 def default_model_for_provider(provider_id: str) -> str:
     """Return a stable fallback model when native providers are not initialized."""
     defaults = {
@@ -78,6 +87,9 @@ class LLMExecutionBackend(Protocol):
     def requires_native_provider(self) -> bool:
         """Whether worker code must initialize a native provider client."""
 
+    def create_provider(self, request: LLMProviderRequest) -> object:
+        """Return a provider handle suitable for `invoke`."""
+
     def count_input_tokens(self, provider: Any, request: LLMInvocationRequest) -> int | None:
         """Return input token count when the backend can measure it."""
 
@@ -90,6 +102,34 @@ class LegacyProviderBackend:
 
     def requires_native_provider(self) -> bool:
         return True
+
+    def create_provider(self, request: LLMProviderRequest) -> object:
+        from src.app.core.secure_settings import SecureSettings
+        from src.common.llm.factory import create_provider
+
+        settings = SecureSettings()
+        provider_id = request.provider_id
+        api_key = settings.get_api_key(provider_id)
+        kwargs: Dict[str, Any] = {
+            "provider": provider_id,
+            "default_system_prompt": request.system_prompt,
+            "api_key": api_key,
+        }
+        if provider_id == "azure_openai":
+            azure_settings = settings.get("azure_openai_settings", {}) or {}
+            kwargs["azure_endpoint"] = azure_settings.get("endpoint")
+            kwargs["api_version"] = azure_settings.get("api_version")
+        elif provider_id == "anthropic_bedrock":
+            bedrock_settings = settings.get("aws_bedrock_settings", {}) or {}
+            kwargs["aws_region"] = bedrock_settings.get("region") or os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION")
+            kwargs["aws_profile"] = bedrock_settings.get("profile")
+
+        provider = create_provider(**kwargs)
+        if provider is None or not getattr(provider, "initialized", False):
+            raise RuntimeError(
+                f"Unable to initialise provider '{provider_id}'. Check API keys and model configuration in Settings."
+            )
+        return provider
 
     def count_input_tokens(self, provider: Any, request: LLMInvocationRequest) -> int | None:
         count_tokens = getattr(provider, "count_tokens", None)
@@ -213,6 +253,12 @@ class PydanticAIGatewayBackend:
 
     def requires_native_provider(self) -> bool:
         return False
+
+    def create_provider(self, request: LLMProviderRequest) -> object:
+        return ProviderMetadata(
+            provider_name=request.provider_id,
+            default_model=request.model or default_model_for_provider(request.provider_id),
+        )
 
     def count_input_tokens(self, provider: Any, request: LLMInvocationRequest) -> int | None:
         provider_id = self._resolve_provider_id(provider)
@@ -586,6 +632,7 @@ class PydanticAIGatewayBackend:
 __all__ = [
     "ProviderMetadata",
     "LLMExecutionBackend",
+    "LLMProviderRequest",
     "LLMInvocationRequest",
     "LLMInvocationResult",
     "LegacyProviderBackend",

@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
-import os
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -32,10 +31,8 @@ from src.app.core.citations import CitationRecordStats, CitationStore
 from src.app.core.bulk_prompt_context import build_bulk_placeholders
 from src.app.core.placeholders.system import SourceFileContext
 from src.app.core.project_manager import ProjectMetadata
-from src.app.core.secure_settings import SecureSettings
 from src.common.llm.base import BaseLLMProvider
 from src.common.llm.budgets import compute_input_token_budget
-from src.common.llm.factory import create_provider
 from src.common.llm.tokens import TokenCounter
 from src.config.observability import trace_operation
 from src.common.markdown import (
@@ -52,9 +49,8 @@ from .checkpoint_manager import CheckpointManager, _sha256
 from .llm_backend import (
     LLMExecutionBackend,
     LLMInvocationRequest,
+    LLMProviderRequest,
     LegacyProviderBackend,
-    ProviderMetadata,
-    default_model_for_provider,
 )
 from .stage_contracts import BulkMapStageInput, stage_trace_attributes
 
@@ -1025,36 +1021,13 @@ class BulkAnalysisWorker(DashboardWorker):
         config: ProviderConfig,
         system_prompt: str,
     ) -> object:
-        if not self._llm_backend.requires_native_provider():
-            return ProviderMetadata(
-                provider_name=config.provider_id,
-                default_model=config.model or default_model_for_provider(config.provider_id),
+        return self._llm_backend.create_provider(
+            LLMProviderRequest(
+                provider_id=config.provider_id,
+                model=config.model,
+                system_prompt=system_prompt,
             )
-
-        settings = SecureSettings()
-        api_key = settings.get_api_key(config.provider_id)
-        kwargs = {
-            "provider": config.provider_id,
-            "default_system_prompt": system_prompt,
-            "api_key": api_key,
-        }
-
-        if config.provider_id == "azure_openai":
-            azure_settings = settings.get("azure_openai_settings", {}) or {}
-            kwargs["azure_endpoint"] = azure_settings.get("endpoint")
-            kwargs["api_version"] = azure_settings.get("api_version")
-        elif config.provider_id == "anthropic_bedrock":
-            bedrock_settings = settings.get("aws_bedrock_settings", {}) or {}
-            kwargs["aws_region"] = bedrock_settings.get("region") or os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION")
-            kwargs["aws_profile"] = bedrock_settings.get("profile")
-
-        provider = create_provider(**kwargs)
-        if provider is None or not getattr(provider, "initialized", False):
-            raise RuntimeError(
-                f"Unable to initialise provider '{config.provider_id}'. "
-                "Check API keys and model configuration in Settings."
-            )
-        return provider
+        )
 
     def _build_summary_metadata(
         self,

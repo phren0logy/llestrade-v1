@@ -21,7 +21,13 @@ from src.app.workers.bulk_analysis_worker import (
     _save_manifest,
     _should_process_document,
 )
-from src.app.workers.llm_backend import LLMExecutionBackend, LLMInvocationRequest, LLMInvocationResult
+from src.app.workers.llm_backend import (
+    LLMExecutionBackend,
+    LLMInvocationRequest,
+    LLMInvocationResult,
+    LLMProviderRequest,
+    ProviderMetadata,
+)
 
 
 class _FakeProvider:
@@ -40,6 +46,9 @@ class _FakeProvider:
 class _NoNativeBackend(LLMExecutionBackend):
     def requires_native_provider(self) -> bool:
         return False
+
+    def create_provider(self, request: LLMProviderRequest) -> object:
+        return ProviderMetadata(provider_name=request.provider_id, default_model=request.model or "default-model")
 
     def invoke(self, provider, request: LLMInvocationRequest) -> LLMInvocationResult:  # noqa: ANN001
         return LLMInvocationResult(
@@ -60,6 +69,9 @@ class _ResultBackend(LLMExecutionBackend):
     def requires_native_provider(self) -> bool:
         return False
 
+    def create_provider(self, request: LLMProviderRequest) -> object:
+        return ProviderMetadata(provider_name=request.provider_id, default_model=request.model or "default-model")
+
     def invoke(self, provider, request: LLMInvocationRequest) -> LLMInvocationResult:  # noqa: ANN001
         _ = provider, request
         return self._result
@@ -72,6 +84,9 @@ class _CountingBackend(LLMExecutionBackend):
 
     def requires_native_provider(self) -> bool:
         return False
+
+    def create_provider(self, request: LLMProviderRequest) -> object:
+        return ProviderMetadata(provider_name=request.provider_id, default_model=request.model or "default-model")
 
     def count_input_tokens(self, provider, request: LLMInvocationRequest) -> int | None:  # noqa: ANN001
         _ = provider, request
