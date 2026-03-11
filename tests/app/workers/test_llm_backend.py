@@ -5,6 +5,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any, Dict
 
+import httpx
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart
 from pydantic_ai.usage import RequestUsage
@@ -587,8 +588,18 @@ def test_gateway_backend_build_model_uses_canonical_gateway_model_ids(
         "route": "llestrade",
         "api_key": "gateway-key",
         "base_url": "https://gateway.example.com",
-        "http_client": None,
+        "http_client": backend._gateway_http_client(),
     }
+    assert captured["provider"]["http_client"] is not None
+
+
+def test_gateway_backend_only_marks_transient_gateway_statuses_for_retry() -> None:
+    retryable = httpx.Response(429, request=httpx.Request("POST", "https://gateway.example.com"))
+    with pytest.raises(httpx.HTTPStatusError):
+        PydanticAIGatewayBackend._raise_for_retryable_gateway_response(retryable)
+
+    non_retryable = httpx.Response(400, request=httpx.Request("POST", "https://gateway.example.com"))
+    PydanticAIGatewayBackend._raise_for_retryable_gateway_response(non_retryable)
 
 
 def test_gateway_backend_returns_error_when_provider_metadata_is_missing() -> None:

@@ -153,6 +153,9 @@ class PydanticAIGatewayBackend:
         "frequency_penalty",
         "reasoning_effort",
     )
+    _RETRYABLE_STATUS_CODES: frozenset[int] = frozenset({408, 425, 429, 500, 502, 503, 504})
+    _GATEWAY_RETRY_ATTEMPTS = 3
+    _GATEWAY_RETRY_MAX_WAIT_SECONDS = 30.0
 
     def __init__(
         self,
@@ -178,6 +181,7 @@ class PydanticAIGatewayBackend:
         self._route = route or os.getenv("PYDANTIC_AI_GATEWAY_ROUTE")
         self._fallback_backend = fallback_backend
         self._fallback_on_error = fallback_on_error
+        self._http_client: Any | None = None
 
     @staticmethod
     def _load_base_url_from_settings() -> str | None:
@@ -402,7 +406,41 @@ class PydanticAIGatewayBackend:
             api_key=self._api_key,
             base_url=self._base_url,
             route=self._route,
+            http_client=self._gateway_http_client(),
         )
+
+    def _gateway_http_client(self) -> Any | None:
+        if self._http_client is not None:
+            return self._http_client
+
+        self._http_client = self._build_gateway_http_client()
+        return self._http_client
+
+    def _build_gateway_http_client(self) -> Any | None:
+        try:
+            from httpx import AsyncClient, HTTPStatusError, TimeoutException, TransportError
+            from pydantic_ai.retries import AsyncTenacityTransport, wait_retry_after
+            from tenacity import retry_if_exception_type, stop_after_attempt
+        except ImportError:
+            logger.debug("Gateway retry transport unavailable; using default Pydantic AI HTTP client", exc_info=True)
+            return None
+
+        retry_transport = AsyncTenacityTransport(
+            {
+                "retry": retry_if_exception_type((HTTPStatusError, TimeoutException, TransportError)),
+                "wait": wait_retry_after(max_wait=self._GATEWAY_RETRY_MAX_WAIT_SECONDS),
+                "stop": stop_after_attempt(self._GATEWAY_RETRY_ATTEMPTS),
+                "reraise": True,
+            },
+            validate_response=self._raise_for_retryable_gateway_response,
+        )
+        return AsyncClient(transport=retry_transport)
+
+    @classmethod
+    def _raise_for_retryable_gateway_response(cls, response: Any) -> None:
+        status_code = int(getattr(response, "status_code", 0) or 0)
+        if status_code in cls._RETRYABLE_STATUS_CODES:
+            response.raise_for_status()
 
     @classmethod
     def _gateway_model_id(cls, *, provider_id: str, model_name: str) -> str:
