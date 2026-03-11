@@ -96,6 +96,15 @@ class SecureSettings(QObject):
             "pydantic_ai_gateway_settings": {
                 "base_url": None,
             },
+            "phoenix_settings": {
+                "enabled": False,
+                "target": "local_phoenix",
+                "port": 6006,
+                "project": "forensic-report-drafter",
+                "export_fixtures": False,
+                "content_policy": "unredacted",
+                "include_binary_content": False,
+            },
             "aws_bedrock_settings": {
                 "profile": None,
                 "region": None,

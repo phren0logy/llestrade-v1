@@ -21,6 +21,11 @@ from src.common.llm.providers import AnthropicBedrockProvider
 
 class APIKeyDialog(QDialog):
     """Dialog for configuring API keys and service endpoints."""
+
+    _PHOENIX_CONTENT_POLICIES = (
+        ("Unredacted (Local Phoenix)", "unredacted"),
+        ("Redacted", "redacted"),
+    )
     
     def __init__(self, settings, parent=None):
         super().__init__(parent)
@@ -432,12 +437,36 @@ class APIKeyDialog(QDialog):
             "Automatically save LLM responses as test fixtures for mocking"
         )
         phoenix_layout.addWidget(self.phoenix_export_fixtures)
-        
+
+        policy_layout = QFormLayout()
+        self.phoenix_content_policy = QComboBox()
+        for label, value in self._PHOENIX_CONTENT_POLICIES:
+            self.phoenix_content_policy.addItem(label, value)
+        self.phoenix_content_policy.setToolTip(
+            "Choose whether model instrumentation includes full prompt/response text."
+        )
+        policy_layout.addRow("Content Policy:", self.phoenix_content_policy)
+        phoenix_layout.addLayout(policy_layout)
+
+        self.phoenix_include_binary_content = QCheckBox("Include binary/multimodal content")
+        self.phoenix_include_binary_content.setToolTip(
+            "Include binary or multimodal payload bodies in model instrumentation."
+        )
+        phoenix_layout.addWidget(self.phoenix_include_binary_content)
+
+        self.phoenix_policy_note = QLabel(
+            "Unredacted traces are appropriate for trusted local Phoenix deployments. "
+            "Use redacted traces if you later forward telemetry to a remote OTEL backend."
+        )
+        self.phoenix_policy_note.setWordWrap(True)
+        phoenix_layout.addWidget(self.phoenix_policy_note)
+
         # Store config fields
         self.config_fields["phoenix_enabled"] = self.phoenix_enabled
         self.config_fields["phoenix_port"] = self.phoenix_port
         self.config_fields["phoenix_project"] = self.phoenix_project
         self.config_fields["phoenix_export_fixtures"] = self.phoenix_export_fixtures
+        self.config_fields["phoenix_content_policy"] = self.phoenix_content_policy
         
         # Help text
         help_text = QLabel('<a href="https://phoenix.arize.com/">Learn more about Phoenix →</a>')
@@ -509,6 +538,12 @@ class APIKeyDialog(QDialog):
         self.phoenix_export_fixtures.setChecked(
             phoenix_settings.get("export_fixtures", False)
         )
+        content_policy = str(phoenix_settings.get("content_policy") or "unredacted").strip().lower()
+        policy_index = self.phoenix_content_policy.findData(content_policy)
+        self.phoenix_content_policy.setCurrentIndex(policy_index if policy_index >= 0 else 0)
+        self.phoenix_include_binary_content.setChecked(
+            bool(phoenix_settings.get("include_binary_content", False))
+        )
     
     def save_keys(self):
         """Save API keys and settings to secure storage."""
@@ -579,9 +614,12 @@ class APIKeyDialog(QDialog):
         # Save Phoenix settings
         phoenix_settings = {
             "enabled": self.phoenix_enabled.isChecked(),
+            "target": "local_phoenix",
             "port": int(self.phoenix_port.text() or 6006),
             "project": self.phoenix_project.text().strip() or "forensic-report-drafter",
-            "export_fixtures": self.phoenix_export_fixtures.isChecked()
+            "export_fixtures": self.phoenix_export_fixtures.isChecked(),
+            "content_policy": self.phoenix_content_policy.currentData() or "unredacted",
+            "include_binary_content": self.phoenix_include_binary_content.isChecked(),
         }
         self.settings.set("phoenix_settings", phoenix_settings)
         
