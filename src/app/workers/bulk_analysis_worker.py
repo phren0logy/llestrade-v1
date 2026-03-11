@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import inspect
 import json
 import re
 from dataclasses import dataclass
@@ -233,7 +232,6 @@ class BulkAnalysisWorker(DashboardWorker):
         self._project_name = project_name
         self._run_timestamp = datetime.now(timezone.utc)
         self._llm_backend: LLMExecutionBackend = llm_backend or LegacyProviderBackend()
-        self._invoke_compat_warning_emitted = False
         try:
             self._citation_store: CitationStore | None = CitationStore(project_dir)
         except Exception:
@@ -588,7 +586,7 @@ class BulkAnalysisWorker(DashboardWorker):
 
         if not needs_chunking:
             run_details["chunk_count"] = 1
-            result = self._invoke_provider_compat(
+            result = self._invoke_provider(
                 provider,
                 provider_config,
                 full_prompt,
@@ -616,7 +614,7 @@ class BulkAnalysisWorker(DashboardWorker):
         if not chunks:
             run_details["chunk_count"] = 1
             run_details["chunking"] = False
-            result = self._invoke_provider_compat(
+            result = self._invoke_provider(
                 provider,
                 provider_config,
                 full_prompt,
@@ -687,7 +685,7 @@ class BulkAnalysisWorker(DashboardWorker):
                     content=chunk,
                 )
                 chunk_prompt = self._append_citation_ledger(chunk_prompt, chunk_ledger)
-                summary = self._invoke_provider_compat(
+                summary = self._invoke_provider(
                     provider,
                     provider_config,
                     chunk_prompt,
@@ -710,7 +708,7 @@ class BulkAnalysisWorker(DashboardWorker):
             chunk_summaries.append(summary)
 
         def invoke_combine(prompt: str) -> str:
-            return self._invoke_provider_compat(
+            return self._invoke_provider(
                 provider,
                 provider_config,
                 prompt,
@@ -837,7 +835,7 @@ class BulkAnalysisWorker(DashboardWorker):
                     content=chunk,
                 )
                 prompt = self._append_citation_ledger(prompt, chunk_ledger)
-                prompt_tokens = self._count_prompt_tokens_compat(
+                prompt_tokens = self._count_prompt_tokens(
                     provider,
                     provider_config,
                     system_prompt,
@@ -864,96 +862,6 @@ class BulkAnalysisWorker(DashboardWorker):
                 f"Reducing chunk target for {document.relative_path}: {previous_target} -> {chunk_target} tokens"
             )
 
-    def _invoke_provider_compat(
-        self,
-        provider: BaseLLMProvider,
-        provider_config: ProviderConfig,
-        prompt: str,
-        system_prompt: str,
-        **kwargs: object,
-    ) -> str:
-        """Call `_invoke_provider` while tolerating stale test/debug overrides.
-
-        Some tests monkeypatch `_invoke_provider` with simplified call signatures.
-        This adapter drops unsupported keyword arguments (for example
-        `input_budget`) when the override does not accept them.
-        """
-        invoke = self._invoke_provider
-        call_kwargs = dict(kwargs)
-        dropped: list[str] = []
-
-        try:
-            signature = inspect.signature(invoke)
-        except (TypeError, ValueError):
-            signature = None
-
-        if signature is not None:
-            accepts_var_kw = any(
-                param.kind == inspect.Parameter.VAR_KEYWORD
-                for param in signature.parameters.values()
-            )
-            if not accepts_var_kw:
-                accepted = {
-                    name
-                    for name, param in signature.parameters.items()
-                    if param.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
-                }
-                dropped = sorted(key for key in call_kwargs if key not in accepted)
-                for key in dropped:
-                    call_kwargs.pop(key, None)
-
-        if dropped and not self._invoke_compat_warning_emitted:
-            self._invoke_compat_warning_emitted = True
-            self.logger.warning(
-                "%s _invoke_provider override dropped unsupported kwargs: %s",
-                self.job_tag,
-                ", ".join(dropped),
-            )
-
-        return invoke(
-            provider,
-            provider_config,
-            prompt,
-            system_prompt,
-            **call_kwargs,
-        )
-
-    def _count_prompt_tokens_compat(
-        self,
-        provider: BaseLLMProvider,
-        provider_config: ProviderConfig,
-        system_prompt: str,
-        user_prompt: str,
-        *,
-        max_tokens: int = _DEFAULT_MAX_OUTPUT_TOKENS,
-    ) -> int:
-        count_fn = self._count_prompt_tokens
-        try:
-            signature = inspect.signature(count_fn)
-        except (TypeError, ValueError):
-            signature = None
-
-        if signature is not None:
-            accepts_var_kw = any(
-                param.kind == inspect.Parameter.VAR_KEYWORD
-                for param in signature.parameters.values()
-            )
-            if not accepts_var_kw and "max_tokens" not in signature.parameters:
-                return count_fn(  # type: ignore[misc]
-                    provider,
-                    provider_config,
-                    system_prompt,
-                    user_prompt,
-                )
-
-        return count_fn(
-            provider,
-            provider_config,
-            system_prompt,
-            user_prompt,
-            max_tokens=max_tokens,
-        )
-
     def _invoke_provider(
         self,
         provider: BaseLLMProvider,
@@ -970,7 +878,7 @@ class BulkAnalysisWorker(DashboardWorker):
             raise BulkAnalysisCancelled
 
         if input_budget is not None:
-            prompt_tokens = self._count_prompt_tokens_compat(
+            prompt_tokens = self._count_prompt_tokens(
                 provider,
                 provider_config,
                 system_prompt,
