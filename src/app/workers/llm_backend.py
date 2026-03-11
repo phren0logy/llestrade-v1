@@ -311,6 +311,33 @@ def _check_after_response(*, response: Any, usage_limits: Any) -> None:
     usage_limits.check_tokens(usage)
 
 
+def _invoke_model_response_sync(
+    *,
+    model: Any,
+    request: LLMInvocationRequest,
+    provider_id: str,
+    count_input_tokens_fn: Any,
+) -> Any:
+    from pydantic_ai.direct import model_request_sync
+
+    usage_limits = _usage_limits_for_request(provider_id=provider_id, request=request)
+    if usage_limits is not None:
+        _check_before_request(
+            usage_limits=usage_limits,
+            count_input_tokens_fn=count_input_tokens_fn,
+        )
+
+    response = model_request_sync(
+        model,
+        _build_messages(request),
+        model_settings=_build_model_settings(request),
+        instrument=_pydantic_ai_instrumentation(),
+    )
+    if usage_limits is not None:
+        _check_after_response(response=response, usage_limits=usage_limits)
+    return response
+
+
 class LLMExecutionBackend(Protocol):
     """Contract for pluggable LLM execution backends."""
 
@@ -325,6 +352,9 @@ class LLMExecutionBackend(Protocol):
 
     def count_input_tokens(self, provider: Any, request: LLMInvocationRequest) -> int | None:
         """Return input token count when the backend can measure it."""
+
+    def invoke_response(self, provider: Any, request: LLMInvocationRequest) -> Any:
+        """Execute `request` and return the raw Pydantic AI `ModelResponse`."""
 
     def invoke(self, provider: Any, request: LLMInvocationRequest) -> LLMInvocationResult:
         """Execute `request` against the given provider."""
@@ -359,6 +389,11 @@ class PydanticAIDirectBackend:
         if not isinstance(provider, DirectProviderMetadata):
             return None
         return self._count_input_tokens_direct(provider, request)
+
+    def invoke_response(self, provider: Any, request: LLMInvocationRequest) -> Any:
+        if not isinstance(provider, DirectProviderMetadata):
+            raise RuntimeError("Direct provider backend requires DirectProviderMetadata")
+        return self._invoke_direct_response(provider, request)
 
     def invoke(self, provider: Any, request: LLMInvocationRequest) -> LLMInvocationResult:
         if not isinstance(provider, DirectProviderMetadata):
@@ -450,6 +485,21 @@ class PydanticAIDirectBackend:
             error_prefix="Direct provider token preflight failed",
         )
 
+    def _invoke_direct_response(
+        self,
+        provider: DirectProviderMetadata,
+        request: LLMInvocationRequest,
+    ) -> Any:
+        model_name = self.resolve_model(provider.app_provider_id, request.model or provider.default_model)
+        if not model_name:
+            raise RuntimeError("No model configured for direct provider backend")
+        return _invoke_model_response_sync(
+            model=self._build_direct_model(provider=provider, model_name=model_name),
+            request=request,
+            provider_id=provider.app_provider_id,
+            count_input_tokens_fn=lambda: self._count_input_tokens_direct(provider, request),
+        )
+
     def _invoke_direct(
         self,
         provider: DirectProviderMetadata,
@@ -463,31 +513,11 @@ class PydanticAIDirectBackend:
                 error="No model configured for direct provider backend",
                 usage={},
                 provider=provider.app_provider_id,
-                model=request.model,
+                model=model_name,
                 raw={},
             )
-
         try:
-            from pydantic_ai.direct import model_request_sync
-
-            usage_limits = _usage_limits_for_request(
-                provider_id=provider.app_provider_id,
-                request=request,
-            )
-            if usage_limits is not None:
-                _check_before_request(
-                    usage_limits=usage_limits,
-                    count_input_tokens_fn=lambda: self._count_input_tokens_direct(provider, request),
-                )
-
-            response = model_request_sync(
-                self._build_direct_model(provider=provider, model_name=model_name),
-                _build_messages(request),
-                model_settings=_build_model_settings(request),
-                instrument=_pydantic_ai_instrumentation(),
-            )
-            if usage_limits is not None:
-                _check_after_response(response=response, usage_limits=usage_limits)
+            response = self._invoke_direct_response(provider, request)
             return _success_result_from_response(
                 response=response,
                 provider_name=provider.app_provider_id,
@@ -625,6 +655,25 @@ class PydanticAIGatewayBackend:
             error_prefix="Gateway token preflight failed",
         )
 
+    def invoke_response(self, provider: Any, request: LLMInvocationRequest) -> Any:
+        provider_id = self._resolve_provider_id(provider)
+        if not provider_id:
+            raise RuntimeError("Unable to resolve provider ID for Gateway backend")
+
+        model_name = self.resolve_model(
+            provider_id,
+            request.model or self._resolve_default_model(provider),
+        )
+        if not model_name:
+            raise RuntimeError("No model configured for Gateway backend")
+
+        return _invoke_model_response_sync(
+            model=self._build_model(provider_id=provider_id, model_name=model_name),
+            request=request,
+            provider_id=provider_id,
+            count_input_tokens_fn=lambda: self.count_input_tokens(provider, request),
+        )
+
     def invoke(self, provider: Any, request: LLMInvocationRequest) -> LLMInvocationResult:
         provider_id = self._resolve_provider_id(provider)
         if not provider_id:
@@ -644,24 +693,7 @@ class PydanticAIGatewayBackend:
             )
 
         try:
-            model = self._build_model(provider_id=provider_id, model_name=model_name)
-            from pydantic_ai.direct import model_request_sync
-
-            usage_limits = _usage_limits_for_request(provider_id=provider_id, request=request)
-            if usage_limits is not None:
-                _check_before_request(
-                    usage_limits=usage_limits,
-                    count_input_tokens_fn=lambda: self.count_input_tokens(provider, request),
-                )
-
-            response = model_request_sync(
-                model,
-                _build_messages(request),
-                model_settings=_build_model_settings(request),
-                instrument=_pydantic_ai_instrumentation(),
-            )
-            if usage_limits is not None:
-                _check_after_response(response=response, usage_limits=usage_limits)
+            response = self.invoke_response(provider, request)
             return _success_result_from_response(
                 response=response,
                 provider_name=f"gateway/{provider_id}",

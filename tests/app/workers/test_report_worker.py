@@ -8,6 +8,8 @@ from pathlib import Path
 from textwrap import dedent
 
 import pytest
+from pydantic_ai.messages import ModelResponse, TextPart, ThinkingPart
+from pydantic_ai.usage import RequestUsage
 
 PySide6 = pytest.importorskip("PySide6")
 from PySide6.QtWidgets import QApplication
@@ -21,7 +23,6 @@ from src.app.workers import report_worker
 from src.app.workers.llm_backend import (
     LLMExecutionBackend,
     LLMInvocationRequest,
-    LLMInvocationResult,
     LLMProviderRequest,
     ProviderMetadata,
     normalize_model_name,
@@ -39,6 +40,24 @@ def qt_app() -> QApplication:
     return app
 
 
+def _model_response(
+    content: str,
+    *,
+    reasoning: str | None = None,
+    model_name: str = "claude-sonnet-4-5",
+    output_tokens: int = 1,
+) -> ModelResponse:
+    parts: list[object] = []
+    if reasoning:
+        parts.append(ThinkingPart(reasoning))
+    parts.append(TextPart(content))
+    return ModelResponse(
+        parts=parts,
+        usage=RequestUsage(input_tokens=1, output_tokens=output_tokens),
+        model_name=model_name,
+    )
+
+
 class _StubBackend(LLMExecutionBackend):
     def __init__(self) -> None:
         self._call_index = 0
@@ -53,7 +72,7 @@ class _StubBackend(LLMExecutionBackend):
     def create_provider(self, request: LLMProviderRequest) -> object:
         return ProviderMetadata(provider_name=request.provider_id, default_model=request.model or "default-model")
 
-    def invoke(self, provider, request: LLMInvocationRequest) -> LLMInvocationResult:  # noqa: ANN001
+    def invoke_response(self, provider, request: LLMInvocationRequest) -> ModelResponse:  # noqa: ANN001
         _ = provider
         self._call_index += 1
         if request.system_prompt:
@@ -65,15 +84,15 @@ class _StubBackend(LLMExecutionBackend):
         else:
             content = f"Section output {self._call_index}"
             reasoning = None
-        return LLMInvocationResult(
-            success=True,
-            content=content,
-            error=None,
-            usage={"output_tokens": 100 + self._call_index},
-            provider="anthropic",
-            model=request.model,
-            raw={"reasoning": reasoning} if reasoning else {},
+        return _model_response(
+            content,
+            reasoning=reasoning,
+            model_name=request.model or "claude-sonnet-4-5",
+            output_tokens=100 + self._call_index,
         )
+
+    def invoke(self, provider, request: LLMInvocationRequest):  # noqa: ANN001
+        raise NotImplementedError("Report worker tests use invoke_response()")
 
 
 class _NoNativeBackend(LLMExecutionBackend):
@@ -86,20 +105,20 @@ class _NoNativeBackend(LLMExecutionBackend):
     def create_provider(self, request: LLMProviderRequest) -> object:
         return ProviderMetadata(provider_name=request.provider_id, default_model=request.model or "default-model")
 
-    def invoke(self, provider, request: LLMInvocationRequest) -> LLMInvocationResult:  # noqa: ANN001
-        return LLMInvocationResult(
-            success=True,
-            content="stub output",
-            error=None,
-            usage={"output_tokens": 1},
-            provider="gateway/anthropic",
-            model=request.model,
-            raw={},
+    def invoke_response(self, provider, request: LLMInvocationRequest) -> ModelResponse:  # noqa: ANN001
+        _ = provider
+        return _model_response(
+            "stub output",
+            model_name=request.model or "claude-sonnet-4-5",
+            output_tokens=1,
         )
+
+    def invoke(self, provider, request: LLMInvocationRequest):  # noqa: ANN001
+        raise NotImplementedError("Report worker tests use invoke_response()")
 
 
 class _ResultBackend(LLMExecutionBackend):
-    def __init__(self, result: LLMInvocationResult) -> None:
+    def __init__(self, result: ModelResponse | Exception) -> None:
         self._result = result
 
     def normalize_model(self, provider_id: str, model: str | None) -> str | None:
@@ -111,13 +130,18 @@ class _ResultBackend(LLMExecutionBackend):
     def create_provider(self, request: LLMProviderRequest) -> object:
         return ProviderMetadata(provider_name=request.provider_id, default_model=request.model or "default-model")
 
-    def invoke(self, provider, request: LLMInvocationRequest) -> LLMInvocationResult:  # noqa: ANN001
+    def invoke_response(self, provider, request: LLMInvocationRequest) -> ModelResponse:  # noqa: ANN001
         _ = provider, request
+        if isinstance(self._result, Exception):
+            raise self._result
         return self._result
+
+    def invoke(self, provider, request: LLMInvocationRequest):  # noqa: ANN001
+        raise NotImplementedError("Report worker tests use invoke_response()")
 
 
 class _CapturingBackend(LLMExecutionBackend):
-    def __init__(self, result: LLMInvocationResult) -> None:
+    def __init__(self, result: ModelResponse | Exception) -> None:
         self._result = result
         self.requests: list[LLMInvocationRequest] = []
 
@@ -130,10 +154,15 @@ class _CapturingBackend(LLMExecutionBackend):
     def create_provider(self, request: LLMProviderRequest) -> object:
         return ProviderMetadata(provider_name=request.provider_id, default_model=request.model or "default-model")
 
-    def invoke(self, provider, request: LLMInvocationRequest) -> LLMInvocationResult:  # noqa: ANN001
+    def invoke_response(self, provider, request: LLMInvocationRequest) -> ModelResponse:  # noqa: ANN001
         _ = provider
         self.requests.append(request)
+        if isinstance(self._result, Exception):
+            raise self._result
         return self._result
+
+    def invoke(self, provider, request: LLMInvocationRequest):  # noqa: ANN001
+        raise NotImplementedError("Report worker tests use invoke_response()")
 
 
 def _capture_traces(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, dict[str, object] | None]]:
@@ -662,15 +691,7 @@ def test_report_draft_trace_attributes_match_between_legacy_and_gateway(
         generation_system_prompt_path=generation_system_prompt_path,
         metadata=ProjectMetadata(case_name="Case"),
         llm_backend=_ResultBackend(
-            LLMInvocationResult(
-                success=True,
-                content="stub output",
-                error=None,
-                usage={"output_tokens": 1},
-                provider="gateway/anthropic",
-                model="claude-sonnet-4-5",
-                raw={},
-            )
+            _model_response("stub output")
         ),
     )
     gateway_traces = _capture_traces(monkeypatch)
@@ -719,15 +740,7 @@ def test_report_draft_passes_computed_input_budget_to_backend(
     ) = common_paths
     section = TemplateSection(title="Section One", body="Describe the findings.")
     backend = _CapturingBackend(
-        LLMInvocationResult(
-            success=True,
-            content="stub output",
-            error=None,
-            usage={"output_tokens": 1},
-            provider="gateway/anthropic",
-            model="claude-sonnet-4-5",
-            raw={},
-        )
+        _model_response("stub output")
     )
     worker = DraftReportWorker(
         project_dir=tmp_path,
@@ -813,15 +826,7 @@ def test_report_refine_trace_attributes_match_between_legacy_and_gateway(
         refinement_system_prompt_path=refinement_system_prompt_path,
         metadata=ProjectMetadata(case_name="Case"),
         llm_backend=_ResultBackend(
-            LLMInvocationResult(
-                success=True,
-                content="stub output",
-                error=None,
-                usage={"output_tokens": 1},
-                provider="gateway/anthropic",
-                model="claude-sonnet-4-5",
-                raw={},
-            )
+            _model_response("stub output")
         ),
     )
     gateway_traces = _capture_traces(monkeypatch)
@@ -864,15 +869,7 @@ def test_report_refine_passes_computed_input_budget_to_backend(
     draft_path.parent.mkdir(parents=True, exist_ok=True)
     draft_path.write_text("---\n---\nDraft content", encoding="utf-8")
     backend = _CapturingBackend(
-        LLMInvocationResult(
-            success=True,
-            content="stub output",
-            error=None,
-            usage={"output_tokens": 1},
-            provider="gateway/anthropic",
-            model="claude-sonnet-4-5",
-            raw={},
-        )
+        _model_response("stub output")
     )
     worker = ReportRefinementWorker(
         project_dir=tmp_path,
@@ -930,17 +927,7 @@ def test_draft_worker_emits_failure_when_backend_returns_error(
         generation_user_prompt_path=generation_user_prompt_path,
         generation_system_prompt_path=generation_system_prompt_path,
         metadata=ProjectMetadata(case_name="Case"),
-        llm_backend=_ResultBackend(
-            LLMInvocationResult(
-                success=False,
-                content="",
-                error=message,
-                usage={},
-                provider="gateway/anthropic",
-                model="claude-sonnet-4-5",
-                raw={},
-            )
-        ),
+        llm_backend=_ResultBackend(RuntimeError(message)),
     )
 
     failures: list[str] = []
@@ -1002,15 +989,7 @@ def test_refinement_worker_emits_failure_when_backend_returns_empty_output(
         refinement_system_prompt_path=refinement_system_prompt_path,
         metadata=ProjectMetadata(case_name="Case"),
         llm_backend=_ResultBackend(
-            LLMInvocationResult(
-                success=True,
-                content="   ",
-                error=None,
-                usage={},
-                provider="gateway/anthropic",
-                model="claude-sonnet-4-5",
-                raw={},
-            )
+            _model_response("   ")
         ),
     )
 

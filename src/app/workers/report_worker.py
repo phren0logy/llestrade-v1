@@ -301,7 +301,7 @@ class DraftReportWorker(ReportWorkerBase):
             )
             trace_attributes = stage_trace_attributes(stage_input)
             with trace_operation("report_draft.invoke_llm", trace_attributes):
-                response = self._llm_backend.invoke(
+                response = self._llm_backend.invoke_response(
                     provider,
                     LLMInvocationRequest(
                         prompt=prompt,
@@ -316,11 +316,7 @@ class DraftReportWorker(ReportWorkerBase):
                         ),
                     ),
                 )
-            if not response.success:
-                raise RuntimeError(
-                    response.error or f"Failed to generate section: {section.title}"
-                )
-            content = response.content.strip()
+            content = str(response.text or "").strip()
             if not content:
                 raise RuntimeError(f"Generated section is empty: {section.title}")
             outputs.append(
@@ -681,7 +677,7 @@ class ReportRefinementWorker(ReportWorkerBase):
         )
         trace_attributes = stage_trace_attributes(stage_input)
         with trace_operation("report_refine.invoke_llm", trace_attributes):
-            response = self._llm_backend.invoke(
+            response = self._llm_backend.invoke_response(
                 provider,
                 LLMInvocationRequest(
                     prompt=prompt,
@@ -696,13 +692,11 @@ class ReportRefinementWorker(ReportWorkerBase):
                     ),
                 ),
             )
-        if not response.success:
-            raise RuntimeError(response.error or "Unknown error during refinement")
-        content = response.content.strip()
+        content = str(response.text or "").strip()
         if not content:
             raise RuntimeError("Refinement step returned empty content")
-        reasoning = response.raw.get("reasoning") or response.raw.get("thinking")
-        self._refine_usage = response.usage.get("output_tokens")
+        reasoning = response.thinking
+        self._refine_usage = int(getattr(response.usage, "output_tokens", 0) or 0)
         return content + "\n", reasoning
 
     def _build_refinement_manifest(

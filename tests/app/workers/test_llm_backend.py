@@ -219,6 +219,54 @@ def test_direct_provider_backend_direct_provider_uses_pydantic_ai_requests(
     assert captured["call"]["instrument"] == "instrumented"
 
 
+def test_direct_provider_backend_invoke_response_returns_model_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _fake_model_request_sync(
+        model: Any,
+        messages: Any,
+        *,
+        model_settings: Dict[str, Any],
+        model_request_parameters: Any = None,
+        instrument: Any = None,
+    ) -> ModelResponse:
+        _ = model, messages, model_settings, model_request_parameters, instrument
+        return ModelResponse(
+            parts=[TextPart("Direct response")],
+            usage=RequestUsage(input_tokens=25, output_tokens=10),
+            model_name="claude-sonnet-4-5",
+        )
+
+    monkeypatch.setattr("pydantic_ai.direct.model_request_sync", _fake_model_request_sync)
+
+    backend = PydanticAIDirectBackend()
+    monkeypatch.setattr(
+        backend,
+        "_build_direct_model",
+        lambda **kwargs: {"provider": kwargs["provider"].provider_name, "model_name": kwargs["model_name"]},
+        raising=True,
+    )
+    provider = DirectProviderMetadata(
+        app_provider_id="anthropic",
+        provider_name="anthropic",
+        default_model="claude-sonnet-4-5",
+        provider=object(),
+    )
+
+    response = backend.invoke_response(
+        provider,
+        LLMInvocationRequest(
+            prompt="Summarize this",
+            system_prompt="System prompt",
+            model="claude-sonnet-4-5",
+            model_settings={"temperature": 0.2, "max_tokens": 512},
+        ),
+    )
+
+    assert isinstance(response, ModelResponse)
+    assert response.text == "Direct response"
+
+
 def test_direct_provider_backend_enforces_input_limit_before_request_when_counting_is_available(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -784,6 +832,47 @@ def test_gateway_backend_build_model_uses_canonical_gateway_model_ids(
         "http_client": backend._gateway_http_client(),
     }
     assert captured["provider"]["http_client"] is not None
+
+
+def test_gateway_backend_invoke_response_returns_model_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _fake_model_request_sync(
+        model: Any,
+        messages: Any,
+        *,
+        model_settings: Dict[str, Any],
+        model_request_parameters: Any = None,
+        instrument: Any = None,
+    ) -> ModelResponse:
+        _ = model, messages, model_settings, model_request_parameters, instrument
+        return ModelResponse(
+            parts=[TextPart("Gateway response")],
+            usage=RequestUsage(input_tokens=20, output_tokens=8),
+            model_name="claude-sonnet-4-5",
+        )
+
+    monkeypatch.setattr("pydantic_ai.direct.model_request_sync", _fake_model_request_sync)
+    backend = PydanticAIGatewayBackend(api_key="pylf_test_key", base_url="https://gateway.example.com")
+    monkeypatch.setattr(
+        backend,
+        "_build_model",
+        lambda **kwargs: {"provider_id": kwargs["provider_id"], "model_name": kwargs["model_name"]},
+        raising=True,
+    )
+
+    response = backend.invoke_response(
+        ProviderMetadata(provider_name="anthropic", default_model="claude-sonnet-4-5"),
+        LLMInvocationRequest(
+            prompt="Summarize this",
+            system_prompt="System prompt",
+            model="claude-sonnet-4-5",
+            model_settings={"temperature": 0.2, "max_tokens": 512},
+        ),
+    )
+
+    assert isinstance(response, ModelResponse)
+    assert response.text == "Gateway response"
 
 
 def test_gateway_backend_only_marks_transient_gateway_statuses_for_retry() -> None:
