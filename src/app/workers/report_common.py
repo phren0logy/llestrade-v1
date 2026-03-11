@@ -275,12 +275,11 @@ class ReportWorkerBase(DashboardWorker):
     # ------------------------------------------------------------------
     # Provider helpers
     # ------------------------------------------------------------------
-    def _create_provider(self, system_prompt: str):
+    def _create_provider(self):
         return self._llm_backend.create_provider(
             LLMProviderRequest(
                 provider_id=self._provider_id,
                 model=self._custom_model or self._model,
-                system_prompt=system_prompt,
             )
         )
 

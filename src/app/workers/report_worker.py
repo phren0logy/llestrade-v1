@@ -273,7 +273,7 @@ class DraftReportWorker(ReportWorkerBase):
         placeholder_map: Mapping[str, str],
         evidence_ledger: str,
     ) -> List[dict]:
-        provider = self._create_provider(system_prompt)
+        provider = self._create_provider()
         outputs: List[dict] = []
 
         total = len(sections)
@@ -672,7 +672,7 @@ class ReportRefinementWorker(ReportWorkerBase):
         prompt: str,
         system_prompt: str,
     ) -> tuple[str, Optional[str]]:
-        provider = self._create_provider(system_prompt)
+        provider = self._create_provider()
         stage_input = ReportRefineStageInput(
             provider_id=self._provider_id,
             model=self._custom_model or self._model,

@@ -191,7 +191,6 @@ def test_bulk_map_create_provider_skips_native_bootstrap_for_no_native_backend(
     monkeypatch.setattr(worker_module, "create_provider", _fail_create_provider, raising=False)
     provider = worker._create_provider(
         ProviderConfig(provider_id="anthropic", model=None),
-        "system prompt",
     )
 
     assert provider.provider_name == "anthropic"
@@ -387,7 +386,7 @@ def test_bulk_worker_uses_backend_token_count_for_gateway_preflight(tmp_path: Pa
 
     with pytest.raises(RuntimeError, match="500 tokens > 400 budget"):
         worker._invoke_provider(
-            provider=worker._create_provider(ProviderConfig(provider_id="anthropic", model="claude"), "System"),
+            provider=worker._create_provider(ProviderConfig(provider_id="anthropic", model="claude")),
             provider_config=ProviderConfig(provider_id="anthropic", model="claude"),
             prompt="Prompt",
             system_prompt="System",

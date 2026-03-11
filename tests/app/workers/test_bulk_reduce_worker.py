@@ -261,7 +261,6 @@ def test_bulk_reduce_create_provider_skips_native_bootstrap_for_no_native_backen
     monkeypatch.setattr(reduce_module, "create_provider", _fail_create_provider, raising=False)
     provider = worker._create_provider(
         ProviderConfig(provider_id="anthropic", model=None, temperature=0.1),
-        "system prompt",
     )
 
     assert provider.provider_name == "anthropic"

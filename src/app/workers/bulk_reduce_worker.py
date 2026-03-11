@@ -382,7 +382,7 @@ class BulkReduceWorker(DashboardWorker):
                 placeholder_values=self._base_placeholders,
             )
 
-            provider = self._create_provider(provider_cfg, system_prompt)
+            provider = self._create_provider(provider_cfg)
             if provider is None:
                 raise RuntimeError("Reduce provider failed to initialise")
 
@@ -933,12 +933,11 @@ class BulkReduceWorker(DashboardWorker):
                 temperature = 1.0
         return ProviderConfig(provider_id=provider_id, model=model, temperature=temperature)
 
-    def _create_provider(self, config: ProviderConfig, system_prompt: str) -> object:
+    def _create_provider(self, config: ProviderConfig) -> object:
         return self._llm_backend.create_provider(
             LLMProviderRequest(
                 provider_id=config.provider_id,
                 model=config.model,
-                system_prompt=system_prompt,
             )
         )
 

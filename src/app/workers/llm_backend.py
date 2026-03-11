@@ -83,7 +83,6 @@ class LLMProviderRequest:
 
     provider_id: str
     model: Optional[str]
-    system_prompt: Optional[str]
 
 
 def default_model_for_provider(provider_id: str) -> str:

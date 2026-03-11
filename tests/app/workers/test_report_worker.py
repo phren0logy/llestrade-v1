@@ -577,7 +577,7 @@ def test_gateway_backend_path_skips_native_provider_initialization(
         llm_backend=_NoNativeBackend(),
     )
 
-    provider = worker._create_provider("system prompt")
+    provider = worker._create_provider()
     assert provider.provider_name == "anthropic"
     assert provider.default_model == "claude-sonnet-4-5"
 
@@ -744,7 +744,7 @@ def test_report_draft_passes_computed_input_budget_to_backend(
         max_report_tokens=20_000,
         llm_backend=backend,
     )
-    monkeypatch.setattr(worker, "_create_provider", lambda _system_prompt: object())
+    monkeypatch.setattr(worker, "_create_provider", lambda: object())
 
     outputs = worker._generate_section_outputs(
         sections=[section],
@@ -890,7 +890,7 @@ def test_report_refine_passes_computed_input_budget_to_backend(
         max_report_tokens=20_000,
         llm_backend=backend,
     )
-    monkeypatch.setattr(worker, "_create_provider", lambda _system_prompt: object())
+    monkeypatch.setattr(worker, "_create_provider", lambda: object())
 
     content, reasoning = worker._run_refinement(
         prompt="Prompt",

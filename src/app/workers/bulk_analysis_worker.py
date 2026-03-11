@@ -342,7 +342,7 @@ class BulkAnalysisWorker(DashboardWorker):
                 self._metadata,
                 placeholder_values=global_placeholders,
             )
-            provider = self._create_provider(provider_config, system_prompt)
+            provider = self._create_provider(provider_config)
             if provider is None:
                 raise RuntimeError("Bulk analysis provider failed to initialise")
 
@@ -922,13 +922,11 @@ class BulkAnalysisWorker(DashboardWorker):
     def _create_provider(
         self,
         config: ProviderConfig,
-        system_prompt: str,
     ) -> object:
         return self._llm_backend.create_provider(
             LLMProviderRequest(
                 provider_id=config.provider_id,
                 model=config.model,
-                system_prompt=system_prompt,
             )
         )
 

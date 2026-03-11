@@ -113,7 +113,6 @@ def test_legacy_provider_backend_create_provider_loads_settings(monkeypatch: pyt
         LLMProviderRequest(
             provider_id="azure_openai",
             model="gpt-4.1",
-            system_prompt="System prompt",
         )
     )
 
@@ -144,7 +143,6 @@ def test_legacy_provider_backend_create_provider_rejects_unsupported_provider(
             LLMProviderRequest(
                 provider_id="unsupported_provider",
                 model="custom-model",
-                system_prompt="System prompt",
             )
         )
 
@@ -303,7 +301,6 @@ def test_gateway_backend_create_provider_returns_metadata() -> None:
         LLMProviderRequest(
             provider_id="anthropic",
             model="claude-sonnet-4-5",
-            system_prompt="System prompt",
         )
     )
 
