@@ -8,6 +8,8 @@ import os
 from dataclasses import dataclass, field
 from typing import Any, Dict, Mapping, Optional, Protocol
 
+from pydantic_ai.settings import ModelSettings
+
 logger = logging.getLogger(__name__)
 
 _BEDROCK_MODEL_ALIASES: dict[str, str] = {
@@ -25,10 +27,8 @@ class LLMInvocationRequest:
     prompt: str
     system_prompt: Optional[str]
     model: Optional[str]
-    temperature: float
-    max_tokens: int
+    model_settings: ModelSettings = field(default_factory=dict)
     input_tokens_limit: Optional[int] = None
-    extra: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,9 +116,6 @@ def resolve_model_name(provider_id: str, model: Optional[str]) -> str | None:
 class LLMExecutionBackend(Protocol):
     """Contract for pluggable LLM execution backends."""
 
-    def requires_native_provider(self) -> bool:
-        """Whether worker code must initialize a native provider client."""
-
     def create_provider(self, request: LLMProviderRequest) -> object:
         """Return a provider handle suitable for `invoke`."""
 
@@ -137,9 +134,6 @@ class LLMExecutionBackend(Protocol):
 
 class LegacyProviderBackend:
     """Default backend that forwards directly to existing provider.generate calls."""
-
-    def requires_native_provider(self) -> bool:
-        return True
 
     def normalize_model(self, provider_id: str, model: Optional[str]) -> str | None:
         return normalize_model_name(provider_id, model)
@@ -198,10 +192,8 @@ class LegacyProviderBackend:
             "prompt": request.prompt,
             "model": self.resolve_model(provider_id, request.model) if request.model is not None else request.model,
             "system_prompt": request.system_prompt,
-            "temperature": request.temperature,
-            "max_tokens": request.max_tokens,
         }
-        kwargs.update(dict(request.extra))
+        kwargs.update(dict(request.model_settings))
         response = provider.generate(**kwargs)
         if not isinstance(response, dict):
             response = {"success": False, "error": "Provider returned non-dict response"}
@@ -243,13 +235,6 @@ class PydanticAIGatewayBackend:
     Agent/tool orchestration remains in worker code.
     """
 
-    _FORWARDED_SETTINGS: tuple[str, ...] = (
-        "top_p",
-        "seed",
-        "presence_penalty",
-        "frequency_penalty",
-        "reasoning_effort",
-    )
     _RETRYABLE_STATUS_CODES: frozenset[int] = frozenset({408, 425, 429, 500, 502, 503, 504})
     _GATEWAY_RETRY_ATTEMPTS = 3
     _GATEWAY_RETRY_MAX_WAIT_SECONDS = 30.0
@@ -307,9 +292,6 @@ class PydanticAIGatewayBackend:
             return value or None
         except Exception:
             return None
-
-    def requires_native_provider(self) -> bool:
-        return False
 
     def normalize_model(self, provider_id: str, model: Optional[str]) -> str | None:
         return normalize_model_name(provider_id, model)
@@ -626,15 +608,8 @@ class PydanticAIGatewayBackend:
             )
         ]
 
-    def _build_model_settings(self, request: LLMInvocationRequest) -> Dict[str, Any]:
-        model_settings: Dict[str, Any] = {
-            "temperature": request.temperature,
-            "max_tokens": request.max_tokens,
-        }
-        for key in self._FORWARDED_SETTINGS:
-            if key in request.extra:
-                model_settings[key] = request.extra[key]
-        return model_settings
+    def _build_model_settings(self, request: LLMInvocationRequest) -> ModelSettings:
+        return dict(request.model_settings)
 
     @staticmethod
     def _response_metadata(response: Any) -> Dict[str, Any]:

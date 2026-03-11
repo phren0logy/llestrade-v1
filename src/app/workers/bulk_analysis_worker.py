@@ -777,8 +777,10 @@ class BulkAnalysisWorker(DashboardWorker):
                         prompt=user_prompt,
                         system_prompt=system_prompt,
                         model=provider_config.model,
-                        temperature=0.1,
-                        max_tokens=max_tokens,
+                        model_settings={
+                            "temperature": 0.1,
+                            "max_tokens": max_tokens,
+                        },
                     ),
                 )
                 if counted is not None and counted >= 0:
@@ -999,8 +1001,10 @@ class BulkAnalysisWorker(DashboardWorker):
                     prompt=prompt,
                     model=provider_config.model,
                     system_prompt=system_prompt,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
+                    model_settings={
+                        "temperature": temperature,
+                        "max_tokens": max_tokens,
+                    },
                     input_tokens_limit=input_budget,
                 ),
             )

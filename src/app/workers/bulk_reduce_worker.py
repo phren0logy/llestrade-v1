@@ -972,8 +972,10 @@ class BulkReduceWorker(DashboardWorker):
                     prompt=prompt,
                     model=provider_cfg.model,
                     system_prompt=system_prompt,
-                    temperature=provider_cfg.temperature,
-                    max_tokens=max_tokens,
+                    model_settings={
+                        "temperature": provider_cfg.temperature,
+                        "max_tokens": max_tokens,
+                    },
                     input_tokens_limit=input_budget,
                 ),
             )

@@ -56,9 +56,11 @@ def test_legacy_provider_backend_invokes_provider_and_normalizes_result() -> Non
             prompt="summarize",
             system_prompt="system",
             model="claude-sonnet-4-5",
-            temperature=0.2,
-            max_tokens=2048,
-            extra={"reasoning_effort": "medium"},
+            model_settings={
+                "temperature": 0.2,
+                "max_tokens": 2048,
+                "reasoning_effort": "medium",
+            },
         ),
     )
 
@@ -90,8 +92,7 @@ def test_legacy_provider_backend_handles_non_dict_provider_response() -> None:
             prompt="summarize",
             system_prompt=None,
             model=None,
-            temperature=0.1,
-            max_tokens=256,
+            model_settings={"temperature": 0.1, "max_tokens": 256},
         ),
     )
 
@@ -227,9 +228,11 @@ def test_gateway_backend_success_normalizes_response(monkeypatch: pytest.MonkeyP
             prompt="Summarize this",
             system_prompt="System prompt",
             model="claude-sonnet-4-5",
-            temperature=0.2,
-            max_tokens=4096,
-            extra={"reasoning_effort": "medium"},
+            model_settings={
+                "temperature": 0.2,
+                "max_tokens": 4096,
+                "reasoning_effort": "medium",
+            },
         ),
     )
 
@@ -278,8 +281,7 @@ def test_gateway_backend_uses_fallback_for_unsupported_provider() -> None:
             prompt="test",
             system_prompt="sys",
             model=None,
-            temperature=0.1,
-            max_tokens=128,
+            model_settings={"temperature": 0.1, "max_tokens": 128},
         ),
     )
 
@@ -300,8 +302,7 @@ def test_gateway_backend_does_not_call_legacy_fallback_with_metadata_only_provid
             prompt="test",
             system_prompt="sys",
             model=None,
-            temperature=0.1,
-            max_tokens=128,
+            model_settings={"temperature": 0.1, "max_tokens": 128},
         ),
     )
 
@@ -324,8 +325,7 @@ def test_gateway_backend_reports_configuration_error_without_key(
             prompt="Summarize this",
             system_prompt="System",
             model="claude-sonnet-4-5",
-            temperature=0.2,
-            max_tokens=512,
+            model_settings={"temperature": 0.2, "max_tokens": 512},
         ),
     )
 
@@ -355,9 +355,11 @@ def test_gateway_backend_count_input_tokens_uses_model_token_counter(
             prompt="User prompt",
             system_prompt="System prompt",
             model="claude-sonnet-4-5",
-            temperature=0.2,
-            max_tokens=2048,
-            extra={"reasoning_effort": "medium"},
+            model_settings={
+                "temperature": 0.2,
+                "max_tokens": 2048,
+                "reasoning_effort": "medium",
+            },
         ),
     )
 
@@ -388,8 +390,7 @@ def test_gateway_backend_count_input_tokens_returns_none_when_model_does_not_sup
             prompt="User prompt",
             system_prompt="System prompt",
             model="gpt-4.1",
-            temperature=0.2,
-            max_tokens=2048,
+            model_settings={"temperature": 0.2, "max_tokens": 2048},
         ),
     )
 
@@ -452,8 +453,7 @@ def test_gateway_backend_enforces_input_limit_before_request_when_counting_is_av
             prompt="Summarize this",
             system_prompt="System",
             model="claude-sonnet-4-5",
-            temperature=0.2,
-            max_tokens=512,
+            model_settings={"temperature": 0.2, "max_tokens": 512},
             input_tokens_limit=400,
         ),
     )
@@ -492,8 +492,7 @@ def test_gateway_backend_enforces_input_limit_after_response_when_precount_is_un
             prompt="Summarize this",
             system_prompt="System",
             model="gpt-4.1",
-            temperature=0.2,
-            max_tokens=512,
+            model_settings={"temperature": 0.2, "max_tokens": 512},
             input_tokens_limit=400,
         ),
     )
@@ -534,8 +533,7 @@ def test_gateway_backend_can_fallback_on_error_when_enabled(
             prompt="Summarize this",
             system_prompt="System",
             model="claude-sonnet-4-5",
-            temperature=0.2,
-            max_tokens=512,
+            model_settings={"temperature": 0.2, "max_tokens": 512},
         ),
     )
 
@@ -563,8 +561,7 @@ def test_gateway_backend_does_not_call_legacy_fallback_on_error_with_metadata_on
             prompt="Summarize this",
             system_prompt="System",
             model="claude-sonnet-4-5",
-            temperature=0.2,
-            max_tokens=512,
+            model_settings={"temperature": 0.2, "max_tokens": 512},
         ),
     )
 
@@ -606,8 +603,7 @@ def test_gateway_backend_reports_empty_output_as_failure(
             prompt="Summarize this",
             system_prompt="System prompt",
             model="claude-sonnet-4-5",
-            temperature=0.2,
-            max_tokens=4096,
+            model_settings={"temperature": 0.2, "max_tokens": 4096},
         ),
     )
 
@@ -700,8 +696,7 @@ def test_gateway_backend_returns_error_when_provider_metadata_is_missing() -> No
             prompt="Summarize this",
             system_prompt="System prompt",
             model="claude-sonnet-4-5",
-            temperature=0.2,
-            max_tokens=4096,
+            model_settings={"temperature": 0.2, "max_tokens": 4096},
         ),
     )
 

@@ -307,8 +307,10 @@ class DraftReportWorker(ReportWorkerBase):
                         prompt=prompt,
                         system_prompt=system_prompt,
                         model=self._custom_model or self._model,
-                        temperature=0.2,
-                        max_tokens=self._max_report_tokens,
+                        model_settings={
+                            "temperature": 0.2,
+                            "max_tokens": self._max_report_tokens,
+                        },
                         input_tokens_limit=self._input_token_limit(
                             max_output_tokens=self._max_report_tokens
                         ),
@@ -685,8 +687,10 @@ class ReportRefinementWorker(ReportWorkerBase):
                     prompt=prompt,
                     system_prompt=system_prompt,
                     model=self._custom_model or self._model,
-                    temperature=0.2,
-                    max_tokens=self._max_report_tokens,
+                    model_settings={
+                        "temperature": 0.2,
+                        "max_tokens": self._max_report_tokens,
+                    },
                     input_tokens_limit=self._input_token_limit(
                         max_output_tokens=self._max_report_tokens
                     ),

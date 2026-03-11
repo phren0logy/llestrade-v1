@@ -100,9 +100,6 @@ class _SequenceGatewayBackend(LLMExecutionBackend):
     def __init__(self, payloads: Sequence[LLMInvocationResult]) -> None:
         self._payloads = list(payloads)
 
-    def requires_native_provider(self) -> bool:
-        return False
-
     def normalize_model(self, provider_id: str, model: str | None) -> str | None:
         return normalize_model_name(provider_id, model)
 
