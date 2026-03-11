@@ -1004,6 +1004,7 @@ class BulkAnalysisWorker(DashboardWorker):
                     system_prompt=system_prompt,
                     temperature=temperature,
                     max_tokens=max_tokens,
+                    input_tokens_limit=input_budget,
                 ),
             )
         if not response.success:

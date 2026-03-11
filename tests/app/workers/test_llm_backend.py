@@ -361,6 +361,75 @@ def test_gateway_backend_loads_api_key_from_secure_settings(
     assert backend._api_key == "gateway-key-from-settings"
 
 
+def test_gateway_backend_enforces_input_limit_before_request_when_counting_is_available(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _fail_model_request_sync(*args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+        raise AssertionError("model_request_sync should not be called when preflight limit is exceeded")
+
+    monkeypatch.setattr("pydantic_ai.direct.model_request_sync", _fail_model_request_sync)
+
+    backend = PydanticAIGatewayBackend(api_key="pylf_test_key", base_url="https://gateway.example.com")
+    monkeypatch.setattr(backend, "_build_model", lambda **_kwargs: object(), raising=True)
+    monkeypatch.setattr(backend, "count_input_tokens", lambda provider, request: 500, raising=True)
+
+    result = backend.invoke(
+        _ProviderMeta("anthropic", default_model="claude-sonnet-4-5"),
+        LLMInvocationRequest(
+            prompt="Summarize this",
+            system_prompt="System",
+            model="claude-sonnet-4-5",
+            temperature=0.2,
+            max_tokens=512,
+            input_tokens_limit=400,
+        ),
+    )
+
+    assert result.success is False
+    assert result.error is not None
+    assert "input_tokens_limit" in result.error
+
+
+def test_gateway_backend_enforces_input_limit_after_response_when_precount_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _fake_model_request_sync(
+        model: Any,
+        messages: Any,
+        *,
+        model_settings: Dict[str, Any],
+        model_request_parameters: Any = None,
+        instrument: Any = None,
+    ) -> ModelResponse:
+        _ = model, messages, model_settings, model_request_parameters, instrument
+        return ModelResponse(
+            parts=[TextPart("Gateway response")],
+            usage=RequestUsage(input_tokens=600, output_tokens=45),
+            model_name="gpt-4.1",
+        )
+
+    monkeypatch.setattr("pydantic_ai.direct.model_request_sync", _fake_model_request_sync)
+
+    backend = PydanticAIGatewayBackend(api_key="pylf_test_key", base_url="https://gateway.example.com")
+    monkeypatch.setattr(backend, "_build_model", lambda **_kwargs: object(), raising=True)
+
+    result = backend.invoke(
+        _ProviderMeta("openai", default_model="gpt-4.1"),
+        LLMInvocationRequest(
+            prompt="Summarize this",
+            system_prompt="System",
+            model="gpt-4.1",
+            temperature=0.2,
+            max_tokens=512,
+            input_tokens_limit=400,
+        ),
+    )
+
+    assert result.success is False
+    assert result.error is not None
+    assert "Exceeded the input_tokens_limit" in result.error
+
+
 def test_gateway_backend_can_fallback_on_error_when_enabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
