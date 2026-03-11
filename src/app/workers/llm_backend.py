@@ -19,6 +19,22 @@ _BEDROCK_MODEL_ALIASES: dict[str, str] = {
     "claude-opus-4-1-20250805": "anthropic.claude-opus-4-1-20250805-v1:0",
 }
 
+_DIRECT_PROVIDER_NAMES: Mapping[str, str] = {
+    "anthropic": "anthropic",
+    "anthropic_bedrock": "bedrock",
+    "azure_openai": "azure",
+    "gemini": "google-gla",
+    "openai": "openai",
+}
+
+_GATEWAY_UPSTREAM_PROVIDERS: Mapping[str, str] = {
+    "anthropic": "anthropic",
+    "anthropic_bedrock": "bedrock",
+    "gemini": "gemini",
+    "openai": "openai",
+    "azure_openai": "openai",
+}
+
 
 @dataclass(frozen=True, slots=True)
 class LLMInvocationRequest:
@@ -135,6 +151,24 @@ def _build_messages(request: LLMInvocationRequest) -> list[Any]:
 
 def _build_model_settings(request: LLMInvocationRequest) -> ModelSettings:
     return dict(request.model_settings)
+
+
+def supported_direct_provider_ids() -> tuple[str, ...]:
+    return tuple(sorted(_DIRECT_PROVIDER_NAMES))
+
+
+def supported_gateway_provider_ids() -> tuple[str, ...]:
+    return tuple(sorted(_GATEWAY_UPSTREAM_PROVIDERS))
+
+
+def _pydantic_ai_instrumentation() -> Any | None:
+    try:
+        from src.config.observability import get_pydantic_ai_instrumentation
+
+        return get_pydantic_ai_instrumentation()
+    except Exception:
+        logger.debug("Unable to load Pydantic AI instrumentation settings", exc_info=True)
+        return None
 
 
 def _count_tokens_with_model(
@@ -299,13 +333,7 @@ class LLMExecutionBackend(Protocol):
 class PydanticAIDirectBackend:
     """Default backend that uses direct Pydantic AI providers for worker requests."""
 
-    _PYDANTIC_PROVIDER_NAMES: Mapping[str, str] = {
-        "anthropic": "anthropic",
-        "anthropic_bedrock": "bedrock",
-        "azure_openai": "azure",
-        "gemini": "google-gla",
-        "openai": "openai",
-    }
+    _PYDANTIC_PROVIDER_NAMES: Mapping[str, str] = _DIRECT_PROVIDER_NAMES
 
     def normalize_model(self, provider_id: str, model: Optional[str]) -> str | None:
         return normalize_model_name(provider_id, model)
@@ -456,6 +484,7 @@ class PydanticAIDirectBackend:
                 self._build_direct_model(provider=provider, model_name=model_name),
                 _build_messages(request),
                 model_settings=_build_model_settings(request),
+                instrument=_pydantic_ai_instrumentation(),
             )
             if usage_limits is not None:
                 _check_after_response(response=response, usage_limits=usage_limits)
@@ -552,6 +581,12 @@ class PydanticAIGatewayBackend:
         return resolve_model_name(provider_id, model)
 
     def create_provider(self, request: LLMProviderRequest) -> object:
+        if request.provider_id not in _GATEWAY_UPSTREAM_PROVIDERS:
+            supported = ", ".join(supported_gateway_provider_ids())
+            raise RuntimeError(
+                f"Provider '{request.provider_id}' is not supported by the Pydantic AI Gateway backend. "
+                f"Supported providers: {supported}."
+            )
         return ProviderMetadata(
             provider_name=request.provider_id,
             default_model=self.resolve_model(request.provider_id, request.model) or "",
@@ -609,6 +644,7 @@ class PydanticAIGatewayBackend:
                 model,
                 _build_messages(request),
                 model_settings=_build_model_settings(request),
+                instrument=_pydantic_ai_instrumentation(),
             )
             if usage_limits is not None:
                 _check_after_response(response=response, usage_limits=usage_limits)
@@ -757,14 +793,7 @@ class PydanticAIGatewayBackend:
 
     @staticmethod
     def _gateway_upstream_provider(provider_id: str) -> str | None:
-        mapping = {
-            "anthropic": "anthropic",
-            "anthropic_bedrock": "bedrock",
-            "gemini": "gemini",
-            "openai": "openai",
-            "azure_openai": "openai",
-        }
-        return mapping.get(provider_id)
+        return _GATEWAY_UPSTREAM_PROVIDERS.get(provider_id)
 
 __all__ = [
     "ProviderMetadata",
@@ -777,4 +806,6 @@ __all__ = [
     "default_model_for_provider",
     "normalize_model_name",
     "resolve_model_name",
+    "supported_direct_provider_ids",
+    "supported_gateway_provider_ids",
 ]

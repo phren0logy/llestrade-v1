@@ -36,6 +36,7 @@ class PhoenixObservability:
         self.enabled = False
         self.client: Any = None
         self.tracer: Any = None
+        self._pydantic_ai_instrumentation: Any = None
         self.project_name = "forensic-report-drafter"
         self.export_fixtures = False
         self.fixtures_dir = Path("var/test_output/fixtures")
@@ -81,6 +82,7 @@ class PhoenixObservability:
             self.enabled = False
             self.client = None
             self.tracer = None
+            self._pydantic_ai_instrumentation = None
             return None
 
     def _is_port_open(self, port: int) -> bool:
@@ -191,6 +193,27 @@ class PhoenixObservability:
     def shutdown(self) -> None:
         self.client = None
         self.tracer = None
+        self._pydantic_ai_instrumentation = None
+
+    def pydantic_ai_instrumentation(self) -> Any | None:
+        """Return redacted Pydantic AI instrumentation settings when Phoenix is enabled."""
+        if not self.enabled or not PHOENIX_AVAILABLE:
+            return None
+        if self._pydantic_ai_instrumentation is not None:
+            return self._pydantic_ai_instrumentation
+
+        try:
+            from pydantic_ai.models.instrumented import InstrumentationSettings
+
+            self._pydantic_ai_instrumentation = InstrumentationSettings(
+                include_content=False,
+                include_binary_content=False,
+            )
+        except Exception:
+            self.logger.debug("Failed to initialize Pydantic AI instrumentation", exc_info=True)
+            return None
+
+        return self._pydantic_ai_instrumentation
 
 
 phoenix = PhoenixObservability()
@@ -208,3 +231,7 @@ def trace_llm_call(model_name: Optional[str] = None):
 def trace_operation(name: str, attributes: Optional[Dict[str, Any]] = None):
     with phoenix.trace_operation(name, attributes) as span:
         yield span
+
+
+def get_pydantic_ai_instrumentation() -> Any | None:
+    return phoenix.pydantic_ai_instrumentation()

@@ -20,6 +20,8 @@ from src.app.workers.llm_backend import (
     ProviderMetadata,
     normalize_model_name,
     resolve_model_name,
+    supported_direct_provider_ids,
+    supported_gateway_provider_ids,
 )
 
 
@@ -178,6 +180,7 @@ def test_direct_provider_backend_direct_provider_uses_pydantic_ai_requests(
         )
 
     monkeypatch.setattr("pydantic_ai.direct.model_request_sync", _fake_model_request_sync)
+    monkeypatch.setattr("src.app.workers.llm_backend._pydantic_ai_instrumentation", lambda: "instrumented")
 
     backend = PydanticAIDirectBackend()
     monkeypatch.setattr(
@@ -213,6 +216,7 @@ def test_direct_provider_backend_direct_provider_uses_pydantic_ai_requests(
     assert captured["call"]["messages"][0].instructions == "System prompt"
     assert captured["call"]["messages"][0].parts[0].content == "Summarize this"
     assert captured["call"]["model_settings"] == {"temperature": 0.2, "max_tokens": 512}
+    assert captured["call"]["instrument"] == "instrumented"
 
 
 def test_direct_provider_backend_enforces_input_limit_before_request_when_counting_is_available(
@@ -310,6 +314,18 @@ def test_gateway_backend_create_provider_returns_metadata() -> None:
     )
 
 
+def test_gateway_backend_create_provider_rejects_unsupported_provider() -> None:
+    backend = PydanticAIGatewayBackend(api_key="gateway-key")
+
+    with pytest.raises(RuntimeError, match="not supported by the Pydantic AI Gateway backend"):
+        backend.create_provider(
+            LLMProviderRequest(
+                provider_id="unsupported_provider",
+                model="custom-model",
+            )
+        )
+
+
 def test_gateway_backend_success_normalizes_response(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, Any] = {}
 
@@ -339,6 +355,7 @@ def test_gateway_backend_success_normalizes_response(monkeypatch: pytest.MonkeyP
         )
 
     monkeypatch.setattr("pydantic_ai.direct.model_request_sync", _fake_model_request_sync)
+    monkeypatch.setattr("src.app.workers.llm_backend._pydantic_ai_instrumentation", lambda: "instrumented")
     backend = PydanticAIGatewayBackend(api_key="pylf_test_key")
     monkeypatch.setattr(
         backend,
@@ -380,6 +397,7 @@ def test_gateway_backend_success_normalizes_response(monkeypatch: pytest.MonkeyP
     assert captured["call"]["model_settings"]["temperature"] == 0.2
     assert captured["call"]["model_settings"]["max_tokens"] == 4096
     assert captured["call"]["model_settings"]["reasoning_effort"] == "medium"
+    assert captured["call"]["instrument"] == "instrumented"
 
 
 def test_gateway_backend_rejects_unsupported_provider() -> None:
@@ -397,6 +415,23 @@ def test_gateway_backend_rejects_unsupported_provider() -> None:
 
     assert result.success is False
     assert "not supported by Pydantic AI Gateway backend" in (result.error or "")
+
+
+def test_supported_provider_lists_are_explicit() -> None:
+    assert supported_direct_provider_ids() == (
+        "anthropic",
+        "anthropic_bedrock",
+        "azure_openai",
+        "gemini",
+        "openai",
+    )
+    assert supported_gateway_provider_ids() == (
+        "anthropic",
+        "anthropic_bedrock",
+        "azure_openai",
+        "gemini",
+        "openai",
+    )
 
 
 def test_gateway_backend_rejects_unsupported_provider_metadata() -> None:

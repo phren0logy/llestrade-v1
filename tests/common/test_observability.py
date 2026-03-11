@@ -36,3 +36,24 @@ def test_detect_provider_from_module_name() -> None:
     assert obs._detect_provider("src.common.llm.providers.azure_openai") == "openai"
     assert obs._detect_provider("src.common.llm.providers.gemini") == "google"
     assert obs._detect_provider("src.something.else") == "unknown"
+
+
+def test_pydantic_ai_instrumentation_redacts_content_when_enabled(monkeypatch) -> None:
+    obs = PhoenixObservability()
+    obs.enabled = True
+
+    class _FakeInstrumentationSettings:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    monkeypatch.setattr(
+        "pydantic_ai.models.instrumented.InstrumentationSettings",
+        _FakeInstrumentationSettings,
+    )
+
+    instrumentation = obs.pydantic_ai_instrumentation()
+
+    assert instrumentation is not None
+    assert instrumentation.kwargs["include_content"] is False
+    assert instrumentation.kwargs["include_binary_content"] is False
+    assert obs.pydantic_ai_instrumentation() is instrumentation
