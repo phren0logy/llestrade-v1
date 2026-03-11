@@ -1,0 +1,5 @@
+{
+  "repo_url": "https://github.com/pydantic/pydantic-ai-gateway.git",
+  "ref": "736fa5d363bc7a4ec81cdf662ccaafc2b5e527f2",
+  "deploy_subpath": "deploy"
+}

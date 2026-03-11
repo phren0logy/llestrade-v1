@@ -1,0 +1,23 @@
+// Rendered from gateway/templates/wrangler.jsonc.template
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "__WORKER_NAME__",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-06-17",
+  "compatibility_flags": ["nodejs_compat_v2"],
+  "workers_dev": false,
+  "routes": [{ "pattern": "__CUSTOM_DOMAIN__", "custom_domain": true }],
+  "vars": {
+    "GITHUB_SHA": "__UPSTREAM_REF__",
+    "LOGFIRE_ENVIRONMENT": "prod"
+  },
+  "placement": { "mode": "smart" },
+  "d1_databases": [
+    {
+      "binding": "limitsDB",
+      "database_name": "__LIMITS_DB_NAME__",
+      "database_id": "__LIMITS_DB_ID__"
+    }
+  ],
+  "kv_namespaces": [{ "binding": "KV", "id": "__KV_NAMESPACE_ID__" }]
+}

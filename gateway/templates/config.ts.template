@@ -1,0 +1,34 @@
+import { env } from 'cloudflare:workers'
+import type { Config } from '@deploy/types'
+
+type ProviderKeys = 'anthropic'
+
+const PROJECT_ID = 1
+const APP_API_KEY_ID = 100
+
+export const config: Config<ProviderKeys> = {
+  projects: {
+    [PROJECT_ID]: {
+      name: 'llestrade-desktop',
+      users: {},
+    },
+  },
+  routingGroups: {
+    anthropic: [{ key: 'anthropic' }],
+  },
+  providers: {
+    anthropic: {
+      providerId: 'anthropic',
+      baseUrl: 'https://api.anthropic.com',
+      injectCost: true,
+      credentials: env.ANTHROPIC_API_KEY,
+    },
+  },
+  apiKeys: {
+    __APP_API_KEY__: {
+      id: APP_API_KEY_ID,
+      project: PROJECT_ID,
+      providers: ['anthropic'],
+    },
+  },
+}

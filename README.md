@@ -289,6 +289,12 @@ Gateway backend fallback behavior:
 - Unsupported provider IDs automatically use the legacy backend implementation.
 - Runtime Gateway errors are surfaced to workers with existing stage-level failure handling.
 
+Self-hosting notes:
+
+- Use a custom domain such as `https://gateway.example.com` for `PYDANTIC_AI_GATEWAY_BASE_URL`.
+- Keep the runtime gateway on API-key auth; the current desktop app does not participate in Cloudflare Access login flows.
+- The full Cloudflare/1Password operator workflow lives in [`gateway/README.md`](gateway/README.md).
+
 ### AWS Bedrock Credentials
 
 Claude models delivered through AWS Bedrock rely on the AWS CLI credential chain. Run `aws configure` (for long-term access keys) or `aws configure sso` (for IAM Identity Center) so credentials are written to `~/.aws/credentials` and `~/.aws/config`. Llestrade reads those settings automatically; no AWS secrets are stored in the application. Optional overrides for profile, region, and the default Bedrock Claude model can be set under **Settings → Configure API Keys → AWS Bedrock (Claude)**.
