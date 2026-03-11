@@ -68,6 +68,16 @@ class ProviderMetadata:
 
 
 @dataclass(frozen=True, slots=True)
+class DirectProviderMetadata:
+    """Pydantic AI-backed provider metadata for non-gateway direct requests."""
+
+    app_provider_id: str
+    provider_name: str
+    default_model: str
+    provider: Any
+
+
+@dataclass(frozen=True, slots=True)
 class LLMProviderRequest:
     """Typed contract for initializing a provider or provider metadata."""
 
@@ -135,6 +145,14 @@ class LLMExecutionBackend(Protocol):
 class LegacyProviderBackend:
     """Default backend that forwards directly to existing provider.generate calls."""
 
+    _PYDANTIC_PROVIDER_NAMES: Mapping[str, str] = {
+        "anthropic": "anthropic",
+        "anthropic_bedrock": "bedrock",
+        "azure_openai": "azure",
+        "gemini": "google-gla",
+        "openai": "openai",
+    }
+
     def normalize_model(self, provider_id: str, model: Optional[str]) -> str | None:
         return normalize_model_name(provider_id, model)
 
@@ -146,6 +164,10 @@ class LegacyProviderBackend:
         from src.common.llm.factory import create_provider
 
         settings = SecureSettings()
+        direct_provider = self._create_pydantic_provider_metadata(settings=settings, request=request)
+        if direct_provider is not None:
+            return direct_provider
+
         provider_id = request.provider_id
         api_key = settings.get_api_key(provider_id)
         kwargs: Dict[str, Any] = {
@@ -170,6 +192,9 @@ class LegacyProviderBackend:
         return provider
 
     def count_input_tokens(self, provider: Any, request: LLMInvocationRequest) -> int | None:
+        if isinstance(provider, DirectProviderMetadata):
+            return self._count_input_tokens_direct(provider, request)
+
         count_tokens = getattr(provider, "count_tokens", None)
         if not callable(count_tokens):
             return None
@@ -187,6 +212,9 @@ class LegacyProviderBackend:
         return self._extract_token_count(result)
 
     def invoke(self, provider: Any, request: LLMInvocationRequest) -> LLMInvocationResult:
+        if isinstance(provider, DirectProviderMetadata):
+            return self._invoke_direct(provider, request)
+
         provider_id = self._resolve_provider_id(provider) or ""
         kwargs: Dict[str, Any] = {
             "prompt": request.prompt,
@@ -226,6 +254,184 @@ class LegacyProviderBackend:
         if not value:
             return None
         return str(value)
+
+    def _create_pydantic_provider_metadata(
+        self,
+        *,
+        settings: Any,
+        request: LLMProviderRequest,
+    ) -> DirectProviderMetadata | None:
+        provider_name = self._PYDANTIC_PROVIDER_NAMES.get(request.provider_id)
+        if provider_name is None:
+            return None
+
+        provider = self._build_pydantic_provider(
+            settings=settings,
+            app_provider_id=request.provider_id,
+            provider_name=provider_name,
+        )
+        return DirectProviderMetadata(
+            app_provider_id=request.provider_id,
+            provider_name=provider_name,
+            default_model=self.resolve_model(request.provider_id, request.model) or "",
+            provider=provider,
+        )
+
+    def _build_pydantic_provider(
+        self,
+        *,
+        settings: Any,
+        app_provider_id: str,
+        provider_name: str,
+    ) -> Any:
+        api_key = settings.get_api_key(app_provider_id)
+        if provider_name == "anthropic":
+            from pydantic_ai.providers.anthropic import AnthropicProvider
+
+            return AnthropicProvider(api_key=api_key)
+        if provider_name == "google-gla":
+            from pydantic_ai.providers.google import GoogleProvider
+
+            return GoogleProvider(api_key=api_key)
+        if provider_name == "openai":
+            from pydantic_ai.providers.openai import OpenAIProvider
+
+            return OpenAIProvider(api_key=api_key)
+        if provider_name == "azure":
+            from pydantic_ai.providers.azure import AzureProvider
+
+            azure_settings = settings.get("azure_openai_settings", {}) or {}
+            return AzureProvider(
+                api_key=api_key,
+                azure_endpoint=azure_settings.get("endpoint"),
+                api_version=azure_settings.get("api_version"),
+            )
+        if provider_name == "bedrock":
+            from pydantic_ai.providers.bedrock import BedrockProvider
+
+            bedrock_settings = settings.get("aws_bedrock_settings", {}) or {}
+            return BedrockProvider(
+                region_name=bedrock_settings.get("region") or os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION"),
+                profile_name=bedrock_settings.get("profile"),
+            )
+        raise RuntimeError(f"Unsupported Pydantic AI provider '{provider_name}'")
+
+    def _count_input_tokens_direct(
+        self,
+        provider: DirectProviderMetadata,
+        request: LLMInvocationRequest,
+    ) -> int | None:
+        model_name = self.resolve_model(provider.app_provider_id, request.model or provider.default_model)
+        if not model_name:
+            return None
+        if not request.prompt and not request.system_prompt:
+            return 0
+
+        try:
+            model = self._build_direct_model(provider=provider, model_name=model_name)
+            from pydantic_ai.models import ModelRequestParameters
+
+            usage = asyncio.run(
+                model.count_tokens(
+                    PydanticAIGatewayBackend._build_messages(request),
+                    self._build_model_settings(request),
+                    ModelRequestParameters(),
+                )
+            )
+            counted = int(getattr(usage, "input_tokens", 0) or 0)
+            return counted if counted >= 0 else None
+        except NotImplementedError:
+            return None
+        except Exception:
+            logger.debug(
+                "Direct provider token preflight failed for provider=%s model=%s",
+                provider.app_provider_id,
+                model_name,
+                exc_info=True,
+            )
+            return None
+
+    def _invoke_direct(
+        self,
+        provider: DirectProviderMetadata,
+        request: LLMInvocationRequest,
+    ) -> LLMInvocationResult:
+        model_name = self.resolve_model(provider.app_provider_id, request.model or provider.default_model)
+        if not model_name:
+            return LLMInvocationResult(
+                success=False,
+                content="",
+                error="No model configured for direct provider backend",
+                usage={},
+                provider=provider.app_provider_id,
+                model=request.model,
+                raw={},
+            )
+
+        try:
+            from pydantic_ai.direct import model_request_sync
+
+            response = model_request_sync(
+                self._build_direct_model(provider=provider, model_name=model_name),
+                PydanticAIGatewayBackend._build_messages(request),
+                model_settings=self._build_model_settings(request),
+            )
+            content = str(response.text or "").strip()
+            if not content:
+                return LLMInvocationResult(
+                    success=False,
+                    content="",
+                    error="LLM returned empty response",
+                    usage={},
+                    provider=provider.app_provider_id,
+                    model=model_name,
+                    raw={},
+                )
+
+            usage_obj = response.usage
+            usage = {
+                "requests": int(getattr(usage_obj, "requests", 0) or 0),
+                "input_tokens": int(getattr(usage_obj, "input_tokens", 0) or 0),
+                "output_tokens": int(getattr(usage_obj, "output_tokens", 0) or 0),
+                "total_tokens": int(getattr(usage_obj, "input_tokens", 0) or 0)
+                + int(getattr(usage_obj, "output_tokens", 0) or 0),
+            }
+            details = getattr(usage_obj, "details", None)
+            if isinstance(details, dict) and details:
+                usage["details"] = dict(details)
+
+            return LLMInvocationResult(
+                success=True,
+                content=content,
+                error=None,
+                usage=usage,
+                provider=provider.app_provider_id,
+                model=str(getattr(response, "model_name", None) or model_name),
+                raw=PydanticAIGatewayBackend._response_metadata(response),
+            )
+        except Exception as exc:
+            return LLMInvocationResult(
+                success=False,
+                content="",
+                error=str(exc),
+                usage={},
+                provider=provider.app_provider_id,
+                model=model_name,
+                raw={},
+            )
+
+    @staticmethod
+    def _build_model_settings(request: LLMInvocationRequest) -> ModelSettings:
+        return dict(request.model_settings)
+
+    @staticmethod
+    def _build_direct_model(*, provider: DirectProviderMetadata, model_name: str) -> Any:
+        from pydantic_ai.models import infer_model
+
+        return infer_model(
+            f"{provider.provider_name}:{model_name}",
+            provider_factory=lambda _provider_name: provider.provider,
+        )
 
 
 class PydanticAIGatewayBackend:

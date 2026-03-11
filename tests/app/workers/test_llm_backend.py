@@ -11,6 +11,7 @@ from pydantic_ai.messages import ModelResponse, TextPart
 from pydantic_ai.usage import RequestUsage
 
 from src.app.workers.llm_backend import (
+    DirectProviderMetadata,
     LLMInvocationRequest,
     LLMInvocationResult,
     LLMProviderRequest,
@@ -139,15 +140,12 @@ def test_legacy_provider_backend_create_provider_loads_settings(monkeypatch: pyt
                 return {"endpoint": "https://azure.example.com", "api_version": "2025-01-01-preview"}
             return default
 
-    class _InitializedProvider:
-        initialized = True
-
-    def _fake_create_provider(**kwargs: Any) -> object:
-        captured.update(kwargs)
-        return _InitializedProvider()
+    class _FakeAzureProvider:
+        def __init__(self, **kwargs: Any) -> None:
+            captured.update(kwargs)
 
     monkeypatch.setattr("src.app.core.secure_settings.SecureSettings", _StubSettings)
-    monkeypatch.setattr("src.common.llm.factory.create_provider", _fake_create_provider)
+    monkeypatch.setattr("pydantic_ai.providers.azure.AzureProvider", _FakeAzureProvider)
 
     backend = LegacyProviderBackend()
     provider = backend.create_provider(
@@ -158,14 +156,83 @@ def test_legacy_provider_backend_create_provider_loads_settings(monkeypatch: pyt
         )
     )
 
-    assert getattr(provider, "initialized", False) is True
+    assert isinstance(provider, DirectProviderMetadata)
+    assert provider.app_provider_id == "azure_openai"
+    assert provider.provider_name == "azure"
+    assert provider.default_model == "gpt-4.1"
     assert captured == {
-        "provider": "azure_openai",
-        "default_system_prompt": "System prompt",
         "api_key": "azure-key",
         "azure_endpoint": "https://azure.example.com",
         "api_version": "2025-01-01-preview",
     }
+
+
+def test_legacy_provider_backend_direct_provider_uses_pydantic_ai_requests(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def _fake_model_request_sync(
+        model: Any,
+        messages: Any,
+        *,
+        model_settings: Dict[str, Any],
+        model_request_parameters: Any = None,
+        instrument: Any = None,
+    ) -> ModelResponse:
+        captured["call"] = {
+            "model": model,
+            "messages": messages,
+            "model_settings": dict(model_settings),
+            "model_request_parameters": model_request_parameters,
+            "instrument": instrument,
+        }
+        return ModelResponse(
+            parts=[TextPart("Direct response")],
+            usage=RequestUsage(input_tokens=25, output_tokens=10),
+            model_name="claude-sonnet-4-5",
+            provider_name="anthropic",
+            provider_url="https://api.anthropic.com",
+            provider_response_id="resp-direct",
+            finish_reason="stop",
+        )
+
+    monkeypatch.setattr("pydantic_ai.direct.model_request_sync", _fake_model_request_sync)
+
+    backend = LegacyProviderBackend()
+    monkeypatch.setattr(
+        backend,
+        "_build_direct_model",
+        lambda **kwargs: {"provider": kwargs["provider"].provider_name, "model_name": kwargs["model_name"]},
+        raising=True,
+    )
+
+    provider = DirectProviderMetadata(
+        app_provider_id="anthropic",
+        provider_name="anthropic",
+        default_model="claude-sonnet-4-5",
+        provider=object(),
+    )
+
+    result = backend.invoke(
+        provider,
+        LLMInvocationRequest(
+            prompt="Summarize this",
+            system_prompt="System prompt",
+            model="claude-sonnet-4-5",
+            model_settings={"temperature": 0.2, "max_tokens": 512},
+        ),
+    )
+
+    assert result.success is True
+    assert result.content == "Direct response"
+    assert result.provider == "anthropic"
+    assert result.model == "claude-sonnet-4-5"
+    assert result.usage["input_tokens"] == 25
+    assert result.usage["output_tokens"] == 10
+    assert captured["call"]["messages"][0].instructions == "System prompt"
+    assert captured["call"]["messages"][0].parts[0].content == "Summarize this"
+    assert captured["call"]["model_settings"] == {"temperature": 0.2, "max_tokens": 512}
 
 
 def test_gateway_backend_create_provider_returns_metadata() -> None:
