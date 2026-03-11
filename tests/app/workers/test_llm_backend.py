@@ -235,6 +235,85 @@ def test_legacy_provider_backend_direct_provider_uses_pydantic_ai_requests(
     assert captured["call"]["model_settings"] == {"temperature": 0.2, "max_tokens": 512}
 
 
+def test_legacy_provider_backend_enforces_input_limit_before_request_when_counting_is_available(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _fail_model_request_sync(*args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+        raise AssertionError("model_request_sync should not be called when preflight limit is exceeded")
+
+    monkeypatch.setattr("pydantic_ai.direct.model_request_sync", _fail_model_request_sync)
+
+    backend = LegacyProviderBackend()
+    provider = DirectProviderMetadata(
+        app_provider_id="anthropic",
+        provider_name="anthropic",
+        default_model="claude-sonnet-4-5",
+        provider=object(),
+    )
+    monkeypatch.setattr(backend, "_build_direct_model", lambda **_kwargs: object(), raising=True)
+    monkeypatch.setattr(backend, "_count_input_tokens_direct", lambda provider, request: 500, raising=True)
+
+    result = backend.invoke(
+        provider,
+        LLMInvocationRequest(
+            prompt="Summarize this",
+            system_prompt="System",
+            model="claude-sonnet-4-5",
+            model_settings={"temperature": 0.2, "max_tokens": 512},
+            input_tokens_limit=400,
+        ),
+    )
+
+    assert result.success is False
+    assert result.error is not None
+    assert "input_tokens_limit" in result.error
+
+
+def test_legacy_provider_backend_enforces_input_limit_after_response_when_precount_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _fake_model_request_sync(
+        model: Any,
+        messages: Any,
+        *,
+        model_settings: Dict[str, Any],
+        model_request_parameters: Any = None,
+        instrument: Any = None,
+    ) -> ModelResponse:
+        _ = model, messages, model_settings, model_request_parameters, instrument
+        return ModelResponse(
+            parts=[TextPart("Direct response")],
+            usage=RequestUsage(input_tokens=600, output_tokens=45),
+            model_name="gpt-4.1",
+        )
+
+    monkeypatch.setattr("pydantic_ai.direct.model_request_sync", _fake_model_request_sync)
+
+    backend = LegacyProviderBackend()
+    provider = DirectProviderMetadata(
+        app_provider_id="openai",
+        provider_name="openai",
+        default_model="gpt-4.1",
+        provider=object(),
+    )
+    monkeypatch.setattr(backend, "_build_direct_model", lambda **_kwargs: object(), raising=True)
+
+    result = backend.invoke(
+        provider,
+        LLMInvocationRequest(
+            prompt="Summarize this",
+            system_prompt="System",
+            model="gpt-4.1",
+            model_settings={"temperature": 0.2, "max_tokens": 512},
+            input_tokens_limit=400,
+        ),
+    )
+
+    assert result.success is False
+    assert result.error is not None
+    assert "Exceeded the input_tokens_limit" in result.error
+
+
 def test_gateway_backend_create_provider_returns_metadata() -> None:
     backend = PydanticAIGatewayBackend(api_key="gateway-key")
 

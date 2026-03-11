@@ -238,6 +238,46 @@ def _success_result_from_response(
     )
 
 
+def _supports_pre_request_count(provider_id: str) -> bool:
+    return provider_id in {"anthropic", "anthropic_bedrock", "gemini"}
+
+
+def _usage_limits_for_request(*, provider_id: str, request: LLMInvocationRequest) -> Any | None:
+    if request.input_tokens_limit is None or request.input_tokens_limit <= 0:
+        return None
+
+    from pydantic_ai.usage import UsageLimits
+
+    return UsageLimits(
+        input_tokens_limit=request.input_tokens_limit,
+        count_tokens_before_request=_supports_pre_request_count(provider_id),
+    )
+
+
+def _check_before_request(
+    *,
+    usage_limits: Any,
+    count_input_tokens_fn: Any,
+) -> None:
+    from pydantic_ai.usage import RunUsage
+
+    usage = RunUsage(requests=0)
+    if usage_limits.count_tokens_before_request:
+        counted = count_input_tokens_fn()
+        if counted is not None and counted >= 0:
+            usage.input_tokens = int(counted)
+
+    usage_limits.check_before_request(usage)
+
+
+def _check_after_response(*, response: Any, usage_limits: Any) -> None:
+    from pydantic_ai.usage import RunUsage
+
+    usage = RunUsage(requests=1)
+    usage.incr(response.usage)
+    usage_limits.check_tokens(usage)
+
+
 class LLMExecutionBackend(Protocol):
     """Contract for pluggable LLM execution backends."""
 
@@ -467,11 +507,23 @@ class LegacyProviderBackend:
         try:
             from pydantic_ai.direct import model_request_sync
 
+            usage_limits = _usage_limits_for_request(
+                provider_id=provider.app_provider_id,
+                request=request,
+            )
+            if usage_limits is not None:
+                _check_before_request(
+                    usage_limits=usage_limits,
+                    count_input_tokens_fn=lambda: self._count_input_tokens_direct(provider, request),
+                )
+
             response = model_request_sync(
                 self._build_direct_model(provider=provider, model_name=model_name),
                 _build_messages(request),
                 model_settings=_build_model_settings(request),
             )
+            if usage_limits is not None:
+                _check_after_response(response=response, usage_limits=usage_limits)
             return _success_result_from_response(
                 response=response,
                 provider_name=provider.app_provider_id,
@@ -617,13 +669,11 @@ class PydanticAIGatewayBackend:
             model = self._build_model(provider_id=provider_id, model_name=model_name)
             from pydantic_ai.direct import model_request_sync
 
-            usage_limits = self._usage_limits_for_request(provider_id=provider_id, request=request)
+            usage_limits = _usage_limits_for_request(provider_id=provider_id, request=request)
             if usage_limits is not None:
-                self._check_before_request(
-                    provider=provider,
-                    provider_id=provider_id,
-                    request=request,
+                _check_before_request(
                     usage_limits=usage_limits,
+                    count_input_tokens_fn=lambda: self.count_input_tokens(provider, request),
                 )
 
             response = model_request_sync(
@@ -632,7 +682,7 @@ class PydanticAIGatewayBackend:
                 model_settings=_build_model_settings(request),
             )
             if usage_limits is not None:
-                self._check_after_response(response=response, usage_limits=usage_limits)
+                _check_after_response(response=response, usage_limits=usage_limits)
             return _success_result_from_response(
                 response=response,
                 provider_name=f"gateway/{provider_id}",
@@ -814,48 +864,6 @@ class PydanticAIGatewayBackend:
             "azure_openai": "openai",
         }
         return mapping.get(provider_id)
-
-    @staticmethod
-    def _supports_pre_request_count(provider_id: str) -> bool:
-        return provider_id in {"anthropic", "anthropic_bedrock", "gemini"}
-
-    def _usage_limits_for_request(self, *, provider_id: str, request: LLMInvocationRequest) -> Any | None:
-        if request.input_tokens_limit is None or request.input_tokens_limit <= 0:
-            return None
-
-        from pydantic_ai.usage import UsageLimits
-
-        return UsageLimits(
-            input_tokens_limit=request.input_tokens_limit,
-            count_tokens_before_request=self._supports_pre_request_count(provider_id),
-        )
-
-    def _check_before_request(
-        self,
-        *,
-        provider: Any,
-        provider_id: str,
-        request: LLMInvocationRequest,
-        usage_limits: Any,
-    ) -> None:
-        from pydantic_ai.usage import RunUsage
-
-        usage = RunUsage(requests=0)
-        if usage_limits.count_tokens_before_request:
-            counted = self.count_input_tokens(provider, request)
-            if counted is not None and counted >= 0:
-                usage.input_tokens = int(counted)
-
-        usage_limits.check_before_request(usage)
-
-    @staticmethod
-    def _check_after_response(*, response: Any, usage_limits: Any) -> None:
-        from pydantic_ai.usage import RunUsage
-
-        usage = RunUsage(requests=1)
-        usage.incr(response.usage)
-        usage_limits.check_tokens(usage)
-
 
 __all__ = [
     "ProviderMetadata",
