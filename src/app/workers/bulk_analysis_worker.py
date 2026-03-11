@@ -48,7 +48,7 @@ from .llm_backend import (
     LLMExecutionBackend,
     LLMInvocationRequest,
     LLMProviderRequest,
-    LegacyProviderBackend,
+    PydanticAIDirectBackend,
 )
 from .stage_contracts import BulkMapStageInput, stage_trace_attributes
 
@@ -230,7 +230,7 @@ class BulkAnalysisWorker(DashboardWorker):
         self._base_placeholders = dict(placeholder_values or {})
         self._project_name = project_name
         self._run_timestamp = datetime.now(timezone.utc)
-        self._llm_backend: LLMExecutionBackend = llm_backend or LegacyProviderBackend()
+        self._llm_backend: LLMExecutionBackend = llm_backend or PydanticAIDirectBackend()
         try:
             self._citation_store: CitationStore | None = CitationStore(project_dir)
         except Exception:

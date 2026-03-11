@@ -296,7 +296,7 @@ class LLMExecutionBackend(Protocol):
         """Execute `request` against the given provider."""
 
 
-class LegacyProviderBackend:
+class PydanticAIDirectBackend:
     """Default backend that uses direct Pydantic AI providers for worker requests."""
 
     _PYDANTIC_PROVIDER_NAMES: Mapping[str, str] = {
@@ -337,7 +337,7 @@ class LegacyProviderBackend:
             return LLMInvocationResult(
                 success=False,
                 content="",
-                error="Legacy provider backend requires DirectProviderMetadata",
+                error="Direct provider backend requires DirectProviderMetadata",
                 usage={},
                 provider=None,
                 model=request.model,
@@ -772,7 +772,7 @@ __all__ = [
     "LLMProviderRequest",
     "LLMInvocationRequest",
     "LLMInvocationResult",
-    "LegacyProviderBackend",
+    "PydanticAIDirectBackend",
     "PydanticAIGatewayBackend",
     "default_model_for_provider",
     "normalize_model_name",

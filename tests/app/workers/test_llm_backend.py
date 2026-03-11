@@ -15,7 +15,7 @@ from src.app.workers.llm_backend import (
     LLMInvocationRequest,
     LLMInvocationResult,
     LLMProviderRequest,
-    LegacyProviderBackend,
+    PydanticAIDirectBackend,
     PydanticAIGatewayBackend,
     ProviderMetadata,
     normalize_model_name,
@@ -29,8 +29,8 @@ class _ProviderMeta:
         self.default_model = default_model
 
 
-def test_legacy_provider_backend_requires_direct_provider_metadata() -> None:
-    backend = LegacyProviderBackend()
+def test_direct_provider_backend_requires_direct_provider_metadata() -> None:
+    backend = PydanticAIDirectBackend()
 
     result = backend.invoke(
         object(),
@@ -43,12 +43,12 @@ def test_legacy_provider_backend_requires_direct_provider_metadata() -> None:
     )
 
     assert result.success is False
-    assert result.error == "Legacy provider backend requires DirectProviderMetadata"
+    assert result.error == "Direct provider backend requires DirectProviderMetadata"
     assert result.model == "claude-sonnet-4-5"
 
 
-def test_legacy_provider_backend_count_input_tokens_requires_direct_provider_metadata() -> None:
-    backend = LegacyProviderBackend()
+def test_direct_provider_backend_count_input_tokens_requires_direct_provider_metadata() -> None:
+    backend = PydanticAIDirectBackend()
 
     result = backend.count_input_tokens(
         object(),
@@ -88,7 +88,7 @@ def test_resolve_model_name_uses_provider_defaults() -> None:
     assert resolve_model_name("anthropic_bedrock", None) == "anthropic.claude-sonnet-4-5-v1"
 
 
-def test_legacy_provider_backend_create_provider_loads_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_direct_provider_backend_create_provider_loads_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, Any] = {}
 
     class _StubSettings:
@@ -108,7 +108,7 @@ def test_legacy_provider_backend_create_provider_loads_settings(monkeypatch: pyt
     monkeypatch.setattr("src.app.core.secure_settings.SecureSettings", _StubSettings)
     monkeypatch.setattr("pydantic_ai.providers.azure.AzureProvider", _FakeAzureProvider)
 
-    backend = LegacyProviderBackend()
+    backend = PydanticAIDirectBackend()
     provider = backend.create_provider(
         LLMProviderRequest(
             provider_id="azure_openai",
@@ -127,7 +127,7 @@ def test_legacy_provider_backend_create_provider_loads_settings(monkeypatch: pyt
     }
 
 
-def test_legacy_provider_backend_create_provider_rejects_unsupported_provider(
+def test_direct_provider_backend_create_provider_rejects_unsupported_provider(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class _StubSettings:
@@ -136,7 +136,7 @@ def test_legacy_provider_backend_create_provider_rejects_unsupported_provider(
 
     monkeypatch.setattr("src.app.core.secure_settings.SecureSettings", _StubSettings)
 
-    backend = LegacyProviderBackend()
+    backend = PydanticAIDirectBackend()
 
     with pytest.raises(RuntimeError, match="not supported by the worker LLM backend"):
         backend.create_provider(
@@ -147,7 +147,7 @@ def test_legacy_provider_backend_create_provider_rejects_unsupported_provider(
         )
 
 
-def test_legacy_provider_backend_direct_provider_uses_pydantic_ai_requests(
+def test_direct_provider_backend_direct_provider_uses_pydantic_ai_requests(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: dict[str, Any] = {}
@@ -179,7 +179,7 @@ def test_legacy_provider_backend_direct_provider_uses_pydantic_ai_requests(
 
     monkeypatch.setattr("pydantic_ai.direct.model_request_sync", _fake_model_request_sync)
 
-    backend = LegacyProviderBackend()
+    backend = PydanticAIDirectBackend()
     monkeypatch.setattr(
         backend,
         "_build_direct_model",
@@ -215,7 +215,7 @@ def test_legacy_provider_backend_direct_provider_uses_pydantic_ai_requests(
     assert captured["call"]["model_settings"] == {"temperature": 0.2, "max_tokens": 512}
 
 
-def test_legacy_provider_backend_enforces_input_limit_before_request_when_counting_is_available(
+def test_direct_provider_backend_enforces_input_limit_before_request_when_counting_is_available(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def _fail_model_request_sync(*args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
@@ -223,7 +223,7 @@ def test_legacy_provider_backend_enforces_input_limit_before_request_when_counti
 
     monkeypatch.setattr("pydantic_ai.direct.model_request_sync", _fail_model_request_sync)
 
-    backend = LegacyProviderBackend()
+    backend = PydanticAIDirectBackend()
     provider = DirectProviderMetadata(
         app_provider_id="anthropic",
         provider_name="anthropic",
@@ -249,7 +249,7 @@ def test_legacy_provider_backend_enforces_input_limit_before_request_when_counti
     assert "input_tokens_limit" in result.error
 
 
-def test_legacy_provider_backend_enforces_input_limit_after_response_when_precount_is_unavailable(
+def test_direct_provider_backend_enforces_input_limit_after_response_when_precount_is_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def _fake_model_request_sync(
@@ -269,7 +269,7 @@ def test_legacy_provider_backend_enforces_input_limit_after_response_when_precou
 
     monkeypatch.setattr("pydantic_ai.direct.model_request_sync", _fake_model_request_sync)
 
-    backend = LegacyProviderBackend()
+    backend = PydanticAIDirectBackend()
     provider = DirectProviderMetadata(
         app_provider_id="openai",
         provider_name="openai",

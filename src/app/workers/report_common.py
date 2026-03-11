@@ -17,7 +17,7 @@ from src.common.markdown import PromptReference, SourceReference, compute_file_c
 
 from .base import DashboardWorker
 from .llm_backend import (
-    LegacyProviderBackend,
+    PydanticAIDirectBackend,
     LLMExecutionBackend,
     LLMProviderRequest,
 )
@@ -48,7 +48,7 @@ class ReportWorkerBase(DashboardWorker):
         self._project_dir = project_dir
         self._inputs = list(inputs)
         self._provider_id = provider_id
-        self._llm_backend: LLMExecutionBackend = llm_backend or LegacyProviderBackend()
+        self._llm_backend: LLMExecutionBackend = llm_backend or PydanticAIDirectBackend()
         self._model = self._llm_backend.normalize_model(provider_id, model)
         raw_custom = custom_model.strip() if custom_model else None
         self._custom_model = self._llm_backend.normalize_model(provider_id, raw_custom)

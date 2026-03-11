@@ -55,7 +55,7 @@ from src.app.ui.workspace.services import (
 )
 from src.app.workers import ConversionWorker, WorkerCoordinator, get_worker_pool
 from src.app.workers.highlight_worker import HighlightExtractionSummary
-from src.app.workers.llm_backend import LegacyProviderBackend, PydanticAIGatewayBackend
+from src.app.workers.llm_backend import PydanticAIDirectBackend, PydanticAIGatewayBackend
 from src.app.core.prompt_preview import generate_prompt_preview, PromptPreviewError
 from src.app.ui.widgets import BannerAction, SmartBanner
 
@@ -101,7 +101,7 @@ class ProjectWorkspace(QWidget):
         if self._feature_flags.pydantic_ai_gateway_enabled:
             llm_backend = PydanticAIGatewayBackend()
         else:
-            llm_backend = LegacyProviderBackend()
+            llm_backend = PydanticAIDirectBackend()
         self._bulk_service = BulkAnalysisService(self._workers, llm_backend=llm_backend)
         self._reports_service = ReportsService(self._workers, llm_backend=llm_backend)
         self._build_ui()
