@@ -30,7 +30,6 @@ from src.app.core.citations import CitationRecordStats, CitationStore
 from src.app.core.bulk_prompt_context import build_bulk_placeholders
 from src.app.core.placeholders.system import SourceFileContext
 from src.app.core.project_manager import ProjectMetadata
-from src.common.llm.base import BaseLLMProvider
 from src.common.llm.budgets import compute_input_token_budget
 from src.common.llm.tokens import TokenCounter
 from src.config.observability import trace_operation
@@ -311,7 +310,7 @@ class BulkAnalysisWorker(DashboardWorker):
         return body, metadata, source_context
 
     def _run(self) -> None:  # pragma: no cover - executed in worker thread
-        provider: Optional[BaseLLMProvider] = None
+        provider: Optional[object] = None
         successes = 0
         failures = 0
         skipped = 0
@@ -474,7 +473,7 @@ class BulkAnalysisWorker(DashboardWorker):
             self.log_message.emit(f"Bulk analysis worker encountered an error: {exc}")
             failures = max(failures, 1)
         finally:
-            if provider and isinstance(provider, BaseLLMProvider) and hasattr(provider, "deleteLater"):
+            if provider and hasattr(provider, "deleteLater"):
                 provider.deleteLater()
             if manifest is not None and manifest_path is not None:
                 try:
@@ -493,7 +492,7 @@ class BulkAnalysisWorker(DashboardWorker):
     # ------------------------------------------------------------------
     def _process_document(
         self,
-        provider: BaseLLMProvider,
+        provider: object,
         provider_config: ProviderConfig,
         bundle: PromptBundle,
         system_prompt: str,
@@ -746,7 +745,7 @@ class BulkAnalysisWorker(DashboardWorker):
 
     def _count_prompt_tokens(
         self,
-        provider: BaseLLMProvider,
+        provider: object,
         provider_config: ProviderConfig,
         system_prompt: str,
         user_prompt: str,
@@ -758,33 +757,22 @@ class BulkAnalysisWorker(DashboardWorker):
             return 0
 
         try:
-            provider_tokens = provider.count_tokens(text=combined_prompt)
-            if provider_tokens.get("success"):
-                counted = int(provider_tokens.get("token_count") or 0)
-                if counted > 0:
-                    return counted
+            counted = self._llm_backend.count_input_tokens(
+                provider,
+                LLMInvocationRequest(
+                    prompt=user_prompt,
+                    system_prompt=system_prompt,
+                    model=provider_config.model,
+                    model_settings={
+                        "temperature": 0.1,
+                        "max_tokens": max_tokens,
+                    },
+                ),
+            )
+            if counted is not None and counted >= 0:
+                return int(counted)
         except Exception:
-            self.logger.debug("Provider token preflight failed; falling back to local estimate", exc_info=True)
-
-        backend_counter = getattr(self._llm_backend, "count_input_tokens", None)
-        if callable(backend_counter):
-            try:
-                counted = backend_counter(
-                    provider,
-                    LLMInvocationRequest(
-                        prompt=user_prompt,
-                        system_prompt=system_prompt,
-                        model=provider_config.model,
-                        model_settings={
-                            "temperature": 0.1,
-                            "max_tokens": max_tokens,
-                        },
-                    ),
-                )
-                if counted is not None and counted >= 0:
-                    return int(counted)
-            except Exception:
-                self.logger.debug("Backend token preflight failed; falling back to local estimate", exc_info=True)
+            self.logger.debug("Backend token preflight failed; falling back to local estimate", exc_info=True)
 
         token_info = TokenCounter.count(
             text=combined_prompt,
@@ -802,7 +790,7 @@ class BulkAnalysisWorker(DashboardWorker):
     def _generate_fitting_chunks(
         self,
         *,
-        provider: BaseLLMProvider,
+        provider: object,
         provider_config: ProviderConfig,
         bundle: PromptBundle,
         system_prompt: str,
@@ -864,7 +852,7 @@ class BulkAnalysisWorker(DashboardWorker):
 
     def _invoke_provider(
         self,
-        provider: BaseLLMProvider,
+        provider: object,
         provider_config: ProviderConfig,
         prompt: str,
         system_prompt: str,

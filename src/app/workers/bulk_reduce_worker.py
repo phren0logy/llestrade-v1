@@ -37,7 +37,6 @@ from src.app.core.bulk_paths import (
 from src.app.core.bulk_prompt_context import build_bulk_placeholders
 from src.app.core.placeholders.system import SourceFileContext
 from src.app.core.project_manager import ProjectMetadata
-from src.common.llm.base import BaseLLMProvider
 from src.common.llm.budgets import compute_input_token_budget
 from src.common.llm.tokens import TokenCounter
 from src.config.observability import trace_operation
@@ -945,7 +944,7 @@ class BulkReduceWorker(DashboardWorker):
 
     def _invoke_provider(
         self,
-        provider: BaseLLMProvider,
+        provider: object,
         provider_cfg: ProviderConfig,
         prompt: str,
         system_prompt: str,
