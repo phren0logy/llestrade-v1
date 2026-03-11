@@ -14,6 +14,8 @@ from src.app.workers.llm_backend import (
     LLMInvocationResult,
     LLMProviderRequest,
     ProviderMetadata,
+    normalize_model_name,
+    resolve_model_name,
 )
 from src.app.workers.bulk_reduce_worker import BulkReduceWorker, ProviderConfig
 
@@ -21,6 +23,12 @@ from src.app.workers.bulk_reduce_worker import BulkReduceWorker, ProviderConfig
 class _NoNativeBackend(LLMExecutionBackend):
     def requires_native_provider(self) -> bool:
         return False
+
+    def normalize_model(self, provider_id: str, model: str | None) -> str | None:
+        return normalize_model_name(provider_id, model)
+
+    def resolve_model(self, provider_id: str, model: str | None) -> str | None:
+        return resolve_model_name(provider_id, model)
 
     def create_provider(self, request: LLMProviderRequest) -> object:
         return ProviderMetadata(provider_name=request.provider_id, default_model=request.model or "default-model")
@@ -44,6 +52,12 @@ class _ResultBackend(LLMExecutionBackend):
     def requires_native_provider(self) -> bool:
         return False
 
+    def normalize_model(self, provider_id: str, model: str | None) -> str | None:
+        return normalize_model_name(provider_id, model)
+
+    def resolve_model(self, provider_id: str, model: str | None) -> str | None:
+        return resolve_model_name(provider_id, model)
+
     def create_provider(self, request: LLMProviderRequest) -> object:
         return ProviderMetadata(provider_name=request.provider_id, default_model=request.model or "default-model")
 
@@ -59,6 +73,12 @@ class _CapturingBackend(LLMExecutionBackend):
 
     def requires_native_provider(self) -> bool:
         return False
+
+    def normalize_model(self, provider_id: str, model: str | None) -> str | None:
+        return normalize_model_name(provider_id, model)
+
+    def resolve_model(self, provider_id: str, model: str | None) -> str | None:
+        return resolve_model_name(provider_id, model)
 
     def create_provider(self, request: LLMProviderRequest) -> object:
         return ProviderMetadata(provider_name=request.provider_id, default_model=request.model or "default-model")
@@ -255,6 +275,24 @@ def test_bulk_reduce_create_provider_skips_native_bootstrap_for_no_native_backen
 
     assert provider.provider_name == "anthropic"
     assert provider.default_model
+
+
+def test_bulk_reduce_resolve_provider_normalizes_bedrock_model(tmp_path: Path) -> None:
+    group = BulkAnalysisGroup.create("Group")
+    group.provider_id = "anthropic_bedrock"
+    group.model = "claude-sonnet-4-5"
+    worker = BulkReduceWorker(
+        project_dir=tmp_path,
+        group=group,
+        metadata=ProjectMetadata(case_name="Case"),
+        force_rerun=False,
+        llm_backend=_NoNativeBackend(),
+    )
+
+    config = worker._resolve_provider()
+
+    assert config.provider_id == "anthropic_bedrock"
+    assert config.model == "anthropic.claude-sonnet-4-5-v1"
 
 
 @pytest.mark.parametrize(

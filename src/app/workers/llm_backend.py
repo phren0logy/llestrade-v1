@@ -10,6 +10,13 @@ from typing import Any, Dict, Mapping, Optional, Protocol
 
 logger = logging.getLogger(__name__)
 
+_BEDROCK_MODEL_ALIASES: dict[str, str] = {
+    "claude-sonnet-4-5": "anthropic.claude-sonnet-4-5-v1",
+    "claude-sonnet-4-5-20250929": "anthropic.claude-sonnet-4-5-v1",
+    "claude-opus-4-6": "anthropic.claude-opus-4-6-v1",
+    "claude-opus-4-1-20250805": "anthropic.claude-opus-4-1-20250805-v1:0",
+}
+
 
 @dataclass(frozen=True, slots=True)
 class LLMInvocationRequest:
@@ -81,6 +88,31 @@ def default_model_for_provider(provider_id: str) -> str:
     return defaults.get(provider_id, "")
 
 
+def normalize_model_name(provider_id: str, model: Optional[str]) -> str | None:
+    """Normalize explicit model selections for a provider."""
+    if model is None:
+        return None
+
+    normalized = str(model).strip()
+    if not normalized:
+        return None
+
+    if provider_id == "anthropic_bedrock":
+        return _BEDROCK_MODEL_ALIASES.get(normalized, normalized)
+
+    return normalized
+
+
+def resolve_model_name(provider_id: str, model: Optional[str]) -> str | None:
+    """Normalize a model name and fall back to the provider default when needed."""
+    normalized = normalize_model_name(provider_id, model)
+    if normalized:
+        return normalized
+
+    fallback = default_model_for_provider(provider_id)
+    return normalize_model_name(provider_id, fallback)
+
+
 class LLMExecutionBackend(Protocol):
     """Contract for pluggable LLM execution backends."""
 
@@ -89,6 +121,12 @@ class LLMExecutionBackend(Protocol):
 
     def create_provider(self, request: LLMProviderRequest) -> object:
         """Return a provider handle suitable for `invoke`."""
+
+    def normalize_model(self, provider_id: str, model: Optional[str]) -> str | None:
+        """Normalize an explicit model selection without applying defaults."""
+
+    def resolve_model(self, provider_id: str, model: Optional[str]) -> str | None:
+        """Resolve the runtime model name, applying backend defaults when needed."""
 
     def count_input_tokens(self, provider: Any, request: LLMInvocationRequest) -> int | None:
         """Return input token count when the backend can measure it."""
@@ -102,6 +140,12 @@ class LegacyProviderBackend:
 
     def requires_native_provider(self) -> bool:
         return True
+
+    def normalize_model(self, provider_id: str, model: Optional[str]) -> str | None:
+        return normalize_model_name(provider_id, model)
+
+    def resolve_model(self, provider_id: str, model: Optional[str]) -> str | None:
+        return resolve_model_name(provider_id, model)
 
     def create_provider(self, request: LLMProviderRequest) -> object:
         from src.app.core.secure_settings import SecureSettings
@@ -149,9 +193,10 @@ class LegacyProviderBackend:
         return self._extract_token_count(result)
 
     def invoke(self, provider: Any, request: LLMInvocationRequest) -> LLMInvocationResult:
+        provider_id = self._resolve_provider_id(provider) or ""
         kwargs: Dict[str, Any] = {
             "prompt": request.prompt,
-            "model": request.model,
+            "model": self.resolve_model(provider_id, request.model) if request.model is not None else request.model,
             "system_prompt": request.system_prompt,
             "temperature": request.temperature,
             "max_tokens": request.max_tokens,
@@ -177,6 +222,18 @@ class LegacyProviderBackend:
             return None
         counted = int(token_count or 0)
         return counted if counted >= 0 else None
+
+    @staticmethod
+    def _resolve_provider_id(provider: Any) -> str | None:
+        value = getattr(provider, "provider_name", None)
+        if callable(value):
+            try:
+                value = value()
+            except Exception:
+                value = None
+        if not value:
+            return None
+        return str(value)
 
 
 class PydanticAIGatewayBackend:
@@ -254,10 +311,16 @@ class PydanticAIGatewayBackend:
     def requires_native_provider(self) -> bool:
         return False
 
+    def normalize_model(self, provider_id: str, model: Optional[str]) -> str | None:
+        return normalize_model_name(provider_id, model)
+
+    def resolve_model(self, provider_id: str, model: Optional[str]) -> str | None:
+        return resolve_model_name(provider_id, model)
+
     def create_provider(self, request: LLMProviderRequest) -> object:
         return ProviderMetadata(
             provider_name=request.provider_id,
-            default_model=request.model or default_model_for_provider(request.provider_id),
+            default_model=self.resolve_model(request.provider_id, request.model) or "",
         )
 
     def count_input_tokens(self, provider: Any, request: LLMInvocationRequest) -> int | None:
@@ -265,7 +328,10 @@ class PydanticAIGatewayBackend:
         if not provider_id:
             return None
 
-        model_name = request.model or self._resolve_default_model(provider)
+        model_name = self.resolve_model(
+            provider_id,
+            request.model or self._resolve_default_model(provider),
+        )
         if not model_name:
             return None
 
@@ -305,7 +371,10 @@ class PydanticAIGatewayBackend:
                 reason="Unable to resolve provider ID for Gateway backend",
             )
 
-        model_name = request.model or self._resolve_default_model(provider)
+        model_name = self.resolve_model(
+            provider_id,
+            request.model or self._resolve_default_model(provider),
+        )
         if not model_name:
             return self._fallback_or_error(
                 provider=provider,
@@ -638,4 +707,6 @@ __all__ = [
     "LegacyProviderBackend",
     "PydanticAIGatewayBackend",
     "default_model_for_provider",
+    "normalize_model_name",
+    "resolve_model_name",
 ]

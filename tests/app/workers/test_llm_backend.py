@@ -17,6 +17,8 @@ from src.app.workers.llm_backend import (
     LegacyProviderBackend,
     PydanticAIGatewayBackend,
     ProviderMetadata,
+    normalize_model_name,
+    resolve_model_name,
 )
 
 
@@ -111,6 +113,16 @@ def test_invocation_result_normalizes_non_dict_usage() -> None:
     assert result.success is True
     assert result.content == "ok"
     assert result.usage == {}
+
+
+def test_normalize_model_name_translates_bedrock_aliases() -> None:
+    assert normalize_model_name("anthropic_bedrock", "claude-sonnet-4-5") == "anthropic.claude-sonnet-4-5-v1"
+    assert normalize_model_name("anthropic", "claude-sonnet-4-5") == "claude-sonnet-4-5"
+
+
+def test_resolve_model_name_uses_provider_defaults() -> None:
+    assert resolve_model_name("azure_openai", None) == "gpt-4.1"
+    assert resolve_model_name("anthropic_bedrock", None) == "anthropic.claude-sonnet-4-5-v1"
 
 
 def test_legacy_provider_backend_create_provider_loads_settings(monkeypatch: pytest.MonkeyPatch) -> None:

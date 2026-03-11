@@ -25,6 +25,8 @@ from src.app.workers.llm_backend import (
     LLMProviderRequest,
     LegacyProviderBackend,
     ProviderMetadata,
+    normalize_model_name,
+    resolve_model_name,
 )
 from src.app.workers.report_worker import DraftReportWorker, ReportRefinementWorker
 from src.app.workers import report_common
@@ -88,6 +90,12 @@ class _NoNativeBackend(LLMExecutionBackend):
     def requires_native_provider(self) -> bool:
         return False
 
+    def normalize_model(self, provider_id: str, model: str | None) -> str | None:
+        return normalize_model_name(provider_id, model)
+
+    def resolve_model(self, provider_id: str, model: str | None) -> str | None:
+        return resolve_model_name(provider_id, model)
+
     def create_provider(self, request: LLMProviderRequest) -> object:
         return ProviderMetadata(provider_name=request.provider_id, default_model=request.model or "default-model")
 
@@ -110,6 +118,12 @@ class _ResultBackend(LLMExecutionBackend):
     def requires_native_provider(self) -> bool:
         return False
 
+    def normalize_model(self, provider_id: str, model: str | None) -> str | None:
+        return normalize_model_name(provider_id, model)
+
+    def resolve_model(self, provider_id: str, model: str | None) -> str | None:
+        return resolve_model_name(provider_id, model)
+
     def create_provider(self, request: LLMProviderRequest) -> object:
         return ProviderMetadata(provider_name=request.provider_id, default_model=request.model or "default-model")
 
@@ -125,6 +139,12 @@ class _CapturingBackend(LLMExecutionBackend):
 
     def requires_native_provider(self) -> bool:
         return False
+
+    def normalize_model(self, provider_id: str, model: str | None) -> str | None:
+        return normalize_model_name(provider_id, model)
+
+    def resolve_model(self, provider_id: str, model: str | None) -> str | None:
+        return resolve_model_name(provider_id, model)
 
     def create_provider(self, request: LLMProviderRequest) -> object:
         return ProviderMetadata(provider_name=request.provider_id, default_model=request.model or "default-model")
@@ -589,6 +609,33 @@ def test_gateway_backend_path_skips_native_provider_initialization(
     provider = worker._create_provider("system prompt")
     assert provider.provider_name == "anthropic"
     assert provider.default_model == "claude-sonnet-4-5"
+
+
+def test_report_worker_normalizes_bedrock_model_names(tmp_path: Path, qt_app: QApplication) -> None:
+    assert qt_app is not None
+    (common_paths, _refinement_system_prompt_path) = _prepare_common_files(tmp_path)
+    (
+        template_path,
+        generation_user_prompt_path,
+        _refinement_user_prompt_path,
+        generation_system_prompt_path,
+    ) = common_paths
+    worker = DraftReportWorker(
+        project_dir=tmp_path,
+        inputs=[(REPORT_CATEGORY_CONVERTED, "converted_documents/doc.md")],
+        provider_id="anthropic_bedrock",
+        model="claude-sonnet-4-5",
+        custom_model=None,
+        context_window=None,
+        template_path=template_path,
+        transcript_path=None,
+        generation_user_prompt_path=generation_user_prompt_path,
+        generation_system_prompt_path=generation_system_prompt_path,
+        metadata=ProjectMetadata(case_name="Case"),
+        llm_backend=_NoNativeBackend(),
+    )
+
+    assert worker._model == "anthropic.claude-sonnet-4-5-v1"
 
 
 def test_report_draft_trace_attributes_match_between_legacy_and_gateway(

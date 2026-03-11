@@ -1013,7 +1013,10 @@ class BulkAnalysisWorker(DashboardWorker):
 
     def _resolve_provider(self) -> ProviderConfig:
         provider_id = self._group.provider_id or self._default_provider[0] or "anthropic"
-        model = self._group.model or self._default_provider[1]
+        model = self._llm_backend.normalize_model(
+            provider_id,
+            self._group.model or self._default_provider[1],
+        )
         return ProviderConfig(provider_id=provider_id, model=model)
 
     def _create_provider(

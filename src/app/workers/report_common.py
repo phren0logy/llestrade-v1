@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from src.app.core.citations import CitationRecordStats, CitationStore, parse_citation_tokens
 from src.app.core.report_prompt_context import build_report_base_placeholders
@@ -21,16 +21,6 @@ from .llm_backend import (
     LLMExecutionBackend,
     LLMProviderRequest,
 )
-
-# Mapping of Anthropic cloud model slugs to their AWS Bedrock equivalents.
-# Reference: https://docs.claude.com/en/api/claude-on-amazon-bedrock
-_BEDROCK_MODEL_ALIASES: Dict[str, str] = {
-    "claude-sonnet-4-5": "anthropic.claude-sonnet-4-5-v1",
-    "claude-sonnet-4-5-20250929": "anthropic.claude-sonnet-4-5-v1",
-    "claude-opus-4-6": "anthropic.claude-opus-4-6-v1",
-    # Backward compatibility for existing saved selections.
-    "claude-opus-4-1-20250805": "anthropic.claude-opus-4-1-20250805-v1:0",
-}
 _CITATION_ID_RE = re.compile(r"^ev_[a-z0-9]{8,64}$")
 _MIN_REPORT_INPUT_BUDGET = 4_000
 
@@ -58,9 +48,10 @@ class ReportWorkerBase(DashboardWorker):
         self._project_dir = project_dir
         self._inputs = list(inputs)
         self._provider_id = provider_id
-        self._model = self._resolve_model_alias(model)
+        self._llm_backend: LLMExecutionBackend = llm_backend or LegacyProviderBackend()
+        self._model = self._llm_backend.normalize_model(provider_id, model)
         raw_custom = custom_model.strip() if custom_model else None
-        self._custom_model = self._resolve_model_alias(raw_custom)
+        self._custom_model = self._llm_backend.normalize_model(provider_id, raw_custom)
         self._context_window = context_window
         self._metadata = metadata
         self._max_report_tokens = max_report_tokens
@@ -68,7 +59,6 @@ class ReportWorkerBase(DashboardWorker):
         effective_name = project_name or metadata.case_name or project_dir.name
         self._project_name = effective_name
         self._run_timestamp = datetime.now(timezone.utc)
-        self._llm_backend: LLMExecutionBackend = llm_backend or LegacyProviderBackend()
         try:
             self._citation_store: CitationStore | None = CitationStore(project_dir)
         except Exception:
@@ -293,15 +283,5 @@ class ReportWorkerBase(DashboardWorker):
                 system_prompt=system_prompt,
             )
         )
-
-    def _resolve_model_alias(self, model: Optional[str]) -> Optional[str]:
-        """Translate known cloud model slugs into Bedrock IDs when needed."""
-        if not model:
-            return None
-        if self._provider_id != "anthropic_bedrock":
-            return model
-        normalized = model.strip()
-        return _BEDROCK_MODEL_ALIASES.get(normalized, normalized)
-
 
 __all__ = ["ReportWorkerBase"]

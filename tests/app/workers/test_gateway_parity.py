@@ -28,6 +28,8 @@ from src.app.workers.llm_backend import (
     LLMProviderRequest,
     LegacyProviderBackend,
     ProviderMetadata,
+    normalize_model_name,
+    resolve_model_name,
 )
 from src.app.workers.report_worker import DraftReportWorker, ReportRefinementWorker
 from src.common.llm.base import BaseLLMProvider
@@ -100,6 +102,12 @@ class _SequenceGatewayBackend(LLMExecutionBackend):
 
     def requires_native_provider(self) -> bool:
         return False
+
+    def normalize_model(self, provider_id: str, model: str | None) -> str | None:
+        return normalize_model_name(provider_id, model)
+
+    def resolve_model(self, provider_id: str, model: str | None) -> str | None:
+        return resolve_model_name(provider_id, model)
 
     def create_provider(self, request: LLMProviderRequest) -> object:
         return ProviderMetadata(provider_name=request.provider_id, default_model=request.model or "default-model")

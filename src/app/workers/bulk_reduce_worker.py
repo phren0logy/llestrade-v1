@@ -925,7 +925,7 @@ class BulkReduceWorker(DashboardWorker):
 
     def _resolve_provider(self) -> ProviderConfig:
         provider_id = self._group.provider_id or "anthropic"
-        model = self._group.model or None
+        model = self._llm_backend.normalize_model(provider_id, self._group.model or None)
         temperature = 0.1
         if getattr(self._group, "use_reasoning", False):
             # crude detection for thinking models; can be refined as needed

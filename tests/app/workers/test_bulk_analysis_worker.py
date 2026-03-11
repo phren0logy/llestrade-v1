@@ -27,6 +27,8 @@ from src.app.workers.llm_backend import (
     LLMInvocationResult,
     LLMProviderRequest,
     ProviderMetadata,
+    normalize_model_name,
+    resolve_model_name,
 )
 
 
@@ -46,6 +48,12 @@ class _FakeProvider:
 class _NoNativeBackend(LLMExecutionBackend):
     def requires_native_provider(self) -> bool:
         return False
+
+    def normalize_model(self, provider_id: str, model: str | None) -> str | None:
+        return normalize_model_name(provider_id, model)
+
+    def resolve_model(self, provider_id: str, model: str | None) -> str | None:
+        return resolve_model_name(provider_id, model)
 
     def create_provider(self, request: LLMProviderRequest) -> object:
         return ProviderMetadata(provider_name=request.provider_id, default_model=request.model or "default-model")
@@ -69,6 +77,12 @@ class _ResultBackend(LLMExecutionBackend):
     def requires_native_provider(self) -> bool:
         return False
 
+    def normalize_model(self, provider_id: str, model: str | None) -> str | None:
+        return normalize_model_name(provider_id, model)
+
+    def resolve_model(self, provider_id: str, model: str | None) -> str | None:
+        return resolve_model_name(provider_id, model)
+
     def create_provider(self, request: LLMProviderRequest) -> object:
         return ProviderMetadata(provider_name=request.provider_id, default_model=request.model or "default-model")
 
@@ -84,6 +98,12 @@ class _CountingBackend(LLMExecutionBackend):
 
     def requires_native_provider(self) -> bool:
         return False
+
+    def normalize_model(self, provider_id: str, model: str | None) -> str | None:
+        return normalize_model_name(provider_id, model)
+
+    def resolve_model(self, provider_id: str, model: str | None) -> str | None:
+        return resolve_model_name(provider_id, model)
 
     def create_provider(self, request: LLMProviderRequest) -> object:
         return ProviderMetadata(provider_name=request.provider_id, default_model=request.model or "default-model")
@@ -198,6 +218,25 @@ def test_bulk_map_create_provider_skips_native_bootstrap_for_no_native_backend(
 
     assert provider.provider_name == "anthropic"
     assert provider.default_model
+
+
+def test_bulk_map_resolve_provider_normalizes_bedrock_model(tmp_path: Path) -> None:
+    group = BulkAnalysisGroup.create("Group")
+    group.provider_id = "anthropic_bedrock"
+    group.model = "claude-sonnet-4-5"
+    worker = BulkAnalysisWorker(
+        project_dir=tmp_path,
+        group=group,
+        files=[],
+        metadata=ProjectMetadata(case_name="Case"),
+        force_rerun=False,
+        llm_backend=_NoNativeBackend(),
+    )
+
+    config = worker._resolve_provider()
+
+    assert config.provider_id == "anthropic_bedrock"
+    assert config.model == "anthropic.claude-sonnet-4-5-v1"
 
 
 @pytest.mark.parametrize(
