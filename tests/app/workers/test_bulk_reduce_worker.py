@@ -13,9 +13,11 @@ from src.app.workers import bulk_reduce_worker as reduce_module
 from src.app.workers.llm_backend import (
     LLMExecutionBackend,
     LLMInvocationRequest,
+    LLMProviderCapabilities,
     LLMProviderRequest,
     ProviderMetadata,
     normalize_model_name,
+    provider_capabilities,
     resolve_model_name,
 )
 from src.app.workers.bulk_reduce_worker import BulkReduceWorker, ProviderConfig
@@ -41,6 +43,9 @@ class _NoNativeBackend(LLMExecutionBackend):
     def resolve_model(self, provider_id: str, model: str | None) -> str | None:
         return resolve_model_name(provider_id, model)
 
+    def capabilities(self, provider_id: str, model: str | None):
+        return provider_capabilities(provider_id, model)
+
     def create_provider(self, request: LLMProviderRequest) -> object:
         return ProviderMetadata(provider_name=request.provider_id, default_model=request.model or "default-model")
 
@@ -58,6 +63,9 @@ class _ResultBackend(LLMExecutionBackend):
 
     def resolve_model(self, provider_id: str, model: str | None) -> str | None:
         return resolve_model_name(provider_id, model)
+
+    def capabilities(self, provider_id: str, model: str | None):
+        return provider_capabilities(provider_id, model)
 
     def create_provider(self, request: LLMProviderRequest) -> object:
         return ProviderMetadata(provider_name=request.provider_id, default_model=request.model or "default-model")
@@ -80,6 +88,9 @@ class _CapturingBackend(LLMExecutionBackend):
     def resolve_model(self, provider_id: str, model: str | None) -> str | None:
         return resolve_model_name(provider_id, model)
 
+    def capabilities(self, provider_id: str, model: str | None):
+        return provider_capabilities(provider_id, model)
+
     def create_provider(self, request: LLMProviderRequest) -> object:
         return ProviderMetadata(provider_name=request.provider_id, default_model=request.model or "default-model")
 
@@ -89,6 +100,17 @@ class _CapturingBackend(LLMExecutionBackend):
         if isinstance(self._result, Exception):
             raise self._result
         return self._result
+
+
+class _NoReasoningBackend(_NoNativeBackend):
+    def capabilities(self, provider_id: str, model: str | None):
+        caps = super().capabilities(provider_id, model)
+        return LLMProviderCapabilities(
+            provider_id=caps.provider_id,
+            model=caps.model,
+            reasoning_mode="none",
+            supports_pre_request_token_count=caps.supports_pre_request_token_count,
+        )
 
 
 def _capture_traces(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, dict[str, object] | None]]:
@@ -294,6 +316,23 @@ def test_bulk_reduce_resolve_provider_normalizes_bedrock_model(tmp_path: Path) -
 
     assert config.provider_id == "anthropic_bedrock"
     assert config.model == "anthropic.claude-sonnet-4-5-v1"
+
+
+def test_bulk_reduce_resolve_provider_rejects_unsupported_reasoning_mode(tmp_path: Path) -> None:
+    group = BulkAnalysisGroup.create("Group")
+    group.provider_id = "azure_openai"
+    group.model = "gpt-4.1"
+    group.use_reasoning = True
+    worker = BulkReduceWorker(
+        project_dir=tmp_path,
+        group=group,
+        metadata=ProjectMetadata(case_name="Case"),
+        force_rerun=False,
+        llm_backend=_NoReasoningBackend(),
+    )
+
+    with pytest.raises(RuntimeError, match="does not support reasoning mode"):
+        worker._resolve_provider()
 
 
 @pytest.mark.parametrize(

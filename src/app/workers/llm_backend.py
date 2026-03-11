@@ -6,7 +6,7 @@ import asyncio
 import logging
 import os
 from dataclasses import dataclass, field
-from typing import Any, Mapping, Optional, Protocol
+from typing import Any, Literal, Mapping, Optional, Protocol
 
 from pydantic_ai.settings import ModelSettings
 
@@ -35,6 +35,8 @@ _GATEWAY_UPSTREAM_PROVIDERS: Mapping[str, str] = {
     "azure_openai": "openai",
 }
 
+ReasoningMode = Literal["none", "anthropic", "google", "openai"]
+
 
 @dataclass(frozen=True, slots=True)
 class LLMInvocationRequest:
@@ -45,6 +47,20 @@ class LLMInvocationRequest:
     model: Optional[str]
     model_settings: ModelSettings = field(default_factory=dict)
     input_tokens_limit: Optional[int] = None
+
+
+@dataclass(frozen=True, slots=True)
+class LLMProviderCapabilities:
+    """Capability metadata for a provider/model pair as exposed by the backend."""
+
+    provider_id: str
+    model: str | None
+    reasoning_mode: ReasoningMode
+    supports_pre_request_token_count: bool
+
+    @property
+    def supports_reasoning(self) -> bool:
+        return self.reasoning_mode != "none"
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,6 +124,30 @@ def resolve_model_name(provider_id: str, model: Optional[str]) -> str | None:
 
     fallback = default_model_for_provider(provider_id)
     return normalize_model_name(provider_id, fallback)
+
+
+def provider_capabilities(provider_id: str, model: Optional[str]) -> LLMProviderCapabilities:
+    """Return centralized capability metadata for a provider/model pair."""
+
+    resolved_model = normalize_model_name(provider_id, model)
+    reasoning_mode: ReasoningMode = "none"
+    supports_pre_request_token_count = False
+
+    if provider_id in {"anthropic", "anthropic_bedrock"}:
+        reasoning_mode = "anthropic"
+        supports_pre_request_token_count = True
+    elif provider_id == "gemini":
+        reasoning_mode = "google"
+        supports_pre_request_token_count = True
+    elif provider_id in {"openai", "azure_openai"}:
+        reasoning_mode = "openai"
+
+    return LLMProviderCapabilities(
+        provider_id=provider_id,
+        model=resolved_model,
+        reasoning_mode=reasoning_mode,
+        supports_pre_request_token_count=supports_pre_request_token_count,
+    )
 
 
 def _build_messages(request: LLMInvocationRequest) -> list[Any]:
@@ -193,10 +233,6 @@ def _require_response_text(
     return response
 
 
-def _supports_pre_request_count(provider_id: str) -> bool:
-    return provider_id in {"anthropic", "anthropic_bedrock", "gemini"}
-
-
 def _usage_limits_for_request(*, provider_id: str, request: LLMInvocationRequest) -> Any | None:
     if request.input_tokens_limit is None or request.input_tokens_limit <= 0:
         return None
@@ -205,7 +241,7 @@ def _usage_limits_for_request(*, provider_id: str, request: LLMInvocationRequest
 
     return UsageLimits(
         input_tokens_limit=request.input_tokens_limit,
-        count_tokens_before_request=_supports_pre_request_count(provider_id),
+        count_tokens_before_request=provider_capabilities(provider_id, request.model).supports_pre_request_token_count,
     )
 
 
@@ -272,6 +308,9 @@ class LLMExecutionBackend(Protocol):
     def resolve_model(self, provider_id: str, model: Optional[str]) -> str | None:
         """Resolve the runtime model name, applying backend defaults when needed."""
 
+    def capabilities(self, provider_id: str, model: Optional[str]) -> LLMProviderCapabilities:
+        """Describe backend capabilities for the given provider/model."""
+
     def count_input_tokens(self, provider: Any, request: LLMInvocationRequest) -> int | None:
         """Return input token count when the backend can measure it."""
 
@@ -289,6 +328,9 @@ class PydanticAIDirectBackend:
 
     def resolve_model(self, provider_id: str, model: Optional[str]) -> str | None:
         return resolve_model_name(provider_id, model)
+
+    def capabilities(self, provider_id: str, model: Optional[str]) -> LLMProviderCapabilities:
+        return provider_capabilities(provider_id, model)
 
     def create_provider(self, request: LLMProviderRequest) -> object:
         from src.app.core.secure_settings import SecureSettings
@@ -501,6 +543,9 @@ class PydanticAIGatewayBackend:
     def resolve_model(self, provider_id: str, model: Optional[str]) -> str | None:
         return resolve_model_name(provider_id, model)
 
+    def capabilities(self, provider_id: str, model: Optional[str]) -> LLMProviderCapabilities:
+        return provider_capabilities(provider_id, model)
+
     def create_provider(self, request: LLMProviderRequest) -> object:
         if request.provider_id not in _GATEWAY_UPSTREAM_PROVIDERS:
             supported = ", ".join(supported_gateway_provider_ids())
@@ -685,10 +730,12 @@ __all__ = [
     "LLMExecutionBackend",
     "LLMProviderRequest",
     "LLMInvocationRequest",
+    "LLMProviderCapabilities",
     "PydanticAIDirectBackend",
     "PydanticAIGatewayBackend",
     "default_model_for_provider",
     "normalize_model_name",
+    "provider_capabilities",
     "resolve_model_name",
     "supported_direct_provider_ids",
     "supported_gateway_provider_ids",

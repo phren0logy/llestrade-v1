@@ -925,12 +925,12 @@ class BulkReduceWorker(DashboardWorker):
     def _resolve_provider(self) -> ProviderConfig:
         provider_id = self._group.provider_id or "anthropic"
         model = self._llm_backend.normalize_model(provider_id, self._group.model or None)
+        capabilities = self._llm_backend.capabilities(provider_id, model)
+        if getattr(self._group, "use_reasoning", False) and not capabilities.supports_reasoning:
+            raise RuntimeError(
+                f"Provider '{provider_id}' does not support reasoning mode in the current LLM backend."
+            )
         temperature = 0.1
-        if getattr(self._group, "use_reasoning", False):
-            # crude detection for thinking models; can be refined as needed
-            name = (model or "").lower()
-            if "think" in name or "reason" in name:
-                temperature = 1.0
         return ProviderConfig(provider_id=provider_id, model=model, temperature=temperature)
 
     def _create_provider(self, config: ProviderConfig) -> object:

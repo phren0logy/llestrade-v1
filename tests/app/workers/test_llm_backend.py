@@ -13,11 +13,13 @@ from pydantic_ai.usage import RequestUsage
 from src.app.workers.llm_backend import (
     DirectProviderMetadata,
     LLMInvocationRequest,
+    LLMProviderCapabilities,
     LLMProviderRequest,
     PydanticAIDirectBackend,
     PydanticAIGatewayBackend,
     ProviderMetadata,
     normalize_model_name,
+    provider_capabilities,
     resolve_model_name,
     supported_direct_provider_ids,
     supported_gateway_provider_ids,
@@ -69,6 +71,27 @@ def test_normalize_model_name_translates_bedrock_aliases() -> None:
 def test_resolve_model_name_uses_provider_defaults() -> None:
     assert resolve_model_name("azure_openai", None) == "gpt-4.1"
     assert resolve_model_name("anthropic_bedrock", None) == "anthropic.claude-sonnet-4-5-v1"
+
+
+def test_provider_capabilities_centralize_reasoning_and_preflight_support() -> None:
+    assert provider_capabilities("anthropic", "claude-sonnet-4-5") == LLMProviderCapabilities(
+        provider_id="anthropic",
+        model="claude-sonnet-4-5",
+        reasoning_mode="anthropic",
+        supports_pre_request_token_count=True,
+    )
+    assert provider_capabilities("gemini", "gemini-2.5-pro") == LLMProviderCapabilities(
+        provider_id="gemini",
+        model="gemini-2.5-pro",
+        reasoning_mode="google",
+        supports_pre_request_token_count=True,
+    )
+    assert provider_capabilities("openai", "gpt-4.1") == LLMProviderCapabilities(
+        provider_id="openai",
+        model="gpt-4.1",
+        reasoning_mode="openai",
+        supports_pre_request_token_count=False,
+    )
 
 
 def test_direct_provider_backend_create_provider_loads_settings(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -450,6 +473,20 @@ def test_supported_provider_lists_are_explicit() -> None:
         "gemini",
         "openai",
     )
+
+
+def test_direct_backend_capabilities_delegate_to_shared_capability_map() -> None:
+    backend = PydanticAIDirectBackend()
+
+    assert backend.capabilities("anthropic_bedrock", "claude-sonnet-4-5").reasoning_mode == "anthropic"
+    assert backend.capabilities("anthropic_bedrock", "claude-sonnet-4-5").supports_pre_request_token_count is True
+
+
+def test_gateway_backend_capabilities_delegate_to_shared_capability_map() -> None:
+    backend = PydanticAIGatewayBackend(api_key="gateway-key")
+
+    assert backend.capabilities("openai", "gpt-4.1").reasoning_mode == "openai"
+    assert backend.capabilities("openai", "gpt-4.1").supports_pre_request_token_count is False
 
 
 def test_gateway_backend_rejects_unsupported_provider_metadata() -> None:

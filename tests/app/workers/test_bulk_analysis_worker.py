@@ -29,6 +29,7 @@ from src.app.workers.llm_backend import (
     LLMProviderRequest,
     ProviderMetadata,
     normalize_model_name,
+    provider_capabilities,
     resolve_model_name,
 )
 
@@ -53,6 +54,9 @@ class _NoNativeBackend(LLMExecutionBackend):
     def resolve_model(self, provider_id: str, model: str | None) -> str | None:
         return resolve_model_name(provider_id, model)
 
+    def capabilities(self, provider_id: str, model: str | None):
+        return provider_capabilities(provider_id, model)
+
     def create_provider(self, request: LLMProviderRequest) -> object:
         return ProviderMetadata(provider_name=request.provider_id, default_model=request.model or "default-model")
 
@@ -70,6 +74,9 @@ class _ResultBackend(LLMExecutionBackend):
 
     def resolve_model(self, provider_id: str, model: str | None) -> str | None:
         return resolve_model_name(provider_id, model)
+
+    def capabilities(self, provider_id: str, model: str | None):
+        return provider_capabilities(provider_id, model)
 
     def create_provider(self, request: LLMProviderRequest) -> object:
         return ProviderMetadata(provider_name=request.provider_id, default_model=request.model or "default-model")
@@ -91,6 +98,9 @@ class _CountingBackend(LLMExecutionBackend):
 
     def resolve_model(self, provider_id: str, model: str | None) -> str | None:
         return resolve_model_name(provider_id, model)
+
+    def capabilities(self, provider_id: str, model: str | None):
+        return provider_capabilities(provider_id, model)
 
     def create_provider(self, request: LLMProviderRequest) -> object:
         return ProviderMetadata(provider_name=request.provider_id, default_model=request.model or "default-model")

@@ -781,7 +781,11 @@ class BulkAnalysisWorker(DashboardWorker):
         )
         if token_info.get("success"):
             counted = int(token_info.get("token_count") or 0)
-            if provider_config.provider_id in {"anthropic", "anthropic_bedrock"}:
+            capabilities = self._llm_backend.capabilities(
+                provider_config.provider_id,
+                provider_config.model,
+            )
+            if capabilities.reasoning_mode == "anthropic":
                 return max(counted, max(len(combined_prompt) // 3, 1))
             if counted > 0:
                 return counted
