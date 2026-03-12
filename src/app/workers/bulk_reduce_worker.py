@@ -80,6 +80,16 @@ _DYNAMIC_REDUCE_KEYS: frozenset[str] = frozenset(
 )
 
 
+def _prompt_body_from_text(raw: str) -> str:
+    """Return prompt-ready content with managed YAML frontmatter removed."""
+
+    try:
+        post = frontmatter.loads(raw)
+    except Exception:
+        return raw
+    return post.content or ""
+
+
 def _manifest_path(project_dir: Path, group: BulkAnalysisGroup) -> Path:
     slug = getattr(group, "slug", None) or group.folder_name
     return project_dir / "bulk_analysis" / slug / "reduce" / "manifest.json"
@@ -959,7 +969,7 @@ class BulkReduceWorker(DashboardWorker):
             if self.is_cancelled():
                 raise BulkAnalysisCancelled
             try:
-                text = abs_path.read_text(encoding="utf-8")
+                text = _prompt_body_from_text(abs_path.read_text(encoding="utf-8"))
             except Exception as exc:
                 self.file_failed.emit(rel_key, str(exc))
                 text = ""

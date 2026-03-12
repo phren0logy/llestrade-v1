@@ -292,6 +292,76 @@ def test_bulk_reduce_worker_applies_placeholder_values(tmp_path: Path, monkeypat
     assert expected_url in user_prompt
 
 
+def test_bulk_reduce_prompt_strips_frontmatter_but_keeps_body_markers_and_citations(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_dir = tmp_path
+    converted_dir = project_dir / "converted_documents"
+    converted_dir.mkdir(parents=True, exist_ok=True)
+
+    import frontmatter
+
+    doc_path = converted_dir / "doc.md"
+    post = frontmatter.Post(
+        "<!--- source doc.pdf#page=7 --->\nBody text with [CIT:ev_deadbeef].\n",
+        metadata={
+            "document_type": "converted-document",
+            "sources": [{"relative": "converted/doc.md"}],
+        },
+    )
+    doc_path.write_text(frontmatter.dumps(post), encoding="utf-8")
+
+    group = BulkAnalysisGroup.create("Group")
+    group.combine_converted_files = ["doc.md"]
+
+    monkeypatch.setattr(
+        reduce_module,
+        "load_prompts",
+        lambda *_args, **_kwargs: reduce_module.PromptBundle("System", "User {document_content}"),
+    )
+    monkeypatch.setattr(
+        BulkReduceWorker,
+        "_resolve_provider",
+        lambda self: ProviderConfig(provider_id="anthropic", model="claude-sonnet-4-5", temperature=0.1),
+    )
+    monkeypatch.setattr(
+        BulkReduceWorker,
+        "_create_provider",
+        lambda self, *_: object(),
+    )
+    monkeypatch.setattr(
+        reduce_module,
+        "should_chunk",
+        lambda *_args, **_kwargs: (False, 100, 2000),
+    )
+
+    captured: dict[str, str] = {}
+
+    def fake_invoke(self, provider, cfg, prompt, system_prompt, **kwargs):  # noqa: ANN001
+        _ = provider, cfg, system_prompt, kwargs
+        captured["prompt"] = prompt
+        return "summary"
+
+    monkeypatch.setattr(BulkReduceWorker, "_invoke_provider", fake_invoke)
+
+    worker = BulkReduceWorker(
+        project_dir=project_dir,
+        group=group,
+        metadata=ProjectMetadata(case_name="Case"),
+        force_rerun=True,
+    )
+    worker._run()
+
+    prompt = captured["prompt"]
+    assert "document_type:" not in prompt
+    assert "sources:" not in prompt
+    assert "<!--- section-begin: converted/doc.md --->" in prompt
+    assert "<!--- source doc.pdf#page=7 --->" in prompt
+    assert "[CIT:ev_deadbeef]" in prompt
+    assert "Body text with" in prompt
+
+
 def test_bulk_reduce_create_provider_skips_native_bootstrap_for_no_native_backend(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
