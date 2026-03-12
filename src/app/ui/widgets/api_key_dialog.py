@@ -23,6 +23,7 @@ class APIKeyDialog(QDialog):
         ("Unredacted (Local Phoenix)", "unredacted"),
         ("Redacted", "redacted"),
     )
+    _MASKED_SECRET = "*" * 20
     
     def __init__(self, settings, parent=None):
         super().__init__(parent)
@@ -97,22 +98,12 @@ class APIKeyDialog(QDialog):
             
             # API key input
             key_layout = QHBoxLayout()
-            
-            field = QLineEdit()
-            field.setEchoMode(QLineEdit.Password)
-            field.setPlaceholderText(f"Enter {display_name} API key...")
-            self.api_fields[key] = field
-            key_layout.addWidget(field)
-            
-            # Show/hide button
-            show_btn = QPushButton("Show")
-            show_btn.setCheckable(True)
-            show_btn.setMaximumWidth(60)
-            show_btn.toggled.connect(
-                lambda checked, f=field: f.setEchoMode(
-                    QLineEdit.Normal if checked else QLineEdit.Password
-                )
+
+            field, show_btn = self._create_secret_field(
+                key,
+                f"Enter {display_name} API key...",
             )
+            key_layout.addWidget(field)
             key_layout.addWidget(show_btn)
             
             group_layout.addLayout(key_layout)
@@ -125,7 +116,7 @@ class APIKeyDialog(QDialog):
 
             scroll_layout.addWidget(group)
 
-        gateway_group = QGroupBox("Pydantic AI Gateway")
+        gateway_group = QGroupBox("Pydantic AI Gateway App Key")
         gateway_layout = QFormLayout(gateway_group)
 
         gateway_info = QLabel(
@@ -136,22 +127,13 @@ class APIKeyDialog(QDialog):
         gateway_layout.addRow(gateway_info)
 
         gateway_key_row = QHBoxLayout()
-        self.gateway_api_key = QLineEdit()
-        self.gateway_api_key.setEchoMode(QLineEdit.Password)
-        self.gateway_api_key.setPlaceholderText("Enter Pydantic AI Gateway API key...")
-        self.api_fields["pydantic_ai_gateway"] = self.gateway_api_key
-        gateway_key_row.addWidget(self.gateway_api_key)
-
-        gateway_show_btn = QPushButton("Show")
-        gateway_show_btn.setCheckable(True)
-        gateway_show_btn.setMaximumWidth(60)
-        gateway_show_btn.toggled.connect(
-            lambda checked: self.gateway_api_key.setEchoMode(
-                QLineEdit.Normal if checked else QLineEdit.Password
-            )
+        self.gateway_api_key, gateway_show_btn = self._create_secret_field(
+            "pydantic_ai_gateway",
+            "Enter Pydantic AI Gateway App Key...",
         )
+        gateway_key_row.addWidget(self.gateway_api_key)
         gateway_key_row.addWidget(gateway_show_btn)
-        gateway_layout.addRow("API Key:", gateway_key_row)
+        gateway_layout.addRow("App Key:", gateway_key_row)
 
         self.gateway_base_url = QLineEdit()
         self.gateway_base_url.setPlaceholderText("https://gateway.example.com")
@@ -191,20 +173,11 @@ class APIKeyDialog(QDialog):
         openai_layout = QFormLayout(openai_group)
 
         ak_row = QHBoxLayout()
-        self.azure_openai_key = QLineEdit()
-        self.azure_openai_key.setEchoMode(QLineEdit.Password)
-        self.azure_openai_key.setPlaceholderText("Enter Azure OpenAI API key…")
-        self.api_fields["azure_openai"] = self.azure_openai_key
-        ak_row.addWidget(self.azure_openai_key)
-
-        ak_show_btn = QPushButton("Show")
-        ak_show_btn.setCheckable(True)
-        ak_show_btn.setMaximumWidth(60)
-        ak_show_btn.toggled.connect(
-            lambda checked: self.azure_openai_key.setEchoMode(
-                QLineEdit.Normal if checked else QLineEdit.Password
-            )
+        self.azure_openai_key, ak_show_btn = self._create_secret_field(
+            "azure_openai",
+            "Enter Azure OpenAI API key…",
         )
+        ak_row.addWidget(self.azure_openai_key)
         ak_row.addWidget(ak_show_btn)
         openai_layout.addRow("API Key:", ak_row)
 
@@ -237,21 +210,11 @@ class APIKeyDialog(QDialog):
         # API key input
         key_layout = QHBoxLayout()
         
-        self.azure_di_key = QLineEdit()
-        self.azure_di_key.setEchoMode(QLineEdit.Password)
-        self.azure_di_key.setPlaceholderText("Enter Azure Document Intelligence API key...")
-        self.api_fields["azure_di"] = self.azure_di_key
-        key_layout.addWidget(self.azure_di_key)
-        
-        # Show/hide button
-        show_btn = QPushButton("Show")
-        show_btn.setCheckable(True)
-        show_btn.setMaximumWidth(60)
-        show_btn.toggled.connect(
-            lambda checked: self.azure_di_key.setEchoMode(
-                QLineEdit.Normal if checked else QLineEdit.Password
-            )
+        self.azure_di_key, show_btn = self._create_secret_field(
+            "azure_di",
+            "Enter Azure Document Intelligence API key...",
         )
+        key_layout.addWidget(self.azure_di_key)
         key_layout.addWidget(show_btn)
         
         di_layout.addLayout(key_layout)
@@ -275,6 +238,56 @@ class APIKeyDialog(QDialog):
         
         layout.addStretch()
         return widget
+
+    def _create_secret_field(self, provider: str, placeholder: str) -> tuple[QLineEdit, QPushButton]:
+        field = QLineEdit()
+        field.setEchoMode(QLineEdit.Password)
+        field.setPlaceholderText(placeholder)
+        field.setProperty("has_saved_key", False)
+        field.setProperty("saved_key_value", "")
+        field.setProperty("key_dirty", False)
+        field.textEdited.connect(lambda _text, f=field: self._mark_secret_field_dirty(f))
+        self.api_fields[provider] = field
+
+        show_btn = QPushButton("Show")
+        show_btn.setCheckable(True)
+        show_btn.setMaximumWidth(60)
+        show_btn.toggled.connect(
+            lambda checked, f=field, b=show_btn: self._toggle_secret_visibility(f, b, checked)
+        )
+        return field, show_btn
+
+    def _mark_secret_field_dirty(self, field: QLineEdit) -> None:
+        field.setProperty("key_dirty", True)
+
+    def _set_secret_field_value(self, field: QLineEdit, value: str) -> None:
+        field.blockSignals(True)
+        field.setText(value)
+        field.blockSignals(False)
+
+    def _toggle_secret_visibility(self, field: QLineEdit, button: QPushButton, checked: bool) -> None:
+        saved_value = str(field.property("saved_key_value") or "")
+        current_text = field.text()
+
+        if checked:
+            if (
+                field.property("has_saved_key")
+                and not field.property("key_dirty")
+                and current_text == self._MASKED_SECRET
+            ):
+                self._set_secret_field_value(field, saved_value)
+            field.setEchoMode(QLineEdit.Normal)
+            button.setText("Hide")
+            return
+
+        if (
+            field.property("has_saved_key")
+            and not field.property("key_dirty")
+            and current_text == saved_value
+        ):
+            self._set_secret_field_value(field, self._MASKED_SECRET)
+        field.setEchoMode(QLineEdit.Password)
+        button.setText("Show")
     
     def _open_phoenix_ui(self):
         """Open Phoenix UI in browser."""
@@ -379,13 +392,17 @@ class APIKeyDialog(QDialog):
         """Load existing API keys and settings."""
         # Load API keys (masked)
         for provider, field in self.api_fields.items():
-            key = self.settings.get_api_key(provider)
+            key = str(self.settings.get_api_key(provider) or "")
             if key:
-                # Show masked version
-                field.setText("*" * 20)
+                self._set_secret_field_value(field, self._MASKED_SECRET)
                 field.setProperty("has_saved_key", True)
+                field.setProperty("saved_key_value", key)
+                field.setProperty("key_dirty", False)
             else:
+                self._set_secret_field_value(field, "")
                 field.setProperty("has_saved_key", False)
+                field.setProperty("saved_key_value", "")
+                field.setProperty("key_dirty", False)
         
         # Load Azure OpenAI settings
         azure_settings = self.settings.get("azure_openai_settings", {})
@@ -434,21 +451,27 @@ class APIKeyDialog(QDialog):
         # Save API keys
         for provider, field in self.api_fields.items():
             text = field.text().strip()
+            saved_value = str(field.property("saved_key_value") or "")
+            has_saved_key = bool(field.property("has_saved_key"))
+            key_dirty = bool(field.property("key_dirty"))
             
-            # Skip if field shows masked placeholder
-            if text == "*" * 20 and field.property("has_saved_key"):
+            if has_saved_key and not key_dirty and text in {self._MASKED_SECRET, saved_value}:
                 continue
             
             # Save or remove key
             if text and not text.startswith("*"):
                 try:
                     if self.settings.set_api_key(provider, text):
-                        saved_count += 1
+                        stored_value = str(self.settings.get_api_key(provider) or "")
+                        if stored_value != text:
+                            errors.append(f"Saved {provider} key does not match the value entered")
+                        else:
+                            saved_count += 1
                     else:
                         errors.append(f"Failed to save {provider} key")
                 except Exception as e:
                     errors.append(f"Error saving {provider}: {str(e)}")
-            elif not text and field.property("has_saved_key"):
+            elif not text and has_saved_key:
                 # Remove key if field was cleared
                 self.settings.remove_api_key(provider)
         

@@ -21,6 +21,7 @@ from .llm_backend import (
     PydanticAIDirectBackend,
     LLMExecutionBackend,
     LLMProviderRequest,
+    backend_transport_name,
 )
 _CITATION_ID_RE = re.compile(r"^ev_[a-z0-9]{8,64}$")
 _MIN_REPORT_INPUT_BUDGET = 4_000
@@ -314,6 +315,13 @@ class ReportWorkerBase(DashboardWorker):
                 provider_id=self._provider_id,
                 model=self._custom_model or self._model,
             )
+        )
+
+    def _llm_execution_summary(self) -> str:
+        model_name = self._custom_model or self._model or "<default>"
+        return (
+            f"Using {backend_transport_name(self._llm_backend)} backend: "
+            f"{self._provider_id}/{model_name}"
         )
 
 __all__ = ["ReportWorkerBase"]

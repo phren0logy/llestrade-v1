@@ -196,3 +196,28 @@ def test_parse_gemini_discovered_model_filters_non_text_and_preview_variants() -
     assert parsed is not None
     assert parsed.model_id == "gemini-2.5-pro"
     assert parsed.context_window == 1_048_576
+
+
+def test_resolve_catalog_model_caps_anthropic_runtime_context_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = _FakeSnapshot(
+        providers=[
+            _FakeProvider(
+                id="anthropic",
+                models=[
+                    _FakeModel(
+                        id="claude-sonnet-4-5",
+                        name="Claude Sonnet 4.5",
+                        context_window=1_000_000,
+                    )
+                ],
+            )
+        ]
+    )
+    monkeypatch.setattr(llm_catalog, "_snapshot", lambda: snapshot)
+
+    resolved = llm_catalog.resolve_catalog_model("anthropic", "claude-sonnet-4-5")
+
+    assert resolved is not None
+    assert resolved.context_window == 200_000

@@ -15,6 +15,7 @@ from PySide6.QtCore import Signal
 
 from src.app.core.bulk_analysis_groups import BulkAnalysisGroup
 from src.app.core.llm_catalog import calculate_usage_cost
+from src.app.core.llm_operation_settings import normalize_context_window_override
 from src.app.core.bulk_analysis_runner import (
     BulkAnalysisCancelled,
     BulkAnalysisDocument,
@@ -50,6 +51,8 @@ from .llm_backend import (
     LLMInvocationRequest,
     LLMProviderRequest,
     PydanticAIDirectBackend,
+    PydanticAIGatewayBackend,
+    backend_transport_name,
 )
 from .stage_contracts import BulkMapStageInput, stage_trace_attributes
 
@@ -241,6 +244,7 @@ class BulkAnalysisWorker(DashboardWorker):
             "input_tokens": 0,
             "output_tokens": 0,
         }
+        self._prompt_token_cache: dict[str, int] = {}
 
     # ------------------------------------------------------------------
     # QRunnable API
@@ -334,6 +338,10 @@ class BulkAnalysisWorker(DashboardWorker):
 
             self.logger.info("%s starting bulk analysis (docs=%s)", self.job_tag, total)
             provider_config = self._resolve_provider()
+            self.log_message.emit(
+                f"Using {backend_transport_name(self._llm_backend)} backend: "
+                f"{provider_config.provider_id}/{provider_config.model or '<default>'}"
+            )
             bundle = load_prompts(self._project_dir, self._group, self._metadata)
             global_placeholders = self._build_placeholder_map()
 
@@ -527,7 +535,11 @@ class BulkAnalysisWorker(DashboardWorker):
             dynamic_keys=_DYNAMIC_DOCUMENT_KEYS,
         )
 
-        override_window = getattr(self._group, "model_context_window", None)
+        override_window = normalize_context_window_override(
+            provider_id=provider_config.provider_id,
+            model_id=provider_config.model,
+            context_window=getattr(self._group, "model_context_window", None),
+        )
         if isinstance(override_window, int) and override_window > 0:
             raw_context_window = int(override_window)
             body_token_info = TokenCounter.count(
@@ -571,6 +583,7 @@ class BulkAnalysisWorker(DashboardWorker):
             provider_config,
             system_prompt,
             full_prompt,
+            allow_backend_preflight=False,
         )
         if full_prompt_tokens > input_budget:
             needs_chunking = True
@@ -764,48 +777,101 @@ class BulkAnalysisWorker(DashboardWorker):
         user_prompt: str,
         *,
         max_tokens: int = _DEFAULT_MAX_OUTPUT_TOKENS,
+        allow_backend_preflight: bool = True,
     ) -> int:
         combined_prompt = f"{system_prompt.strip()}\n\n{user_prompt.strip()}".strip()
         if not combined_prompt:
             return 0
 
-        try:
-            counted = self._llm_backend.count_input_tokens(
-                provider,
-                LLMInvocationRequest(
-                    prompt=user_prompt,
-                    system_prompt=system_prompt,
-                    model=provider_config.model,
-                    model_settings=self._llm_backend.build_model_settings(
-                        provider_config.provider_id,
-                        provider_config.model,
-                        temperature=0.1,
-                        max_tokens=max_tokens,
-                        use_reasoning=getattr(self._group, "use_reasoning", False),
-                    ),
-                ),
-            )
-            if counted is not None and counted >= 0:
-                return int(counted)
-        except Exception:
-            self.logger.debug("Backend token preflight failed; falling back to local estimate", exc_info=True)
+        cache_key = self._prompt_token_cache_key(
+            provider_id=provider_config.provider_id,
+            model=provider_config.model,
+            combined_prompt=combined_prompt,
+            max_tokens=max_tokens,
+            use_reasoning=bool(getattr(self._group, "use_reasoning", False)),
+            mode="backend" if allow_backend_preflight else "estimate",
+        )
+        cached = self._prompt_token_cache.get(cache_key)
+        if cached is not None:
+            return cached
 
-        token_info = TokenCounter.count(
+        if allow_backend_preflight:
+            try:
+                counted = self._llm_backend.count_input_tokens(
+                    provider,
+                    LLMInvocationRequest(
+                        prompt=user_prompt,
+                        system_prompt=system_prompt,
+                        model=provider_config.model,
+                        model_settings=self._llm_backend.build_model_settings(
+                            provider_config.provider_id,
+                            provider_config.model,
+                            temperature=0.1,
+                            max_tokens=max_tokens,
+                            use_reasoning=bool(getattr(self._group, "use_reasoning", False)),
+                        ),
+                    ),
+                )
+                if counted is not None and counted >= 0:
+                    result = int(counted)
+                    self._prompt_token_cache[cache_key] = result
+                    return result
+            except Exception:
+                self.logger.debug("Backend token preflight failed; falling back to local estimate", exc_info=True)
+
+        result = self._estimate_prompt_tokens(
             text=combined_prompt,
             provider=provider_config.provider_id,
             model=provider_config.model or "",
         )
+        self._prompt_token_cache[cache_key] = result
+        return result
+
+    def _estimate_prompt_tokens(self, *, text: str, provider: str, model: str) -> int:
+        token_info = TokenCounter.count(
+            text=text,
+            provider=provider,
+            model=model,
+        )
         if token_info.get("success"):
             counted = int(token_info.get("token_count") or 0)
             capabilities = self._llm_backend.capabilities(
-                provider_config.provider_id,
-                provider_config.model,
+                provider,
+                model or None,
             )
             if capabilities.reasoning_mode == "anthropic":
-                return max(counted, max(len(combined_prompt) // 3, 1))
+                return max(counted, max(len(text) // 3, 1))
             if counted > 0:
                 return counted
-        return max(len(combined_prompt) // 3, 1)
+        return max(len(text) // 3, 1)
+
+    def _prompt_token_cache_key(
+        self,
+        *,
+        provider_id: str,
+        model: str | None,
+        combined_prompt: str,
+        max_tokens: int,
+        use_reasoning: bool,
+        mode: str,
+    ) -> str:
+        payload = {
+            "provider_id": provider_id,
+            "model": model or "",
+            "prompt_sha": _sha256(combined_prompt),
+            "max_tokens": max_tokens,
+            "use_reasoning": use_reasoning,
+            "mode": mode,
+        }
+        return _sha256(json.dumps(payload, sort_keys=True))
+
+    def _defer_exact_backend_preflight(self, provider_config: ProviderConfig) -> bool:
+        if not isinstance(self._llm_backend, (PydanticAIDirectBackend, PydanticAIGatewayBackend)):
+            return False
+        return self._llm_backend.capabilities(
+            provider_config.provider_id,
+            provider_config.model,
+        ).supports_pre_request_token_count
 
     def _generate_fitting_chunks(
         self,
@@ -849,6 +915,7 @@ class BulkAnalysisWorker(DashboardWorker):
                     system_prompt,
                     prompt,
                     max_tokens=_DEFAULT_MAX_OUTPUT_TOKENS,
+                    allow_backend_preflight=False,
                 )
                 if prompt_tokens > input_budget:
                     oversized.append((idx, prompt_tokens))
@@ -886,12 +953,14 @@ class BulkAnalysisWorker(DashboardWorker):
             raise BulkAnalysisCancelled
 
         if input_budget is not None:
+            defer_exact_backend_preflight = self._defer_exact_backend_preflight(provider_config)
             prompt_tokens = self._count_prompt_tokens(
                 provider,
                 provider_config,
                 system_prompt,
                 prompt,
                 max_tokens=max_tokens,
+                allow_backend_preflight=not defer_exact_backend_preflight,
             )
             if prompt_tokens > input_budget:
                 raise RuntimeError(
@@ -954,7 +1023,11 @@ class BulkAnalysisWorker(DashboardWorker):
         return float(amount)
 
     def _resolve_provider(self) -> ProviderConfig:
-        provider_id = self._group.provider_id or self._default_provider[0] or "anthropic"
+        provider_id = str(self._group.provider_id or "").strip()
+        if not provider_id:
+            raise RuntimeError(
+                "Bulk analysis group has no saved provider selection. Edit the group and choose a provider."
+            )
         model = self._llm_backend.normalize_model(
             provider_id,
             self._group.model or self._default_provider[1],

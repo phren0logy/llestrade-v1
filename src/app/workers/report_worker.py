@@ -281,6 +281,7 @@ class DraftReportWorker(ReportWorkerBase):
         placeholder_map: Mapping[str, str],
         evidence_ledger: str,
     ) -> List[dict]:
+        self.log_message.emit(self._llm_execution_summary())
         provider = self._create_provider()
         outputs: List[dict] = []
 
@@ -691,6 +692,7 @@ class ReportRefinementWorker(ReportWorkerBase):
         prompt: str,
         system_prompt: str,
     ) -> tuple[str, Optional[str]]:
+        self.log_message.emit(self._llm_execution_summary())
         provider = self._create_provider()
         stage_input = ReportRefineStageInput(
             provider_id=self._provider_id,

@@ -27,6 +27,7 @@ from src.app.workers.llm_backend import (
     LLMExecutionBackend,
     LLMInvocationRequest,
     LLMProviderRequest,
+    PydanticAIGatewayBackend,
     ProviderMetadata,
     build_model_settings,
     normalize_model_name,
@@ -239,6 +240,21 @@ def test_bulk_map_resolve_provider_normalizes_bedrock_model(tmp_path: Path) -> N
     assert config.model == "anthropic.claude-sonnet-4-5-v1"
 
 
+def test_bulk_map_resolve_provider_requires_saved_provider_selection(tmp_path: Path) -> None:
+    group = BulkAnalysisGroup.create("Group")
+    worker = BulkAnalysisWorker(
+        project_dir=tmp_path,
+        group=group,
+        files=[],
+        metadata=ProjectMetadata(case_name="Case"),
+        force_rerun=False,
+        llm_backend=_NoNativeBackend(),
+    )
+
+    with pytest.raises(RuntimeError, match="no saved provider selection"):
+        worker._resolve_provider()
+
+
 @pytest.mark.parametrize(
     ("result", "message"),
     [
@@ -385,6 +401,84 @@ def test_bulk_worker_uses_backend_token_count_for_gateway_preflight(tmp_path: Pa
         )
 
     assert backend.invoked is False
+
+
+def test_bulk_worker_chunk_fit_uses_local_estimates_for_real_gateway_backend(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    group = BulkAnalysisGroup.create("Group")
+    worker = BulkAnalysisWorker(
+        project_dir=tmp_path,
+        group=group,
+        files=[],
+        metadata=ProjectMetadata(case_name="Case"),
+        force_rerun=False,
+        llm_backend=PydanticAIGatewayBackend(api_key="gateway-key", base_url="https://gateway.example.com"),
+    )
+
+    monkeypatch.setattr(worker._llm_backend, "count_input_tokens", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("backend count should not be used during chunk fit")))
+
+    document = worker_module.BulkAnalysisDocument(
+        source_path=tmp_path / "doc.md",
+        relative_path="doc.md",
+        output_path=tmp_path / "out.md",
+    )
+    bundle = worker_module.PromptBundle(
+        system_template="System",
+        user_template="Analyze {document_content}",
+    )
+
+    chunks = worker._generate_fitting_chunks(
+        provider=object(),
+        provider_config=ProviderConfig(provider_id="anthropic", model="claude-sonnet-4-6"),
+        bundle=bundle,
+        system_prompt="System",
+        document=document,
+        body="Short body text",
+        placeholder_values={},
+        input_budget=10_000,
+        initial_chunk_tokens=4_000,
+    )
+
+    assert chunks
+
+
+def test_bulk_worker_real_gateway_backend_skips_duplicate_exact_preflight(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    group = BulkAnalysisGroup.create("Group")
+    backend = PydanticAIGatewayBackend(api_key="gateway-key", base_url="https://gateway.example.com")
+    worker = BulkAnalysisWorker(
+        project_dir=tmp_path,
+        group=group,
+        files=[],
+        metadata=ProjectMetadata(case_name="Case"),
+        force_rerun=False,
+        llm_backend=backend,
+    )
+
+    monkeypatch.setattr(
+        backend,
+        "count_input_tokens",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("duplicate exact preflight should be deferred to backend invoke")),
+    )
+    monkeypatch.setattr(
+        backend,
+        "invoke_response",
+        lambda *_args, **_kwargs: _model_response("summary", model_name="claude-sonnet-4-6", output_tokens=1),
+    )
+
+    result = worker._invoke_provider(
+        provider=object(),
+        provider_config=ProviderConfig(provider_id="anthropic", model="claude-sonnet-4-6"),
+        prompt="Prompt",
+        system_prompt="System",
+        input_budget=10_000,
+    )
+
+    assert result == "summary"
 
 
 def test_bulk_worker_applies_reasoning_settings_to_llm_request(tmp_path: Path) -> None:
@@ -635,8 +729,17 @@ def test_process_document_forces_chunking_when_full_prompt_exceeds_budget(
     monkeypatch.setattr(worker, "_max_input_budget", lambda **_kwargs: 50_000)
     monkeypatch.setattr(worker_module, "generate_chunks", lambda *_args, **_kwargs: ["chunk-1", "chunk-2"])
 
-    def fake_count(_provider, _config, _system, prompt, *, max_tokens=32_000):  # noqa: ANN001
+    def fake_count(
+        _provider,
+        _config,
+        _system,
+        prompt,
+        *,
+        max_tokens=32_000,
+        allow_backend_preflight=True,
+    ):  # noqa: ANN001
         assert max_tokens > 0
+        _ = allow_backend_preflight
         if "chunk 1 of 2" in prompt:
             return 8_000
         if "chunk 2 of 2" in prompt:

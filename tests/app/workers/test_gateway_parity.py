@@ -242,6 +242,7 @@ def _prepare_bulk_project(project_dir: Path) -> tuple[BulkAnalysisGroup, BulkAna
     map_group = BulkAnalysisGroup.create(
         "Parity Map",
         files=["doc.md"],
+        provider_id="anthropic",
         model="claude-sonnet-4-5",
         system_prompt_path="prompts/bulk_system.md",
         user_prompt_path="prompts/bulk_user.md",
@@ -251,6 +252,7 @@ def _prepare_bulk_project(project_dir: Path) -> tuple[BulkAnalysisGroup, BulkAna
 
     reduce_group = BulkAnalysisGroup.create(
         "Parity Reduce",
+        provider_id="anthropic",
         model="claude-sonnet-4-5",
         system_prompt_path="prompts/bulk_system.md",
         user_prompt_path="prompts/reduce_user.md",

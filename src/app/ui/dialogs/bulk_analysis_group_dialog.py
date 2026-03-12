@@ -656,11 +656,11 @@ class BulkAnalysisGroupDialog(QDialog):
         self._refresh_combined_input_summary()
 
     def _apply_model_selection(self, group: BulkAnalysisGroup) -> None:
-        provider_id = group.provider_id or "anthropic"
+        provider_id = str(group.provider_id or "").strip()
         self.llm_settings_panel.set_settings(
             LLMOperationSettings(
                 provider_id=provider_id,
-                model_id=group.model or default_model_for_provider(provider_id) or "",
+                model_id=group.model or (default_model_for_provider(provider_id) or "" if provider_id else ""),
                 context_window=group.model_context_window,
                 use_reasoning=group.use_reasoning,
             )

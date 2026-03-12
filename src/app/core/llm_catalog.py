@@ -53,6 +53,13 @@ _MODEL_FAMILY_MATCHERS: dict[str, tuple[str, ...]] = {
     "azure_openai": ("gpt-", "o1", "o3", "o4", "chatgpt-"),
 }
 
+# Anthropic's published 1M context window requires an explicit beta header.
+# The current worker/gateway request path does not send that header, so runtime
+# budgeting must cap Anthropic models to the standard 200k request window.
+_RUNTIME_CONTEXT_WINDOW_CAPS: dict[str, int] = {
+    "anthropic": 200_000,
+}
+
 _catalog_updater: UpdatePrices | None = None
 _catalog_updater_lock = Lock()
 _gemini_selector_models: tuple["LLMModelOption", ...] | None = None
@@ -240,6 +247,19 @@ def resolve_model_context_window(provider_id: str, model_id: str | None) -> int 
     return model.context_window
 
 
+def _runtime_context_window(
+    provider_id: str,
+    model_id: str,
+    context_window: int | None,
+) -> int | None:
+    if not _valid_context_window(context_window):
+        return None
+    cap = _RUNTIME_CONTEXT_WINDOW_CAPS.get(provider_id)
+    if cap is None:
+        return int(context_window)
+    return min(int(context_window), cap)
+
+
 def calculate_usage_cost(
     *,
     provider_id: str,
@@ -316,7 +336,11 @@ def _iter_selector_models(provider_id: str) -> Sequence[LLMModelOption]:
             LLMModelOption(
                 model_id=model.id,
                 label=model.name or model.id,
-                context_window=int(model.context_window),
+                context_window=_runtime_context_window(
+                    provider_id,
+                    model.id,
+                    int(model.context_window),
+                ),
                 input_price_label=_price_label(getattr(model.prices, "input_mtok", None)),
                 output_price_label=_price_label(getattr(model.prices, "output_mtok", None)),
             )
@@ -605,7 +629,11 @@ def _resolve_snapshot_catalog_model(provider_id: str, model_id: str) -> LLMModel
     return LLMModelOption(
         model_id=model.id,
         label=model.name or model.id,
-        context_window=model.context_window if _valid_context_window(model.context_window) else None,
+        context_window=_runtime_context_window(
+            provider_id,
+            model.id,
+            model.context_window if _valid_context_window(model.context_window) else None,
+        ),
         input_price_label=_price_label(getattr(model.prices, "input_mtok", None)),
         output_price_label=_price_label(getattr(model.prices, "output_mtok", None)),
     )

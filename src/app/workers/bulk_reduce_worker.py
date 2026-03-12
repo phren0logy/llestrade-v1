@@ -17,6 +17,7 @@ from PySide6.QtCore import Signal
 from src.app.core.azure_artifacts import is_azure_raw_artifact
 from src.app.core.bulk_analysis_groups import BulkAnalysisGroup
 from src.app.core.llm_catalog import calculate_usage_cost
+from src.app.core.llm_operation_settings import normalize_context_window_override
 from src.app.core.bulk_analysis_runner import (
     BulkAnalysisCancelled,
     PromptBundle,
@@ -57,6 +58,7 @@ from .llm_backend import (
     LLMInvocationRequest,
     LLMProviderRequest,
     PydanticAIDirectBackend,
+    backend_transport_name,
 )
 from .stage_contracts import BulkReduceStageInput, stage_trace_attributes
 
@@ -352,6 +354,10 @@ class BulkReduceWorker(DashboardWorker):
     def _run(self) -> None:  # pragma: no cover - executed in worker thread
         try:
             provider_cfg = self._resolve_provider()
+            self.log_message.emit(
+                f"Using {backend_transport_name(self._llm_backend)} backend: "
+                f"{provider_cfg.provider_id}/{provider_cfg.model or '<default>'}"
+            )
             bundle = load_prompts(self._project_dir, self._group, self._metadata)
 
             inputs = self._resolve_inputs()
@@ -932,7 +938,11 @@ class BulkReduceWorker(DashboardWorker):
         return stats
 
     def _resolve_provider(self) -> ProviderConfig:
-        provider_id = self._group.provider_id or "anthropic"
+        provider_id = str(self._group.provider_id or "").strip()
+        if not provider_id:
+            raise RuntimeError(
+                "Bulk analysis group has no saved provider selection. Edit the group and choose a provider."
+            )
         model = self._llm_backend.normalize_model(provider_id, self._group.model or None)
         temperature = 0.1
         return ProviderConfig(provider_id=provider_id, model=model, temperature=temperature)
@@ -991,7 +1001,11 @@ class BulkReduceWorker(DashboardWorker):
         return content
 
     def _max_input_budget(self, provider_cfg: ProviderConfig, *, max_output_tokens: int) -> int | None:
-        raw_context_window = getattr(self._group, "model_context_window", None)
+        raw_context_window = normalize_context_window_override(
+            provider_id=provider_cfg.provider_id,
+            model_id=provider_cfg.model,
+            context_window=getattr(self._group, "model_context_window", None),
+        )
         if not isinstance(raw_context_window, int) or raw_context_window <= 0:
             model_key = provider_cfg.model or provider_cfg.provider_id
             raw_context_window = TokenCounter.get_model_context_window(

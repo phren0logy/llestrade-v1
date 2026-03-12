@@ -226,6 +226,27 @@ def test_direct_provider_backend_create_provider_rejects_unsupported_provider(
         )
 
 
+def test_direct_provider_backend_requires_api_key_for_direct_anthropic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _StubSettings:
+        def get_api_key(self, provider_id: str) -> str | None:
+            assert provider_id == "anthropic"
+            return None
+
+    monkeypatch.setattr("src.app.core.secure_settings.SecureSettings", _StubSettings)
+
+    backend = PydanticAIDirectBackend()
+
+    with pytest.raises(RuntimeError, match="No Anthropic API key configured"):
+        backend.create_provider(
+            LLMProviderRequest(
+                provider_id="anthropic",
+                model="claude-sonnet-4-5",
+            )
+        )
+
+
 def test_direct_provider_backend_direct_provider_uses_pydantic_ai_requests(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -430,6 +451,7 @@ def test_gateway_backend_create_provider_returns_metadata() -> None:
     assert provider == ProviderMetadata(
         provider_name="anthropic",
         default_model="claude-sonnet-4-5",
+        transport="gateway",
     )
 
 
@@ -690,7 +712,7 @@ def test_gateway_backend_loads_base_url_from_secure_settings(
 
     backend = PydanticAIGatewayBackend(api_key="pylf_test_key", base_url=None)
 
-    assert backend._base_url == "https://gateway.example.com"
+    assert backend._current_base_url() == "https://gateway.example.com"
 
 
 def test_gateway_backend_loads_route_from_secure_settings(
@@ -708,7 +730,7 @@ def test_gateway_backend_loads_route_from_secure_settings(
 
     backend = PydanticAIGatewayBackend(api_key="pylf_test_key", base_url="https://gateway.example.com")
 
-    assert backend._route == "llestrade"
+    assert backend._current_route() == "llestrade"
 
 
 def test_gateway_backend_loads_api_key_from_secure_settings(
@@ -727,7 +749,7 @@ def test_gateway_backend_loads_api_key_from_secure_settings(
 
     backend = PydanticAIGatewayBackend(api_key=None, base_url="https://gateway.example.com")
 
-    assert backend._api_key == "gateway-key-from-settings"
+    assert backend._current_api_key() == "gateway-key-from-settings"
 
 
 def test_gateway_backend_enforces_input_limit_before_request_when_counting_is_available(
@@ -908,6 +930,67 @@ def test_gateway_backend_build_model_uses_canonical_gateway_model_ids(
         "http_client": backend._gateway_http_client(),
     }
     assert captured["provider"]["http_client"] is not None
+
+
+def test_gateway_backend_uses_latest_settings_values_when_not_explicit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[dict[str, Any]] = []
+
+    class _StubSettings:
+        api_key = "gateway-key-1"
+        base_url = "https://gateway-1.example.com"
+        route = "route-1"
+
+        def get_api_key(self, provider_id: str) -> str | None:
+            assert provider_id == "pydantic_ai_gateway"
+            return self.api_key
+
+        def get(self, key: str, default: object = None) -> object:
+            if key == "pydantic_ai_gateway_settings":
+                return {
+                    "base_url": self.base_url,
+                    "route": self.route,
+                }
+            return default
+
+    def _fake_gateway_provider(
+        upstream_provider: str,
+        /,
+        *,
+        route: str | None = None,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        http_client: Any = None,
+    ) -> dict[str, Any]:
+        value = {
+            "upstream_provider": upstream_provider,
+            "route": route,
+            "api_key": api_key,
+            "base_url": base_url,
+            "http_client": http_client,
+        }
+        captured.append(value)
+        return value
+
+    monkeypatch.setattr("src.app.core.secure_settings.SecureSettings", _StubSettings)
+    monkeypatch.setattr("pydantic_ai.providers.gateway.gateway_provider", _fake_gateway_provider)
+
+    backend = PydanticAIGatewayBackend(api_key=None, base_url=None, route=None)
+
+    first = backend._gateway_provider_factory("gateway/anthropic")
+    _StubSettings.api_key = "gateway-key-2"
+    _StubSettings.base_url = "https://gateway-2.example.com"
+    _StubSettings.route = "route-2"
+    second = backend._gateway_provider_factory("gateway/anthropic")
+
+    assert first["api_key"] == "gateway-key-1"
+    assert first["base_url"] == "https://gateway-1.example.com"
+    assert first["route"] == "route-1"
+    assert second["api_key"] == "gateway-key-2"
+    assert second["base_url"] == "https://gateway-2.example.com"
+    assert second["route"] == "route-2"
+    assert len(captured) == 2
 
 
 def test_gateway_backend_only_marks_transient_gateway_statuses_for_retry() -> None:

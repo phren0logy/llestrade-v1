@@ -62,3 +62,21 @@ def test_refresh_bulk_analysis_groups_updates_cache(project_manager: ProjectMana
     project_manager.bulk_analysis_groups = {}
     groups = project_manager.refresh_bulk_analysis_groups()
     assert len(groups) == 1
+
+
+def test_bulk_analysis_group_load_clears_stale_context_for_catalog_model(
+    project_manager: ProjectManager,
+):
+    group = BulkAnalysisGroup.create(
+        name="Anthropic Group",
+        files=["medical/doc1.md"],
+        provider_id="anthropic",
+        model="claude-sonnet-4-6",
+    )
+    group.model_context_window = 1_000_000
+
+    project_manager.save_bulk_analysis_group(group)
+
+    reloaded = load_bulk_analysis_groups(project_manager.project_dir)
+    assert len(reloaded) == 1
+    assert reloaded[0].model_context_window is None

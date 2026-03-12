@@ -12,6 +12,7 @@ from src.app.core.llm_catalog import (
     default_model_for_provider,
     default_provider_catalog,
     provider_option_map,
+    resolve_catalog_model,
 )
 
 
@@ -27,6 +28,25 @@ class LLMOperationSettings:
     @property
     def custom_model_id(self) -> str | None:
         return self.model_id if self.context_window is not None else None
+
+
+def normalize_context_window_override(
+    *,
+    provider_id: str | None,
+    model_id: str | None,
+    context_window: int | None,
+) -> int | None:
+    """Keep explicit context overrides only for unknown custom models."""
+
+    if not isinstance(context_window, int) or context_window <= 0:
+        return None
+
+    provider = str(provider_id or "").strip()
+    model = str(model_id or "").strip()
+    if provider and model and resolve_catalog_model(provider, model) is not None:
+        return None
+
+    return int(context_window)
 
 
 def infer_provider_id_from_model(model_id: str | None) -> str | None:
@@ -69,7 +89,11 @@ def settings_from_report_preferences(
     return LLMOperationSettings(
         provider_id=provider,
         model_id=model_id,
-        context_window=context_window if custom else None,
+        context_window=normalize_context_window_override(
+            provider_id=provider,
+            model_id=model_id,
+            context_window=context_window if custom else None,
+        ),
         use_reasoning=bool(use_reasoning),
     )
 
@@ -81,6 +105,7 @@ __all__ = [
     "SUPPORTED_SELECTOR_PROVIDER_IDS",
     "default_provider_catalog",
     "infer_provider_id_from_model",
+    "normalize_context_window_override",
     "provider_option_map",
     "settings_from_report_preferences",
 ]

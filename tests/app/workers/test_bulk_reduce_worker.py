@@ -335,6 +335,20 @@ def test_bulk_reduce_resolve_provider_normalizes_bedrock_model(tmp_path: Path) -
     assert config.model == "anthropic.claude-sonnet-4-5-v1"
 
 
+def test_bulk_reduce_resolve_provider_requires_saved_provider_selection(tmp_path: Path) -> None:
+    group = BulkAnalysisGroup.create("Group")
+    worker = BulkReduceWorker(
+        project_dir=tmp_path,
+        group=group,
+        metadata=ProjectMetadata(case_name="Case"),
+        force_rerun=False,
+        llm_backend=_NoNativeBackend(),
+    )
+
+    with pytest.raises(RuntimeError, match="no saved provider selection"):
+        worker._resolve_provider()
+
+
 def test_bulk_reduce_invoke_provider_rejects_unsupported_reasoning_mode(tmp_path: Path) -> None:
     group = BulkAnalysisGroup.create("Group")
     group.provider_id = "azure_openai"
@@ -492,11 +506,11 @@ def test_bulk_reduce_passes_computed_input_budget_to_backend(
 
     result = worker._invoke_provider(
         provider=object(),
-        provider_cfg=ProviderConfig(provider_id="anthropic", model="claude-sonnet-4-5", temperature=0.1),
+        provider_cfg=ProviderConfig(provider_id="anthropic", model="claude-custom", temperature=0.1),
         prompt="Prompt",
         system_prompt="System",
         input_budget=worker._max_input_budget(
-            ProviderConfig(provider_id="anthropic", model="claude-sonnet-4-5", temperature=0.1),
+            ProviderConfig(provider_id="anthropic", model="claude-custom", temperature=0.1),
             max_output_tokens=32_000,
         ),
     )
@@ -504,6 +518,29 @@ def test_bulk_reduce_passes_computed_input_budget_to_backend(
     assert result == "summary"
     assert len(backend.requests) == 1
     assert backend.requests[0].input_tokens_limit == 67_000
+
+
+def test_bulk_reduce_ignores_stale_context_override_for_catalog_model(
+    tmp_path: Path,
+) -> None:
+    group = BulkAnalysisGroup.create("Group")
+    group.model_context_window = 1_000_000
+    worker = BulkReduceWorker(
+        project_dir=tmp_path,
+        group=group,
+        metadata=ProjectMetadata(case_name="Case"),
+        force_rerun=False,
+        llm_backend=_CapturingBackend(
+            _model_response("summary", model_name="claude-sonnet-4-6", output_tokens=1)
+        ),
+    )
+
+    budget = worker._max_input_budget(
+        ProviderConfig(provider_id="anthropic", model="claude-sonnet-4-6", temperature=0.1),
+        max_output_tokens=32_000,
+    )
+
+    assert budget == 167_000
 
 
 def test_bulk_reduce_applies_reasoning_settings_to_llm_request(tmp_path: Path) -> None:

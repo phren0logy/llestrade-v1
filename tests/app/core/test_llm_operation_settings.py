@@ -17,8 +17,22 @@ def test_settings_from_report_preferences_normalizes_legacy_custom_provider() ->
 
     assert settings.provider_id == "openai"
     assert settings.model_id == "gpt-4.1"
-    assert settings.context_window == 100_000
+    assert settings.context_window is None
     assert settings.use_reasoning is True
+
+
+def test_settings_from_report_preferences_preserves_context_for_unknown_custom_model() -> None:
+    settings = settings_from_report_preferences(
+        provider_id="custom",
+        model="",
+        custom_model="gpt-custom-preview",
+        context_window=100_000,
+        use_reasoning=False,
+    )
+
+    assert settings.provider_id == "openai"
+    assert settings.model_id == "gpt-custom-preview"
+    assert settings.context_window == 100_000
 
 
 def test_infer_provider_id_from_model_supports_current_selector_families() -> None:

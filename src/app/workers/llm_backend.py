@@ -71,6 +71,7 @@ class ProviderMetadata:
 
     provider_name: str
     default_model: str
+    transport: str = "direct"
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,6 +82,7 @@ class DirectProviderMetadata:
     provider_name: str
     default_model: str
     provider: Any
+    transport: str = "direct"
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,6 +91,12 @@ class LLMProviderRequest:
 
     provider_id: str
     model: Optional[str]
+
+
+def backend_transport_name(backend: Any) -> str:
+    if isinstance(backend, PydanticAIGatewayBackend):
+        return "gateway"
+    return "direct"
 
 def normalize_model_name(provider_id: str, model: Optional[str]) -> str | None:
     """Normalize explicit model selections for a provider."""
@@ -457,23 +465,33 @@ class PydanticAIDirectBackend:
         app_provider_id: str,
         provider_name: str,
     ) -> Any:
-        api_key = settings.get_api_key(app_provider_id)
+        api_key = str(settings.get_api_key(app_provider_id) or "").strip()
         if provider_name == "anthropic":
             from pydantic_ai.providers.anthropic import AnthropicProvider
 
+            if not api_key:
+                raise RuntimeError("No Anthropic API key configured for direct provider requests.")
             return AnthropicProvider(api_key=api_key)
         if provider_name == "google-gla":
             from pydantic_ai.providers.google import GoogleProvider
 
+            if not api_key:
+                raise RuntimeError("No Gemini API key configured for direct provider requests.")
             return GoogleProvider(api_key=api_key)
         if provider_name == "openai":
             from pydantic_ai.providers.openai import OpenAIProvider
 
+            if not api_key:
+                raise RuntimeError("No OpenAI API key configured for direct provider requests.")
             return OpenAIProvider(api_key=api_key)
         if provider_name == "azure":
             from pydantic_ai.providers.azure import AzureProvider
 
             azure_settings = settings.get("azure_openai_settings", {}) or {}
+            if not api_key:
+                raise RuntimeError("No Azure OpenAI API key configured for direct provider requests.")
+            if not str(azure_settings.get("endpoint") or "").strip():
+                raise RuntimeError("No Azure OpenAI endpoint configured for direct provider requests.")
             return AzureProvider(
                 api_key=api_key,
                 azure_endpoint=azure_settings.get("endpoint"),
@@ -554,21 +572,9 @@ class PydanticAIGatewayBackend:
         route: str | None = None,
         max_concurrency: int | None = None,
     ) -> None:
-        self._api_key = (
-            api_key
-            or os.getenv("PYDANTIC_AI_GATEWAY_API_KEY")
-            or os.getenv("PAIG_API_KEY")
-            or self._load_api_key_from_settings()
-        )
-        self._base_url = (
-            base_url
-            or os.getenv("PYDANTIC_AI_GATEWAY_BASE_URL")
-            or os.getenv("PAIG_BASE_URL")
-            or self._load_base_url_from_settings()
-        )
-        self._route = route or os.getenv("PYDANTIC_AI_GATEWAY_ROUTE")
-        if not self._route:
-            self._route = self._load_route_from_settings()
+        self._explicit_api_key = api_key
+        self._explicit_base_url = base_url
+        self._explicit_route = route
         self._max_concurrency = self._resolve_max_concurrency(max_concurrency)
         self._http_client: Any | None = None
         self._concurrency_limiter: Any | None = None
@@ -647,6 +653,7 @@ class PydanticAIGatewayBackend:
         return ProviderMetadata(
             provider_name=request.provider_id,
             default_model=self.resolve_model(request.provider_id, request.model) or "",
+            transport="gateway",
         )
 
     def count_input_tokens(self, provider: Any, request: LLMInvocationRequest) -> int | None:
@@ -735,10 +742,33 @@ class PydanticAIGatewayBackend:
         upstream_provider = provider_name.removeprefix("gateway/")
         return gateway_provider(
             upstream_provider,
-            api_key=self._api_key,
-            base_url=self._base_url,
-            route=self._route,
+            api_key=self._current_api_key(),
+            base_url=self._current_base_url(),
+            route=self._current_route(),
             http_client=self._gateway_http_client(),
+        )
+
+    def _current_api_key(self) -> str | None:
+        return (
+            self._explicit_api_key
+            or os.getenv("PYDANTIC_AI_GATEWAY_API_KEY")
+            or os.getenv("PAIG_API_KEY")
+            or self._load_api_key_from_settings()
+        )
+
+    def _current_base_url(self) -> str | None:
+        return (
+            self._explicit_base_url
+            or os.getenv("PYDANTIC_AI_GATEWAY_BASE_URL")
+            or os.getenv("PAIG_BASE_URL")
+            or self._load_base_url_from_settings()
+        )
+
+    def _current_route(self) -> str | None:
+        return (
+            self._explicit_route
+            or os.getenv("PYDANTIC_AI_GATEWAY_ROUTE")
+            or self._load_route_from_settings()
         )
 
     def _gateway_http_client(self) -> Any | None:
@@ -826,6 +856,7 @@ __all__ = [
     "PydanticAIGatewayBackend",
     "default_model_for_provider",
     "build_model_settings",
+    "backend_transport_name",
     "normalize_model_name",
     "provider_capabilities",
     "resolve_model_name",
