@@ -8,6 +8,7 @@ The deployed shape is intentionally small:
 - one shared app API key for the desktop app
 - one separate `STATUS_AUTH_API_KEY` for script-driven health checks
 - Anthropic, OpenAI, and Google Vertex as the enabled upstream providers
+- provider-specific adaptive capacity control inside the gateway Worker
 - no public admin UI or status hostname
 
 The upstream gateway is headless. Configuration is rendered into an untracked working copy under `var/gateway/rendered/pydantic-ai-gateway/` and deployed to Cloudflare Workers from there.
@@ -40,6 +41,8 @@ Bootstrap also applies the upstream D1 schema automatically after provisioning o
   `gateway/scripts/deploy.sh`
 - Verify:
   `gateway/scripts/verify.sh`
+- Inspect authenticated capacity state:
+  `curl -H "Authorization: $STATUS_AUTH_API_KEY" https://gateway.<your-domain>/status/`
 - Tail Worker logs:
   `gateway/scripts/tail.sh`
 - Roll back to an earlier Worker version:

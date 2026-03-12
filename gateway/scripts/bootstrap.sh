@@ -15,6 +15,7 @@ load_cloudflare_api_token
 ensure_var_dir
 sync_upstream_repo
 prepare_rendered_deploy_dir
+apply_gateway_overlays
 
 app_api_key="$(op_read_ref "${GATEWAY_APP_API_KEY_REF}")" || die "Unable to read the gateway app API key from 1Password."
 [[ -n "${app_api_key}" ]] || die "Gateway app API key was empty."
