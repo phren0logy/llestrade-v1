@@ -32,8 +32,8 @@ class BulkAnalysisTab(QWidget):
         self.log_text.setMaximumHeight(120)
         self.log_text.setStyleSheet("font-family: monospace; font-size: 11px;")
 
-        self.table = QTableWidget(0, 6)
-        self.table.setHorizontalHeaderLabels(["Group", "Coverage", "Updated", "Status", "Placeholders", "Actions"])
+        self.table = QTableWidget(0, 7)
+        self.table.setHorizontalHeaderLabels(["Group", "Coverage", "Updated", "Status", "Est. Cost", "Placeholders", "Actions"])
         self.table.verticalHeader().setVisible(False)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -45,6 +45,7 @@ class BulkAnalysisTab(QWidget):
         header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(5, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(6, QHeaderView.ResizeToContents)
 
         self.empty_label = QLabel("No bulk analysis groups created yet.")
         self.empty_label.setAlignment(Qt.AlignCenter)

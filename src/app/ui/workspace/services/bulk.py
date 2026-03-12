@@ -42,6 +42,7 @@ class BulkAnalysisService:
         force_rerun: bool,
         placeholder_values: Mapping[str, str],
         project_name: str,
+        estimate_summary: Mapping[str, object] | None,
         on_progress: Callable[[str, int, int, str], None],
         on_failed: Callable[[str, str, str], None],
         on_log: Callable[[str, str], None],
@@ -61,6 +62,7 @@ class BulkAnalysisService:
             force_rerun=force_rerun,
             placeholder_values=placeholder_values,
             project_name=project_name,
+            estimate_summary=estimate_summary,
             llm_backend=self._llm_backend,
         )
 
@@ -91,6 +93,7 @@ class BulkAnalysisService:
         force_rerun: bool,
         placeholder_values: Mapping[str, str],
         project_name: str,
+        estimate_summary: Mapping[str, object] | None,
         on_progress: Callable[[str, int, int, str], None],
         on_failed: Callable[[str, str, str], None],
         on_log: Callable[[str, str], None],
@@ -108,6 +111,7 @@ class BulkAnalysisService:
             force_rerun=force_rerun,
             placeholder_values=placeholder_values,
             project_name=project_name,
+            estimate_summary=estimate_summary,
             llm_backend=self._llm_backend,
         )
 

@@ -58,6 +58,8 @@ def persist_report_history(manager, run_type: str, result: Dict[str, object]) ->
     generation_system_prompt = str(result.get("generation_system_prompt") or "").strip() or None
     refinement_user_prompt = str(result.get("refinement_user_prompt") or "").strip() or None
     refinement_system_prompt = str(result.get("refinement_system_prompt") or "").strip() or None
+    estimate_payload = result.get("cost_estimate")
+    estimate_payload = estimate_payload if isinstance(estimate_payload, dict) else {}
 
     if run_type == "refinement" and refined_path is not None:
         manager.record_report_refinement_run(
@@ -78,6 +80,8 @@ def persist_report_history(manager, run_type: str, result: Dict[str, object]) ->
             refinement_user_prompt=refinement_user_prompt,
             refinement_system_prompt=refinement_system_prompt,
             refined_tokens=result.get("refinement_tokens"),
+            estimated_best_cost=estimate_payload.get("best_estimate"),
+            estimated_ceiling_cost=estimate_payload.get("ceiling"),
         )
         return
 
@@ -101,6 +105,8 @@ def persist_report_history(manager, run_type: str, result: Dict[str, object]) ->
         generation_user_prompt=generation_user_prompt,
         generation_system_prompt=generation_system_prompt,
         draft_tokens=result.get("draft_tokens"),
+        estimated_best_cost=estimate_payload.get("best_estimate"),
+        estimated_ceiling_cost=estimate_payload.get("ceiling"),
     )
 
 

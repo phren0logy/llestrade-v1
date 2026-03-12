@@ -8,6 +8,7 @@ from PySide6.QtCore import QCoreApplication, QObject, QRunnable, Signal
 from PySide6.QtWidgets import QApplication, QPushButton, QMessageBox
 
 from src.app.core.bulk_analysis_runner import PromptBundle
+from src.app.core.job_cost_estimates import CostForecast
 
 from src.app.core.file_tracker import FileTracker, WorkspaceGroupMetrics
 from src.app.core.project_manager import ProjectManager, ProjectMetadata
@@ -133,8 +134,9 @@ def test_workspace_run_executes_worker_and_updates_ui(tmp_path: Path, qt_app: QA
     table = controller.tab.table
     assert table.rowCount() == 1
 
-    action_widget = table.cellWidget(0, 5)
+    action_widget = table.cellWidget(0, 6)
     run_button = _find_button(action_widget, "Run Pending")
+    monkeypatch.setattr(QMessageBox, "question", lambda *args, **kwargs: QMessageBox.Yes)
     run_button.click()
     for _ in range(10):
         QCoreApplication.processEvents()
@@ -229,6 +231,7 @@ class _StubBulkAnalysisWorker(QObject, QRunnable):
         force_rerun: bool = False,
         placeholder_values: dict[str, str] | None = None,
         project_name: str = "",
+        estimate_summary=None,  # noqa: ANN001
         llm_backend=None,  # noqa: ANN001
     ) -> None:
         QObject.__init__(self)
@@ -261,12 +264,13 @@ def test_workspace_cancel_updates_status_and_cleans_state(tmp_path: Path, qt_app
     controller = workspace.bulk_controller
     assert controller is not None
     table = controller.tab.table
-    action_widget = table.cellWidget(0, 5)
+    action_widget = table.cellWidget(0, 6)
     run_button = _find_button(action_widget, "Run Pending")
+    monkeypatch.setattr(QMessageBox, "question", lambda *args, **kwargs: QMessageBox.Yes)
     run_button.click()
     QCoreApplication.processEvents()
 
-    action_widget = table.cellWidget(0, 5)
+    action_widget = table.cellWidget(0, 6)
     cancel_button = _find_button(action_widget, "Cancel")
     run_button = _find_button(action_widget, "Run Pending")
 
@@ -301,7 +305,7 @@ def test_workspace_cancel_updates_status_and_cleans_state(tmp_path: Path, qt_app
     assert not controller.is_cancelling(group.group_id)
     assert controller.progress_for(group.group_id) is None
 
-    refreshed_widget = table.cellWidget(0, 5)
+    refreshed_widget = table.cellWidget(0, 6)
     refreshed_run = _find_button(refreshed_widget, "Run Pending")
     refreshed_cancel = _find_button(refreshed_widget, "Cancel")
     assert refreshed_run.isEnabled()
@@ -406,5 +410,70 @@ def test_combined_run_prompts_when_inputs_are_stale(
     assert prompts[0][0] == "Stale Combined Inputs"
     assert "Current resolved inputs: 6" in prompts[0][1]
     assert "Last run input count: 4" in prompts[0][1]
+
+    workspace.deleteLater()
+
+
+def test_bulk_map_run_passes_estimate_summary_to_service(
+    tmp_path: Path,
+    qt_app: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert qt_app is not None
+
+    manager, group = _create_project_with_group(tmp_path)
+
+    workspace = ProjectWorkspace()
+    workspace.set_project(manager)
+    QCoreApplication.processEvents()
+
+    controller = workspace.bulk_controller
+    assert controller is not None
+
+    metrics = WorkspaceGroupMetrics(
+        group_id=group.group_id,
+        name=group.name,
+        slug=group.slug or group.folder_name,
+        converted_files=("folder/record.md",),
+        converted_count=1,
+        bulk_analysis_total=0,
+        pending_bulk_analysis=1,
+        pending_files=("folder/record.md",),
+        operation="per_document",
+    )
+
+    monkeypatch.setattr(controller, "_resolve_group_metrics", lambda _group_id: metrics)
+    monkeypatch.setattr(controller, "_analyse_placeholders", lambda _group: (None, set(), set()))
+    monkeypatch.setattr(
+        controller,
+        "_forecast_map_run",
+        lambda *_args, **_kwargs: CostForecast(
+            available=True,
+            best_estimate=1.0,
+            ceiling=2.0,
+        ),
+    )
+    monkeypatch.setattr(QMessageBox, "question", lambda *args, **kwargs: QMessageBox.Yes)
+
+    captured: dict[str, object] = {}
+
+    def fake_run_map(**kwargs):  # noqa: ANN003
+        captured.update(kwargs)
+        return True
+
+    monkeypatch.setattr(controller._service, "run_map", fake_run_map)
+
+    assert controller.start_map_run(group, force_rerun=False) is True
+    assert captured["estimate_summary"] == {
+        "available": True,
+        "best_estimate": 1.0,
+        "ceiling": 2.0,
+        "spent_actual": None,
+        "remaining_best_estimate": None,
+        "remaining_ceiling": None,
+        "projected_total_best_estimate": None,
+        "projected_total_ceiling": None,
+        "reason": None,
+    }
 
     workspace.deleteLater()

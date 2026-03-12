@@ -16,9 +16,18 @@ from PySide6.QtWidgets import (
 from src.app.core.bulk_analysis_groups import BulkAnalysisGroup
 from src.app.core.bulk_analysis_runner import load_prompts
 from src.app.core.file_tracker import WorkspaceGroupMetrics, WorkspaceMetrics
+from src.app.core.bulk_recovery import BulkRecoveryStore
+from src.app.core.job_cost_estimates import (
+    CostForecast,
+    estimate_bulk_map_cost,
+    estimate_bulk_reduce_cost,
+    format_forecast_confirmation,
+    format_forecast_inline,
+)
 from src.app.core.prompt_placeholders import get_prompt_spec
 from src.app.ui.workspace.bulk_tab import BulkAnalysisTab
 from src.app.ui.workspace.services import BulkAnalysisService
+from src.app.ui.dialogs.bulk_recovery_dialog import BulkRecoveryDialog, RecoveryAction
 from src.app.core.placeholders.analyzer import PlaceholderAnalysis
 from .bulk_placeholders import analyse_group_placeholders
 from .bulk_view import (
@@ -76,6 +85,7 @@ class BulkAnalysisController:
         self._cancelling_groups: Set[str] = set()
         self._progress_map: Dict[str, tuple[int, int]] = {}
         self._failures: Dict[str, List[str]] = {}
+        self._estimate_cache: Dict[str, CostForecast] = {}
 
         self._tab.create_button.clicked.connect(self._on_create_group)
         self._tab.refresh_button.clicked.connect(self._on_refresh_requested)
@@ -93,6 +103,7 @@ class BulkAnalysisController:
         self._cancelling_groups.clear()
         self._progress_map.clear()
         self._failures.clear()
+        self._estimate_cache.clear()
         self._latest_metrics = None
         self._tab.table.setRowCount(0)
         self._tab.empty_label.show()
@@ -207,16 +218,20 @@ class BulkAnalysisController:
         status_item.setTextAlignment(Qt.AlignCenter)
         table.setItem(row, 3, status_item)
 
+        estimate_item = QTableWidgetItem(self._estimate_text(group))
+        estimate_item.setTextAlignment(Qt.AlignCenter)
+        table.setItem(row, 4, estimate_item)
+
         analysis, missing_required, missing_optional = self._analyse_placeholders(group)
         placeholder_item = build_placeholder_item(
             analysis,
             missing_required,
             missing_optional,
         )
-        table.setItem(row, 4, placeholder_item)
+        table.setItem(row, 5, placeholder_item)
 
         action_widget = self._build_action_widget(group, metrics)
-        table.setCellWidget(row, 5, action_widget)
+        table.setCellWidget(row, 6, action_widget)
 
         tooltip_lines: List[str] = []
         if description:
@@ -264,6 +279,7 @@ class BulkAnalysisController:
             on_run_map=lambda g, force: self.start_map_run(g, force),
             on_run_combined=lambda g, force: self.start_combined_run(g, force),
             on_cancel=self.cancel_run,
+            on_recover=self.open_recovery_dialog,
             on_edit=self._on_edit_group,
             on_open_group_folder=self._on_open_group_folder,
             on_preview_prompt=self._on_show_prompt_preview,
@@ -315,6 +331,7 @@ class BulkAnalysisController:
         force_rerun: bool,
         *,
         interactive: bool = True,
+        selected_files: Sequence[str] | None = None,
     ) -> bool:
         if not self._feature_enabled:
             return False
@@ -347,7 +364,11 @@ class BulkAnalysisController:
             self._on_refresh_groups()
             return False
 
-        if force_rerun:
+        if selected_files is not None:
+            files = list(selected_files)
+            if not files:
+                return False
+        elif force_rerun:
             files = list(metrics.converted_files)
             if not files:
                 if interactive:
@@ -403,6 +424,15 @@ class BulkAnalysisController:
                 if reply != QMessageBox.Yes:
                     return False
 
+        forecast = self._forecast_map_run(group, files=files, force_rerun=force_rerun)
+        if interactive and not self._confirm_run_with_forecast(
+            title="Bulk Analysis Estimate",
+            group_name=group.name,
+            mode_label="all documents" if force_rerun else "pending documents",
+            forecast=forecast,
+        ):
+            return False
+
         provider_default = (
             (manager.settings or {}).get("llm_provider", ""),
             (manager.settings or {}).get("llm_model", ""),
@@ -420,8 +450,9 @@ class BulkAnalysisController:
             metadata=manager.metadata,
             default_provider=provider_default,
             force_rerun=force_rerun,
-             placeholder_values=manager.project_placeholder_values(),
-             project_name=manager.project_name,
+            placeholder_values=manager.project_placeholder_values(),
+            project_name=manager.project_name,
+            estimate_summary=forecast.to_dict() if forecast.available else None,
             on_progress=self._handle_progress,
             on_failed=self._handle_failed,
             on_log=self._handle_log,
@@ -543,6 +574,15 @@ class BulkAnalysisController:
                 if reply != QMessageBox.Yes:
                     return
 
+        forecast = self._forecast_combined_run(group, force_rerun=force_rerun)
+        if not self._confirm_run_with_forecast(
+            title="Combined Analysis Estimate",
+            group_name=group.name,
+            mode_label="force rerun" if force_rerun else "standard run",
+            forecast=forecast,
+        ):
+            return
+
         self._running_groups.add(gid)
         self._progress_map[gid] = (0, 1)
         self._failures[gid] = []
@@ -555,6 +595,7 @@ class BulkAnalysisController:
             force_rerun=force_rerun,
             placeholder_values=manager.project_placeholder_values(),
             project_name=manager.project_name,
+            estimate_summary=forecast.to_dict() if forecast.available else None,
             on_progress=self._handle_progress,
             on_failed=self._handle_failed,
             on_log=self._handle_log,
@@ -682,6 +723,110 @@ class BulkAnalysisController:
                     state_map.pop(gid, None)
         self._running_groups.intersection_update(valid_ids)
         self._cancelling_groups.intersection_update(valid_ids)
+        self._estimate_cache = {
+            gid: forecast
+            for gid, forecast in self._estimate_cache.items()
+            if gid in valid_ids
+        }
+
+    def _estimate_text(self, group: BulkAnalysisGroup) -> str:
+        forecast = self._estimate_cache.get(group.group_id)
+        if forecast is None:
+            return "—"
+        return format_forecast_inline(forecast)
+
+    def _forecast_map_run(
+        self,
+        group: BulkAnalysisGroup,
+        *,
+        files: Sequence[str],
+        force_rerun: bool,
+    ) -> CostForecast:
+        manager = self._project_manager
+        if not manager or not manager.project_dir:
+            return CostForecast(available=False, best_estimate=None, ceiling=None, reason="Project unavailable")
+        forecast = estimate_bulk_map_cost(
+            project_dir=manager.project_dir,
+            group=group,
+            files=files,
+            metadata=manager.metadata,
+            placeholder_values=manager.project_placeholder_values(),
+            project_name=manager.project_name,
+            force_rerun=force_rerun,
+        )
+        self._estimate_cache[group.group_id] = forecast
+        return forecast
+
+    def _forecast_combined_run(
+        self,
+        group: BulkAnalysisGroup,
+        *,
+        force_rerun: bool,
+    ) -> CostForecast:
+        manager = self._project_manager
+        if not manager or not manager.project_dir:
+            return CostForecast(available=False, best_estimate=None, ceiling=None, reason="Project unavailable")
+        forecast = estimate_bulk_reduce_cost(
+            project_dir=manager.project_dir,
+            group=group,
+            metadata=manager.metadata,
+            placeholder_values=manager.project_placeholder_values(),
+            project_name=manager.project_name,
+            force_rerun=force_rerun,
+        )
+        self._estimate_cache[group.group_id] = forecast
+        return forecast
+
+    def _confirm_run_with_forecast(
+        self,
+        *,
+        title: str,
+        group_name: str,
+        mode_label: str,
+        forecast: CostForecast,
+    ) -> bool:
+        message = (
+            f"Start '{group_name}' for {mode_label}?\n\n"
+            f"{format_forecast_confirmation(forecast)}"
+        )
+        reply = QMessageBox.question(
+            self._workspace,
+            title,
+            message,
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        return reply == QMessageBox.Yes
+
+    def open_recovery_dialog(self, group: BulkAnalysisGroup) -> None:
+        manager = self._project_manager
+        if not manager or not manager.project_dir:
+            return
+        store = BulkRecoveryStore(manager.project_dir / "bulk_analysis" / (getattr(group, "slug", None) or group.folder_name))
+        dialog = BulkRecoveryDialog(
+            group=group,
+            store=store,
+            parent=self._workspace,
+        )
+        result = dialog.exec()
+        action = dialog.selected_action
+        self._on_refresh_metrics()
+        self._on_refresh_groups()
+        if result != dialog.Accepted or action is None:
+            return
+        if action == RecoveryAction.RESUME:
+            if (group.operation or "per_document") == "combined":
+                self.start_combined_run(group, False)
+            else:
+                documents = dialog.selected_documents()
+                self.start_map_run(group, False, selected_files=documents or None)
+            return
+        if action == RecoveryAction.RERUN_SELECTED:
+            if (group.operation or "per_document") == "combined":
+                self.start_combined_run(group, False)
+            else:
+                documents = dialog.selected_documents()
+                self.start_map_run(group, False, selected_files=documents or None)
 
 
 __all__ = ["BulkAnalysisController"]

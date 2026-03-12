@@ -33,6 +33,7 @@ class ReportDraftJobConfig:
     max_report_tokens: int = 60_000
     placeholder_values: Mapping[str, str] | None = None
     project_name: str = ""
+    estimate_summary: Mapping[str, object] | None = None
 
 
 @dataclass(slots=True)
@@ -55,6 +56,7 @@ class ReportRefinementJobConfig:
     max_report_tokens: int = 60_000
     placeholder_values: Mapping[str, str] | None = None
     project_name: str = ""
+    estimate_summary: Mapping[str, object] | None = None
 
 
 class ReportsService:
@@ -114,6 +116,7 @@ class ReportsService:
             max_report_tokens=config.max_report_tokens,
             placeholder_values=config.placeholder_values,
             project_name=config.project_name,
+            estimate_summary=config.estimate_summary,
             llm_backend=self._llm_backend,
         )
 
@@ -162,6 +165,7 @@ class ReportsService:
             max_report_tokens=config.max_report_tokens,
             placeholder_values=config.placeholder_values,
             project_name=config.project_name,
+            estimate_summary=config.estimate_summary,
             llm_backend=self._llm_backend,
         )
 

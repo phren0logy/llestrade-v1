@@ -15,6 +15,13 @@ from src.app.core.llm_operation_settings import (
     LLMOperationSettings,
     settings_from_report_preferences,
 )
+from src.app.core.job_cost_estimates import (
+    CostForecast,
+    estimate_report_draft_cost,
+    estimate_report_refinement_cost,
+    format_forecast_confirmation,
+    format_forecast_inline,
+)
 from src.app.core.prompt_placeholders import format_prompt, placeholder_summary, get_prompt_spec
 from src.app.core.placeholders.analyzer import analyse_prompts
 from src.app.core.prompt_preview import PromptPreview
@@ -84,6 +91,8 @@ class ReportsController:
         self._last_result: Optional[Dict[str, object]] = None
         self._report_running = False
         self._active_run_kind: Optional[str] = None
+        self._draft_forecast: CostForecast | None = None
+        self._refinement_forecast: CostForecast | None = None
 
         self._connect_signals()
         self._initialise_prompt_tooltips()
@@ -205,6 +214,16 @@ class ReportsController:
     # ------------------------------------------------------------------
     def _connect_signals(self) -> None:
         self._tab.llm_settings_panel.settings_changed.connect(self._update_report_controls)
+        for widget in (
+            self._tab.template_edit,
+            self._tab.transcript_edit,
+            self._tab.generation_user_prompt_edit,
+            self._tab.generation_system_prompt_edit,
+            self._tab.refinement_user_prompt_edit,
+            self._tab.refinement_system_prompt_edit,
+            self._tab.refine_draft_edit,
+        ):
+            widget.textChanged.connect(self._update_report_controls)
         self._tab.template_browse_button.clicked.connect(self._browse_report_template)
         self._tab.transcript_browse_button.clicked.connect(self._browse_report_transcript)
         self._tab.generation_user_prompt_browse.clicked.connect(self._browse_generation_prompt)
@@ -381,6 +400,14 @@ class ReportsController:
 
         self._tab.generate_draft_button.setEnabled(can_run_draft)
         self._tab.run_refinement_button.setEnabled(can_run_refine)
+        self._draft_forecast = self._build_draft_forecast() if can_run_draft else None
+        self._refinement_forecast = self._build_refinement_forecast() if can_run_refine else None
+        self._tab.generate_estimate_label.setText(
+            format_forecast_inline(self._draft_forecast) if self._draft_forecast else "Est. cost unavailable"
+        )
+        self._tab.refinement_estimate_label.setText(
+            format_forecast_inline(self._refinement_forecast) if self._refinement_forecast else "Est. cost unavailable"
+        )
 
     def _update_report_history_buttons(self) -> None:
         buttons = [
@@ -747,6 +774,13 @@ class ReportsController:
 
         project_dir = Path(manager.project_dir)
         metadata = manager.metadata or ProjectMetadata(case_name=manager.project_name or "")
+        forecast = self._build_draft_forecast()
+        if not self._confirm_report_forecast(
+            title="Draft Cost Estimate",
+            kind_label="draft generation",
+            forecast=forecast,
+        ):
+            return
 
         self._save_preferences(
             llm_settings=llm_settings,
@@ -774,6 +808,7 @@ class ReportsController:
             metadata=metadata,
             placeholder_values=manager.project_placeholder_values(),
             project_name=manager.project_name,
+            estimate_summary=forecast.to_dict() if forecast and forecast.available else None,
         )
 
         started = self._service.run_draft(
@@ -863,6 +898,13 @@ class ReportsController:
         selected_pairs = self._resolve_selected_inputs()
         project_dir = Path(manager.project_dir)
         metadata = manager.metadata or ProjectMetadata(case_name=manager.project_name or "")
+        forecast = self._build_refinement_forecast()
+        if not self._confirm_report_forecast(
+            title="Refinement Cost Estimate",
+            kind_label="refinement",
+            forecast=forecast,
+        ):
+            return
 
         self._save_preferences(
             llm_settings=llm_settings,
@@ -891,6 +933,7 @@ class ReportsController:
             metadata=metadata,
             placeholder_values=manager.project_placeholder_values(),
             project_name=manager.project_name,
+            estimate_summary=forecast.to_dict() if forecast and forecast.available else None,
         )
 
         started = self._service.run_refinement(
@@ -954,6 +997,84 @@ class ReportsController:
         if not manager:
             return
         manager.add_cost(amount, provider, stage)
+
+    def _build_draft_forecast(self) -> CostForecast | None:
+        manager = self._project_manager
+        if not manager or not manager.project_dir:
+            return None
+        llm_settings, _ = self._tab.llm_settings_panel.current_settings()
+        if llm_settings is None:
+            return None
+        template_path = self._optional_path(self._tab.template_edit.text())
+        gen_user_path = self._optional_path(self._tab.generation_user_prompt_edit.text())
+        gen_system_path = self._optional_path(self._tab.generation_system_prompt_edit.text())
+        if template_path is None or gen_user_path is None or gen_system_path is None:
+            return None
+        transcript_path = self._optional_path(self._tab.transcript_edit.text())
+        selected_pairs = self._resolve_selected_inputs()
+        if not selected_pairs and not transcript_path:
+            return None
+        metadata = manager.metadata or ProjectMetadata(case_name=manager.project_name or "")
+        return estimate_report_draft_cost(
+            project_dir=Path(manager.project_dir),
+            inputs=selected_pairs,
+            llm_settings=llm_settings,
+            template_path=template_path,
+            transcript_path=transcript_path,
+            generation_user_prompt_path=gen_user_path,
+            generation_system_prompt_path=gen_system_path,
+            metadata=metadata,
+            placeholder_values=manager.project_placeholder_values(),
+            project_name=manager.project_name,
+        )
+
+    def _build_refinement_forecast(self) -> CostForecast | None:
+        manager = self._project_manager
+        if not manager or not manager.project_dir:
+            return None
+        llm_settings, _ = self._tab.llm_settings_panel.current_settings()
+        if llm_settings is None:
+            return None
+        draft_path = self._optional_path(self._tab.refine_draft_edit.text())
+        ref_user_path = self._optional_path(self._tab.refinement_user_prompt_edit.text())
+        ref_system_path = self._optional_path(self._tab.refinement_system_prompt_edit.text())
+        if draft_path is None or ref_user_path is None or ref_system_path is None or not draft_path.exists():
+            return None
+        template_path = self._optional_path(self._tab.template_edit.text())
+        transcript_path = self._optional_path(self._tab.transcript_edit.text())
+        selected_pairs = self._resolve_selected_inputs()
+        metadata = manager.metadata or ProjectMetadata(case_name=manager.project_name or "")
+        return estimate_report_refinement_cost(
+            project_dir=Path(manager.project_dir),
+            inputs=selected_pairs,
+            llm_settings=llm_settings,
+            draft_path=draft_path,
+            template_path=template_path,
+            transcript_path=transcript_path,
+            refinement_user_prompt_path=ref_user_path,
+            refinement_system_prompt_path=ref_system_path,
+            metadata=metadata,
+            placeholder_values=manager.project_placeholder_values(),
+            project_name=manager.project_name,
+        )
+
+    def _confirm_report_forecast(
+        self,
+        *,
+        title: str,
+        kind_label: str,
+        forecast: CostForecast | None,
+    ) -> bool:
+        if forecast is None:
+            return True
+        reply = QMessageBox.question(
+            self._workspace,
+            title,
+            f"Start {kind_label}?\n\n{format_forecast_confirmation(forecast)}",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        return reply == QMessageBox.Yes
 
     # ------------------------------------------------------------------
     # History helpers

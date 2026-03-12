@@ -30,6 +30,34 @@ def _default_primary_model() -> str:
     return default_model_for_provider("anthropic") or ""
 
 
+def _optional_int(value: object) -> Optional[int]:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return int(value)
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return int(float(text))
+    except (TypeError, ValueError):
+        return None
+
+
+def _optional_float(value: object) -> Optional[float]:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return float(text)
+    except (TypeError, ValueError):
+        return None
+
+
 @dataclass
 class ProjectMetadata:
     """Project metadata information."""
@@ -222,6 +250,13 @@ class ReportHistoryEntry:
     refinement_system_prompt: Optional[str] = None
     draft_tokens: Optional[int] = None
     refined_tokens: Optional[int] = None
+    estimated_best_cost: Optional[float] = None
+    estimated_ceiling_cost: Optional[float] = None
+    estimated_spent_actual: Optional[float] = None
+    estimated_remaining_best_cost: Optional[float] = None
+    estimated_remaining_ceiling_cost: Optional[float] = None
+    estimated_projected_total_best_cost: Optional[float] = None
+    estimated_projected_total_ceiling_cost: Optional[float] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -244,12 +279,7 @@ class ReportHistoryEntry:
             provider=str(data.get("provider", "")),
             model=str(data.get("model", "")),
             custom_model=data.get("custom_model"),
-            context_window=(
-                int(data["context_window"])
-                if isinstance(data.get("context_window"), (int, float))
-                or str(data.get("context_window", "")).strip().isdigit()
-                else None
-            ),
+            context_window=_optional_int(data.get("context_window")),
             use_reasoning=bool(data.get("use_reasoning", False)),
             inputs=list(data.get("inputs", [])),
             template_path=data.get("template_path"),
@@ -261,16 +291,15 @@ class ReportHistoryEntry:
             ),
             generation_system_prompt=data.get("generation_system_prompt"),
             refinement_system_prompt=data.get("refinement_system_prompt"),
-            draft_tokens=(
-                int(data["draft_tokens"])
-                if str(data.get("draft_tokens", "")).strip().isdigit()
-                else None
-            ),
-            refined_tokens=(
-                int(data["refined_tokens"])
-                if str(data.get("refined_tokens", "")).strip().isdigit()
-                else None
-            ),
+            draft_tokens=_optional_int(data.get("draft_tokens")),
+            refined_tokens=_optional_int(data.get("refined_tokens")),
+            estimated_best_cost=_optional_float(data.get("estimated_best_cost")),
+            estimated_ceiling_cost=_optional_float(data.get("estimated_ceiling_cost")),
+            estimated_spent_actual=_optional_float(data.get("estimated_spent_actual")),
+            estimated_remaining_best_cost=_optional_float(data.get("estimated_remaining_best_cost")),
+            estimated_remaining_ceiling_cost=_optional_float(data.get("estimated_remaining_ceiling_cost")),
+            estimated_projected_total_best_cost=_optional_float(data.get("estimated_projected_total_best_cost")),
+            estimated_projected_total_ceiling_cost=_optional_float(data.get("estimated_projected_total_ceiling_cost")),
         )
 
 
@@ -1171,6 +1200,8 @@ class ProjectManager(QObject):
         generation_system_prompt: Optional[str],
         use_reasoning: bool = False,
         draft_tokens: Optional[int] = None,
+        estimated_best_cost: Optional[float] = None,
+        estimated_ceiling_cost: Optional[float] = None,
     ) -> None:
         entry = ReportHistoryEntry(
             run_type="draft",
@@ -1191,6 +1222,8 @@ class ProjectManager(QObject):
             generation_user_prompt=generation_user_prompt,
             generation_system_prompt=generation_system_prompt,
             draft_tokens=draft_tokens,
+            estimated_best_cost=estimated_best_cost,
+            estimated_ceiling_cost=estimated_ceiling_cost,
         )
         state = self.report_state
         state.history.insert(0, entry)
@@ -1218,6 +1251,8 @@ class ProjectManager(QObject):
         refinement_system_prompt: Optional[str],
         use_reasoning: bool = False,
         refined_tokens: Optional[int] = None,
+        estimated_best_cost: Optional[float] = None,
+        estimated_ceiling_cost: Optional[float] = None,
     ) -> None:
         entry = ReportHistoryEntry(
             run_type="refinement",
@@ -1238,6 +1273,8 @@ class ProjectManager(QObject):
             refinement_user_prompt=refinement_user_prompt,
             refinement_system_prompt=refinement_system_prompt,
             refined_tokens=refined_tokens,
+            estimated_best_cost=estimated_best_cost,
+            estimated_ceiling_cost=estimated_ceiling_cost,
         )
         state = self.report_state
         state.history.insert(0, entry)

@@ -194,6 +194,9 @@ class ReportsTab(QWidget):
         generation_button_row.addWidget(self.generate_draft_button)
         generation_button_row.addStretch()
         generation_layout.addLayout(generation_button_row)
+        self.generate_estimate_label = QLabel("Est. cost unavailable")
+        self.generate_estimate_label.setStyleSheet("color: #666;")
+        generation_layout.addWidget(self.generate_estimate_label)
 
         config_layout.addWidget(generation_group)
 
@@ -230,6 +233,9 @@ class ReportsTab(QWidget):
         refinement_button_row.addWidget(self.run_refinement_button)
         refinement_button_row.addStretch()
         refinement_layout.addLayout(refinement_button_row)
+        self.refinement_estimate_label = QLabel("Est. cost unavailable")
+        self.refinement_estimate_label.setStyleSheet("color: #666;")
+        refinement_layout.addWidget(self.refinement_estimate_label)
 
         config_layout.addWidget(refinement_group)
 

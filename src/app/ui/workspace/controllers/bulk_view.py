@@ -42,6 +42,10 @@ def build_status_text(
         input_count = getattr(metrics, "combined_input_count", 0) if metrics else 0
         if input_count == 0:
             return "No inputs"
+        if metrics and metrics.reduce_corrupt_chunks:
+            return f"Corrupt reduce ({metrics.reduce_corrupt_chunks})"
+        if metrics and metrics.reduce_resumable_chunks:
+            return f"Resumable reduce ({metrics.reduce_resumable_chunks})"
         if metrics and getattr(metrics, "combined_is_stale", False):
             return "Stale"
         return "Ready"
@@ -49,6 +53,10 @@ def build_status_text(
     converted_count = metrics.converted_count if metrics else 0
     if not converted_count:
         return "No converted files"
+    if metrics and metrics.map_corrupt_chunks:
+        return f"Corrupt chunks ({metrics.map_corrupt_chunks})"
+    if metrics and metrics.map_resumable_chunks:
+        return f"Resumable ({metrics.map_resumable_chunks} chunks)"
     if metrics and metrics.pending_bulk_analysis:
         return f"Pending bulk ({metrics.pending_bulk_analysis})"
     return "Ready"
@@ -101,6 +109,7 @@ def build_action_widget(
     on_run_map: Callable[[BulkAnalysisGroup, bool], None],
     on_run_combined: Callable[[BulkAnalysisGroup, bool], None],
     on_cancel: Callable[[BulkAnalysisGroup], None],
+    on_recover: Callable[[BulkAnalysisGroup], None],
     on_edit: Callable[[BulkAnalysisGroup], None],
     on_open_group_folder: Callable[[BulkAnalysisGroup], None],
     on_preview_prompt: Callable[[BulkAnalysisGroup], None],
@@ -143,6 +152,11 @@ def build_action_widget(
     cancel_button.setEnabled(is_running)
     cancel_button.clicked.connect(lambda _, g=group: on_cancel(g))
     layout.addWidget(cancel_button)
+
+    recover_button = QPushButton("Recover…")
+    recover_button.setEnabled(not is_running and not is_cancelling)
+    recover_button.clicked.connect(lambda _, g=group: on_recover(g))
+    layout.addWidget(recover_button)
 
     edit_button = QPushButton("Edit…")
     edit_button.setEnabled(not is_running and not is_cancelling)

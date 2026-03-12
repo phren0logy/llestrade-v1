@@ -16,6 +16,7 @@ from PySide6.QtCore import Signal
 from src.app.core.bulk_analysis_groups import BulkAnalysisGroup
 from src.app.core.llm_catalog import calculate_usage_cost
 from src.app.core.llm_operation_settings import normalize_context_window_override
+from src.app.core.bulk_recovery import BulkRecoveryStore
 from src.app.core.bulk_analysis_runner import (
     BulkAnalysisCancelled,
     BulkAnalysisDocument,
@@ -203,6 +204,24 @@ def _should_process_document(
 
     return stored_hash != prompt_hash
 
+
+def _map_recovery_needs_work(entry: Mapping[str, object] | None) -> bool:
+    if not isinstance(entry, Mapping) or not entry:
+        return False
+    if str(entry.get("status") or "") != "complete":
+        return True
+    for item in dict(entry.get("chunks") or {}).values():
+        if not isinstance(item, Mapping):
+            continue
+        if str(item.get("status") or "") != "complete":
+            return True
+    for item in dict(entry.get("batches") or {}).values():
+        if not isinstance(item, Mapping):
+            continue
+        if str(item.get("status") or "") != "complete":
+            return True
+    return False
+
 class BulkAnalysisWorker(DashboardWorker):
     """Run bulk analysis summaries on the thread pool."""
 
@@ -223,6 +242,7 @@ class BulkAnalysisWorker(DashboardWorker):
         force_rerun: bool = False,
         placeholder_values: Mapping[str, str] | None = None,
         project_name: str = "",
+        estimate_summary: Mapping[str, object] | None = None,
         llm_backend: LLMExecutionBackend | None = None,
     ) -> None:
         super().__init__(worker_name="bulk_analysis")
@@ -235,6 +255,7 @@ class BulkAnalysisWorker(DashboardWorker):
         self._force_rerun = force_rerun
         self._base_placeholders = dict(placeholder_values or {})
         self._project_name = project_name
+        self._estimate_summary = dict(estimate_summary or {})
         self._run_timestamp = datetime.now(timezone.utc)
         self._llm_backend: LLMExecutionBackend = llm_backend or PydanticAIDirectBackend()
         try:
@@ -327,6 +348,8 @@ class BulkAnalysisWorker(DashboardWorker):
         skipped = 0
         manifest: Optional[Dict[str, object]] = None
         manifest_path: Optional[Path] = None
+        recovery_manifest: Optional[Dict[str, object]] = None
+        recovery_store: Optional[BulkRecoveryStore] = None
 
         try:
             documents = prepare_documents(self._project_dir, self._group, self._files)
@@ -369,20 +392,31 @@ class BulkAnalysisWorker(DashboardWorker):
                 placeholder_values=self._base_placeholders,
             )
             slug = getattr(self._group, "slug", None) or self._group.folder_name
-            checkpoint_mgr = CheckpointManager(
+            legacy_checkpoint_mgr = CheckpointManager(
                 self._project_dir / "bulk_analysis" / slug / "map" / "checkpoints"
             )
+            recovery_store = BulkRecoveryStore(self._project_dir / "bulk_analysis" / slug)
             signature = {
                 "prompt_hash": prompt_hash,
                 "placeholders": _stable_placeholders(self._serialise_placeholders(global_placeholders)),
             }
             manifest_path = _manifest_path(self._project_dir, self._group)
             manifest = _load_manifest(manifest_path)
+            recovery_store.import_legacy_map(
+                checkpoint_root=legacy_checkpoint_mgr.base_dir,
+                legacy_manifest=manifest,
+            )
+            recovery_manifest = recovery_store.load_map_manifest()
             if manifest.get("version") != _MANIFEST_VERSION or manifest.get("signature") != signature:
-                checkpoint_mgr.clear_all()
                 manifest = _default_manifest()
+            if self._force_rerun or recovery_manifest.get("signature") != signature:
+                recovery_store.clear_map()
+                recovery_manifest = recovery_store.load_map_manifest()
             manifest["signature"] = signature
+            recovery_manifest["signature"] = signature
+            recovery_manifest["status"] = "running"
             entries = manifest.setdefault("documents", {})  # type: ignore[arg-type]
+            recovery_manifest.setdefault("documents", {})  # type: ignore[arg-type]
 
             for index, document in enumerate(documents, start=1):
                 if self.is_cancelled():
@@ -394,8 +428,18 @@ class BulkAnalysisWorker(DashboardWorker):
                     source_mtime = 0.0
 
                 entry = entries.get(document.relative_path)
+                recovery_entry = (
+                    dict((recovery_manifest or {}).get("documents", {}).get(document.relative_path) or {})
+                    if recovery_manifest is not None
+                    else {}
+                )
                 output_exists = document.output_path.exists()
-                if not self._force_rerun and not _should_process_document(entry, source_mtime, prompt_hash, output_exists):
+                recovery_needs_work = _map_recovery_needs_work(recovery_entry)
+                if (
+                    not self._force_rerun
+                    and not recovery_needs_work
+                    and not _should_process_document(entry, source_mtime, prompt_hash, output_exists)
+                ):
                     skipped += 1
                     self.log_message.emit(f"Skipping {document.relative_path} (unchanged)")
                     if isinstance(entry, dict):
@@ -419,10 +463,11 @@ class BulkAnalysisWorker(DashboardWorker):
                         system_prompt,
                         document,
                         global_placeholders,
-                        checkpoint_mgr,
                         manifest,
                         prompt_hash,
                         manifest_path,
+                        recovery_store,
+                        recovery_manifest,
                     )
                 except BulkAnalysisCancelled:
                     raise
@@ -481,9 +526,13 @@ class BulkAnalysisWorker(DashboardWorker):
                 self.progress.emit(progress_count, total, document.relative_path)
 
         except BulkAnalysisCancelled:
+            if recovery_manifest is not None:
+                recovery_manifest["status"] = "cancelled"
             self.log_message.emit("Bulk analysis run cancelled.")
             self.logger.info("%s cancelled", self.job_tag)
         except Exception as exc:  # pragma: no cover - defensive logging
+            if recovery_manifest is not None:
+                recovery_manifest["status"] = "failed"
             self.logger.exception("%s worker crashed: %s", self.job_tag, exc)
             self.log_message.emit(f"Bulk analysis worker encountered an error: {exc}")
             failures = max(failures, 1)
@@ -495,8 +544,15 @@ class BulkAnalysisWorker(DashboardWorker):
                     _save_manifest(manifest_path, manifest)
                 except Exception:
                     self.logger.debug("%s failed to save bulk analysis manifest", self.job_tag, exc_info=True)
+            if recovery_store is not None and recovery_manifest is not None:
+                try:
+                    recovery_store.save_map_manifest(recovery_manifest)
+                except Exception:
+                    self.logger.debug("%s failed to save bulk analysis recovery manifest", self.job_tag, exc_info=True)
             if skipped:
                 self.log_message.emit(f"Skipped {skipped} document(s) (no changes detected)")
+            if recovery_manifest is not None and recovery_manifest.get("status") == "running":
+                recovery_manifest["status"] = "complete" if failures == 0 and not self.is_cancelled() else "failed"
             total_cost = self._total_cost(
                 provider_id=provider_config.provider_id if "provider_config" in locals() else None,
                 model_id=provider_config.model if "provider_config" in locals() else None,
@@ -519,11 +575,18 @@ class BulkAnalysisWorker(DashboardWorker):
         system_prompt: str,
         document: BulkAnalysisDocument,
         global_placeholders: Dict[str, str],
-        checkpoint_mgr: CheckpointManager,
         manifest: Dict[str, object],
         prompt_hash: str,
         manifest_path: Path,
+        recovery_store: BulkRecoveryStore | None = None,
+        recovery_manifest: Dict[str, object] | None = None,
+        checkpoint_mgr: CheckpointManager | None = None,
     ) -> tuple[str, Dict[str, object], Dict[str, str]]:
+        _ = checkpoint_mgr
+        if recovery_store is None:
+            recovery_store = BulkRecoveryStore(self._project_dir / "bulk_analysis" / self._group.folder_name)
+        if recovery_manifest is None:
+            recovery_manifest = recovery_store.load_map_manifest()
         if self.is_cancelled():
             raise BulkAnalysisCancelled
 
@@ -652,6 +715,8 @@ class BulkAnalysisWorker(DashboardWorker):
 
         documents = manifest.setdefault("documents", {})  # type: ignore[assignment]
         entry: Dict[str, object] = dict(documents.get(document.relative_path, {}) or {})
+        recovery_documents = recovery_manifest.setdefault("documents", {})  # type: ignore[assignment]
+        recovery_entry: Dict[str, object] = dict(recovery_documents.get(document.relative_path, {}) or {})
         source_checksum = _sha256(body)
         total_chunks = len(chunks)
         needs_reset = (
@@ -660,8 +725,9 @@ class BulkAnalysisWorker(DashboardWorker):
             or entry.get("chunk_count") != total_chunks
         )
         if needs_reset:
-            checkpoint_mgr.clear_map_document(document.relative_path)
             entry = {"chunks_done": [], "checksums": {}}
+            recovery_store.clear_map_document(document.relative_path)
+            recovery_entry = {"chunks": {}, "batches": {}, "status": "incomplete"}
 
         entry["source_checksum"] = source_checksum
         entry["prompt_hash"] = prompt_hash
@@ -669,27 +735,50 @@ class BulkAnalysisWorker(DashboardWorker):
         entry.setdefault("chunks_done", [])
         entry.setdefault("checksums", {})
         documents[document.relative_path] = entry
+        recovery_entry["source_checksum"] = source_checksum
+        recovery_entry["prompt_hash"] = prompt_hash
+        recovery_entry["chunk_count"] = total_chunks
+        recovery_entry.setdefault("chunks", {})
+        recovery_entry.setdefault("batches", {})
+        recovery_entry.setdefault("status", "incomplete")
+        recovery_documents[document.relative_path] = recovery_entry
 
         chunk_summaries: List[str] = []
         run_details["chunk_count"] = total_chunks
         done_set = set(entry.get("chunks_done") or [])
         checksums: Dict[str, str] = dict(entry.get("checksums") or {})
+        recovery_chunks: Dict[str, Dict[str, object]] = dict(recovery_entry.get("chunks") or {})
 
         for idx, chunk in enumerate(chunks, start=1):
             if self.is_cancelled():
                 raise BulkAnalysisCancelled
 
             chunk_checksum = _sha256(chunk)
-            cached = checkpoint_mgr.load_map_chunk(document.relative_path, idx)
+            chunk_key = str(idx)
+            cached = recovery_store.load_payload(recovery_store.map_chunk_path(document.relative_path, idx))
             cached_content = None
-            if (
-                cached
-                and cached.get("input_checksum") == chunk_checksum
-                and cached.get("content")
-                and cached.get("content_checksum") == _sha256(cached.get("content"))
-                and checksums.get(str(idx)) == chunk_checksum
-            ):
-                cached_content = cached.get("content")
+            if cached:
+                valid, reason = recovery_store.validate_payload(
+                    payload=cached,
+                    expected_input_checksum=chunk_checksum,
+                )
+                if valid and recovery_chunks.get(chunk_key, {}).get("status") == "complete":
+                    cached_content = str(cached.get("content") or "")
+                else:
+                    recovery_store.quarantine_map_payload(
+                        document_rel=document.relative_path,
+                        kind="chunk",
+                        identifier=chunk_key,
+                        payload=cached,
+                        reason=reason or "invalid cached chunk payload",
+                    )
+                    recovery_chunks[chunk_key] = {
+                        **recovery_chunks.get(chunk_key, {}),
+                        "status": "corrupt",
+                        "input_checksum": chunk_checksum,
+                        "updated_at": datetime.now(timezone.utc).isoformat(),
+                        "quarantine_reason": reason or "invalid cached chunk payload",
+                    }
 
             if cached_content:
                 summary = cached_content
@@ -718,18 +807,40 @@ class BulkAnalysisWorker(DashboardWorker):
                     system_prompt,
                     input_budget=input_budget,
                     context_label=f"chunk {idx}/{total_chunks} for '{document.relative_path}'",
+                    on_response=lambda response, chunk_index=chunk_key: self._record_recovery_actuals(
+                        recovery_store,
+                        recovery_manifest,
+                        response,
+                        provider_config=provider_config,
+                        stage="map_chunk",
+                        item=recovery_chunks.setdefault(chunk_index, {}),
+                    ),
                 )
-                checkpoint_mgr.save_map_chunk(document.relative_path, idx, summary, chunk_checksum)
+                payload = recovery_store.save_payload(
+                    recovery_store.map_chunk_path(document.relative_path, idx),
+                    content=summary,
+                    input_checksum=chunk_checksum,
+                )
+                recovery_chunks[chunk_key] = {
+                    **recovery_chunks.get(chunk_key, {}),
+                    "status": "complete",
+                    "input_checksum": payload.get("input_checksum"),
+                    "content_checksum": payload.get("content_checksum"),
+                    "updated_at": payload.get("updated_at"),
+                }
 
-            checksums[str(idx)] = chunk_checksum
+            checksums[chunk_key] = chunk_checksum
             done_set.add(idx)
             entry["checksums"] = checksums
             entry["chunks_done"] = sorted(done_set)
             documents[document.relative_path] = entry
+            recovery_entry["chunks"] = recovery_chunks
+            recovery_documents[document.relative_path] = recovery_entry
             try:
                 _save_manifest(manifest_path, manifest)
             except Exception:
                 self.logger.debug("Failed to persist map chunk manifest update", exc_info=True)
+            recovery_store.save_map_manifest(recovery_manifest)
 
             chunk_summaries.append(summary)
 
@@ -741,7 +852,60 @@ class BulkAnalysisWorker(DashboardWorker):
                 system_prompt,
                 input_budget=input_budget,
                 context_label=f"combine summary for '{document.relative_path}'",
+                on_response=lambda response: self._record_recovery_actuals(
+                    recovery_store,
+                    recovery_manifest,
+                    response,
+                    provider_config=provider_config,
+                    stage="map_batch",
+                ),
             )
+
+        def load_batch(level: int, batch_index: int, checksum: str) -> Optional[str]:
+            batch_key = f"{level}:{batch_index}"
+            payload = recovery_store.load_payload(recovery_store.map_batch_path(document.relative_path, level, batch_index))
+            if not payload:
+                return None
+            valid, reason = recovery_store.validate_payload(payload=payload, expected_input_checksum=checksum)
+            if valid and recovery_entry.get("batches", {}).get(batch_key, {}).get("status") == "complete":
+                return str(payload.get("content") or "")
+            recovery_store.quarantine_map_payload(
+                document_rel=document.relative_path,
+                kind="batch",
+                identifier=batch_key.replace(":", "_"),
+                payload=payload,
+                reason=reason or "invalid cached batch payload",
+            )
+            batches = dict(recovery_entry.get("batches") or {})
+            batches[batch_key] = {
+                **dict(batches.get(batch_key) or {}),
+                "status": "corrupt",
+                "input_checksum": checksum,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "quarantine_reason": reason or "invalid cached batch payload",
+            }
+            recovery_entry["batches"] = batches
+            recovery_documents[document.relative_path] = recovery_entry
+            recovery_store.save_map_manifest(recovery_manifest)
+            return None
+
+        def save_batch(level: int, batch_index: int, checksum: str, content: str) -> None:
+            batch_key = f"{level}:{batch_index}"
+            payload = recovery_store.save_payload(
+                recovery_store.map_batch_path(document.relative_path, level, batch_index),
+                content=content,
+                input_checksum=checksum,
+            )
+            batches = dict(recovery_entry.get("batches") or {})
+            batches[batch_key] = {
+                "status": "complete",
+                "input_checksum": payload.get("input_checksum"),
+                "content_checksum": payload.get("content_checksum"),
+                "updated_at": payload.get("updated_at"),
+            }
+            recovery_entry["batches"] = batches
+            recovery_documents[document.relative_path] = recovery_entry
+            recovery_store.save_map_manifest(recovery_manifest)
 
         result = combine_chunk_summaries_hierarchical(
             chunk_summaries,
@@ -752,14 +916,17 @@ class BulkAnalysisWorker(DashboardWorker):
             model=provider_config.model,
             invoke_fn=invoke_combine,
             is_cancelled_fn=self.is_cancelled,
+            load_batch_fn=load_batch,
+            save_batch_fn=save_batch,
         )
         entry["status"] = "complete"
         entry["ran_at"] = datetime.now(timezone.utc).isoformat()
         documents[document.relative_path] = entry
-        try:
-            _save_manifest(manifest_path, manifest)
-        finally:
-            checkpoint_mgr.clear_map_document(document.relative_path)
+        recovery_entry["status"] = "complete"
+        recovery_entry["ran_at"] = entry["ran_at"]
+        recovery_documents[document.relative_path] = recovery_entry
+        _save_manifest(manifest_path, manifest)
+        recovery_store.save_map_manifest(recovery_manifest)
         return result, run_details, doc_placeholders
 
     def _max_input_budget(self, *, raw_context_window: int, max_output_tokens: int) -> int:
@@ -949,6 +1116,7 @@ class BulkAnalysisWorker(DashboardWorker):
         max_tokens: int = _DEFAULT_MAX_OUTPUT_TOKENS,
         input_budget: Optional[int] = None,
         context_label: str = "bulk analysis request",
+        on_response=None,
     ) -> str:
         if self._cancel_event.is_set():
             raise BulkAnalysisCancelled
@@ -1000,6 +1168,8 @@ class BulkAnalysisWorker(DashboardWorker):
                     input_tokens_limit=input_budget,
                 ),
             )
+        if on_response is not None:
+            on_response(response)
         self._record_response_usage(response)
         content = str(response.text or "").strip()
         if not content:
@@ -1012,6 +1182,52 @@ class BulkAnalysisWorker(DashboardWorker):
             return
         self._usage_totals["input_tokens"] += int(getattr(usage, "input_tokens", 0) or 0)
         self._usage_totals["output_tokens"] += int(getattr(usage, "output_tokens", 0) or 0)
+
+    def _response_usage_summary(
+        self,
+        response: object,
+        *,
+        provider_config: ProviderConfig,
+    ) -> dict[str, int | float]:
+        usage = getattr(response, "usage", None)
+        input_tokens = int(getattr(usage, "input_tokens", 0) or 0) if usage is not None else 0
+        output_tokens = int(getattr(usage, "output_tokens", 0) or 0) if usage is not None else 0
+        cost = calculate_usage_cost(
+            provider_id=provider_config.provider_id,
+            model_id=provider_config.model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+        )
+        return {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cost": float(cost) if cost is not None else 0.0,
+        }
+
+    def _record_recovery_actuals(
+        self,
+        recovery_store: BulkRecoveryStore,
+        recovery_manifest: dict[str, object],
+        response: object,
+        *,
+        provider_config: ProviderConfig,
+        stage: str,
+        item: dict[str, object] | None = None,
+    ) -> None:
+        usage = self._response_usage_summary(response, provider_config=provider_config)
+        recovery_store.add_actuals(
+            recovery_manifest,
+            input_tokens=int(usage["input_tokens"]),
+            output_tokens=int(usage["output_tokens"]),
+            cost=float(usage["cost"]),
+        )
+        if item is not None:
+            item["actual_usage"] = {
+                "input_tokens": int(usage["input_tokens"]),
+                "output_tokens": int(usage["output_tokens"]),
+            }
+            item["actual_cost"] = float(usage["cost"])
+            item["last_stage"] = stage
 
     def _total_cost(self, *, provider_id: str | None, model_id: str | None) -> float | None:
         if not provider_id:
@@ -1077,6 +1293,8 @@ class BulkAnalysisWorker(DashboardWorker):
             "provider_id": provider_config.provider_id,
             "model": provider_config.model,
         }
+        if self._estimate_summary:
+            extra["cost_estimate"] = dict(self._estimate_summary)
         extra.update(run_details)
         return build_document_metadata(
             project_path=project_path,

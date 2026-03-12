@@ -18,6 +18,7 @@ from src.app.core.azure_artifacts import is_azure_raw_artifact
 from src.app.core.bulk_analysis_groups import BulkAnalysisGroup
 from src.app.core.llm_catalog import calculate_usage_cost
 from src.app.core.llm_operation_settings import normalize_context_window_override
+from src.app.core.bulk_recovery import BulkRecoveryStore
 from src.app.core.bulk_analysis_runner import (
     BulkAnalysisCancelled,
     PromptBundle,
@@ -215,6 +216,7 @@ class BulkReduceWorker(DashboardWorker):
         force_rerun: bool = False,
         placeholder_values: Mapping[str, str] | None = None,
         project_name: str = "",
+        estimate_summary: Mapping[str, object] | None = None,
         llm_backend: LLMExecutionBackend | None = None,
     ) -> None:
         super().__init__(worker_name="bulk_reduce")
@@ -224,6 +226,7 @@ class BulkReduceWorker(DashboardWorker):
         self._force_rerun = force_rerun
         self._base_placeholders = dict(placeholder_values or {})
         self._project_name = project_name
+        self._estimate_summary = dict(estimate_summary or {})
         self._run_timestamp = datetime.now(timezone.utc)
         self._llm_backend: LLMExecutionBackend = llm_backend or PydanticAIDirectBackend()
         try:
@@ -413,6 +416,12 @@ class BulkReduceWorker(DashboardWorker):
             checkpoint_mgr = CheckpointManager(
                 self._project_dir / "bulk_analysis" / slug / "reduce" / "checkpoints"
             )
+            recovery_store = BulkRecoveryStore(self._project_dir / "bulk_analysis" / slug)
+            recovery_store.import_legacy_reduce(
+                checkpoint_root=checkpoint_mgr.base_dir,
+                legacy_manifest=previous,
+            )
+            recovery_manifest = recovery_store.load_reduce_manifest()
 
             previous_sig = previous.get("signature") or {}
             def _paths(sig: dict[str, object]) -> list[tuple[str, str]]:
@@ -429,19 +438,26 @@ class BulkReduceWorker(DashboardWorker):
             if previous.get("version") != _MANIFEST_VERSION or not same_inputs:
                 checkpoint_mgr.clear_reduce()
                 previous = _default_manifest()
+            if self._force_rerun or recovery_manifest.get("signature") != signature:
+                recovery_store.clear_reduce()
+                recovery_manifest = recovery_store.load_reduce_manifest()
 
             was_finalized = bool(previous.get("finalized"))
+            recovery_complete = bool(recovery_manifest.get("finalized")) and str(recovery_manifest.get("status") or "") == "complete"
             current_manifest = previous
             current_manifest["signature"] = signature
             current_manifest.setdefault("chunks", {"count": 0, "done": [], "checksums": {}})
             current_manifest.setdefault("batches", {})
             current_manifest["finalized"] = False
             manifest = current_manifest
+            recovery_manifest["signature"] = signature
 
-            if not self._force_rerun and same_inputs and was_finalized:
+            if not self._force_rerun and same_inputs and was_finalized and recovery_complete:
                 self.log_message.emit("Combined inputs unchanged; skipping run.")
                 self.finished.emit(0, 0)
                 return
+            recovery_manifest["finalized"] = False
+            recovery_manifest["status"] = "running"
 
             self.log_message.emit(
                 f"Starting combined bulk analysis for '{self._group.name}' ({total} input file(s))."
@@ -507,6 +523,10 @@ class BulkReduceWorker(DashboardWorker):
                 chunk_state["count"] = 1
                 chunk_state["done"] = [1]
                 current_manifest["chunks"] = chunk_state
+                recovery_manifest["chunks"] = {
+                    "count": 1,
+                    "items": {},
+                }
             else:
                 chunks = generate_chunks(combined_content, max_tokens)
                 if not chunks:
@@ -524,6 +544,13 @@ class BulkReduceWorker(DashboardWorker):
                         prompt,
                         system_prompt,
                         input_budget=input_budget,
+                        on_response=lambda response: self._record_recovery_actuals(
+                            recovery_store,
+                            recovery_manifest,
+                            response,
+                            provider_cfg=provider_cfg,
+                            stage="reduce_direct",
+                        ),
                     )
                     run_details["chunk_count"] = 1
                     run_details["chunking"] = False
@@ -534,21 +561,39 @@ class BulkReduceWorker(DashboardWorker):
                     chunk_state = current_manifest.get("chunks", {"count": 0, "done": [], "checksums": {}})
                     chunk_state["count"] = total_chunks
                     done_set = set(chunk_state.get("done") or [])
+                    recovery_chunk_state = recovery_manifest.setdefault("chunks", {"count": 0, "items": {}})
+                    recovery_chunk_state["count"] = total_chunks
+                    recovery_items = dict(recovery_chunk_state.get("items") or {})
 
                     for idx, chunk in enumerate(chunks, start=1):
                         if self.is_cancelled():
                             raise BulkAnalysisCancelled
 
                         chunk_checksum = _sha256(chunk)
-                        cached = checkpoint_mgr.load_reduce_chunk(idx)
+                        chunk_key = str(idx)
+                        cached = recovery_store.load_payload(recovery_store.reduce_chunk_path(idx))
                         cached_content = None
-                        if (
-                            cached
-                            and cached.get("input_checksum") == chunk_checksum
-                            and cached.get("content")
-                            and chunk_state.get("checksums", {}).get(str(idx)) == chunk_checksum
-                        ):
-                            cached_content = cached.get("content")
+                        if cached:
+                            valid, reason = recovery_store.validate_payload(
+                                payload=cached,
+                                expected_input_checksum=chunk_checksum,
+                            )
+                            if valid and recovery_items.get(chunk_key, {}).get("status") == "complete":
+                                cached_content = str(cached.get("content") or "")
+                            else:
+                                recovery_store.quarantine_reduce_payload(
+                                    kind="chunk",
+                                    identifier=chunk_key,
+                                    payload=cached,
+                                    reason=reason or "invalid cached chunk payload",
+                                )
+                                recovery_items[chunk_key] = {
+                                    **dict(recovery_items.get(chunk_key) or {}),
+                                    "status": "corrupt",
+                                    "input_checksum": chunk_checksum,
+                                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                                    "quarantine_reason": reason or "invalid cached chunk payload",
+                                }
 
                         if cached_content:
                             summary = cached_content
@@ -574,17 +619,39 @@ class BulkReduceWorker(DashboardWorker):
                                 prompt,
                                 system_prompt,
                                 input_budget=input_budget,
+                                on_response=lambda response, chunk_index=chunk_key: self._record_recovery_actuals(
+                                    recovery_store,
+                                    recovery_manifest,
+                                    response,
+                                    provider_cfg=provider_cfg,
+                                    stage="reduce_chunk",
+                                    item=recovery_items.setdefault(chunk_index, {}),
+                                ),
                             )
-                            checkpoint_mgr.save_reduce_chunk(idx, summary, chunk_checksum)
+                            payload = recovery_store.save_payload(
+                                recovery_store.reduce_chunk_path(idx),
+                                content=summary,
+                                input_checksum=chunk_checksum,
+                            )
+                            recovery_items[chunk_key] = {
+                                **dict(recovery_items.get(chunk_key) or {}),
+                                "status": "complete",
+                                "input_checksum": payload.get("input_checksum"),
+                                "content_checksum": payload.get("content_checksum"),
+                                "updated_at": payload.get("updated_at"),
+                            }
 
                         chunk_state.setdefault("checksums", {})[str(idx)] = chunk_checksum
                         done_set.add(idx)
                         chunk_state["done"] = sorted(done_set)
                         current_manifest["chunks"] = chunk_state
+                        recovery_chunk_state["items"] = recovery_items
+                        recovery_manifest["chunks"] = recovery_chunk_state
                         try:
                             _save_manifest(state_manifest_path, current_manifest)
                         except Exception:
                             self.logger.debug("Failed to persist chunk manifest update", exc_info=True)
+                        recovery_store.save_reduce_manifest(recovery_manifest)
 
                         chunk_summaries.append(summary)
 
@@ -601,22 +668,49 @@ class BulkReduceWorker(DashboardWorker):
                         )
 
                     def load_batch(level: int, batch_index: int, checksum: str) -> Optional[str]:
-                        cached = checkpoint_mgr.load_reduce_batch(level, batch_index)
-                        if (
-                            cached
-                            and cached.get("input_checksum") == checksum
-                            and cached.get("content")
-                            and current_manifest.get("batches", {}).get(f"{level}:{batch_index}") == checksum
-                        ):
-                            return cached.get("content")
+                        batch_key = f"{level}:{batch_index}"
+                        cached = recovery_store.load_payload(recovery_store.reduce_batch_path(level, batch_index))
+                        if cached:
+                            valid, reason = recovery_store.validate_payload(payload=cached, expected_input_checksum=checksum)
+                            if valid and recovery_manifest.get("batches", {}).get(batch_key, {}).get("status") == "complete":
+                                return str(cached.get("content") or "")
+                            recovery_store.quarantine_reduce_payload(
+                                kind="batch",
+                                identifier=batch_key.replace(":", "_"),
+                                payload=cached,
+                                reason=reason or "invalid cached batch payload",
+                            )
+                            batches = dict(recovery_manifest.get("batches") or {})
+                            batches[batch_key] = {
+                                **dict(batches.get(batch_key) or {}),
+                                "status": "corrupt",
+                                "input_checksum": checksum,
+                                "updated_at": datetime.now(timezone.utc).isoformat(),
+                                "quarantine_reason": reason or "invalid cached batch payload",
+                            }
+                            recovery_manifest["batches"] = batches
+                            recovery_store.save_reduce_manifest(recovery_manifest)
                         return None
 
                     def save_batch(level: int, batch_index: int, checksum: str, content: str) -> None:
-                        checkpoint_mgr.save_reduce_batch(level, batch_index, content, checksum)
+                        payload = recovery_store.save_payload(
+                            recovery_store.reduce_batch_path(level, batch_index),
+                            content=content,
+                            input_checksum=checksum,
+                        )
                         batches = current_manifest.setdefault("batches", {})
                         batches[f"{level}:{batch_index}"] = checksum
                         current_manifest["batches"] = batches
+                        recovery_batches = dict(recovery_manifest.get("batches") or {})
+                        recovery_batches[f"{level}:{batch_index}"] = {
+                            "status": "complete",
+                            "input_checksum": payload.get("input_checksum"),
+                            "content_checksum": payload.get("content_checksum"),
+                            "updated_at": payload.get("updated_at"),
+                        }
+                        recovery_manifest["batches"] = recovery_batches
                         _save_manifest(state_manifest_path, current_manifest)
+                        recovery_store.save_reduce_manifest(recovery_manifest)
 
                     result = combine_chunk_summaries_hierarchical(
                         chunk_summaries,
@@ -663,7 +757,10 @@ class BulkReduceWorker(DashboardWorker):
             current_manifest["group_id"] = self._group.group_id
             current_manifest["group_slug"] = getattr(self._group, "slug", None) or self._group.folder_name
             _save_manifest(state_manifest_path, current_manifest)
-            checkpoint_mgr.clear_reduce()
+            recovery_manifest["finalized"] = True
+            recovery_manifest["ran_at"] = written_at.isoformat()
+            recovery_manifest["status"] = "complete"
+            recovery_store.save_reduce_manifest(recovery_manifest)
 
             self.progress.emit(1, 1, "Completed")
             total_cost = self._total_cost(provider_id=provider_cfg.provider_id, model_id=provider_cfg.model)
@@ -672,9 +769,15 @@ class BulkReduceWorker(DashboardWorker):
             self.finished.emit(1, 0)
 
         except BulkAnalysisCancelled:
+            if "recovery_store" in locals() and "recovery_manifest" in locals():
+                recovery_manifest["status"] = "cancelled"
+                recovery_store.save_reduce_manifest(recovery_manifest)
             self.log_message.emit("Combined operation cancelled.")
             self.finished.emit(0, 0)
         except Exception as exc:  # pragma: no cover - defensive
+            if "recovery_store" in locals() and "recovery_manifest" in locals():
+                recovery_manifest["status"] = "failed"
+                recovery_store.save_reduce_manifest(recovery_manifest)
             self.logger.exception("BulkReduceWorker crashed: %s", exc)
             self.log_message.emit(f"Combined operation error: {exc}")
             self.finished.emit(0, 1)
@@ -705,6 +808,8 @@ class BulkReduceWorker(DashboardWorker):
             "model": provider_cfg.model,
             "input_count": len(inputs),
         }
+        if self._estimate_summary:
+            extra["cost_estimate"] = dict(self._estimate_summary)
         extra.update(run_details)
         extra["placeholders"] = self._serialise_placeholders(placeholders)
         return build_document_metadata(
@@ -965,6 +1070,7 @@ class BulkReduceWorker(DashboardWorker):
         *,
         max_tokens: int = 32_000,
         input_budget: Optional[int] = None,
+        on_response=None,
     ) -> str:
         if self._cancel_event.is_set():
             raise BulkAnalysisCancelled
@@ -998,6 +1104,8 @@ class BulkReduceWorker(DashboardWorker):
                     input_tokens_limit=input_budget,
                 ),
             )
+        if on_response is not None:
+            on_response(response)
         self._record_response_usage(response)
         content = str(response.text or "").strip()
         if not content:
@@ -1033,6 +1141,52 @@ class BulkReduceWorker(DashboardWorker):
             return
         self._usage_totals["input_tokens"] += int(getattr(usage, "input_tokens", 0) or 0)
         self._usage_totals["output_tokens"] += int(getattr(usage, "output_tokens", 0) or 0)
+
+    def _response_usage_summary(
+        self,
+        response: object,
+        *,
+        provider_cfg: ProviderConfig,
+    ) -> dict[str, int | float]:
+        usage = getattr(response, "usage", None)
+        input_tokens = int(getattr(usage, "input_tokens", 0) or 0) if usage is not None else 0
+        output_tokens = int(getattr(usage, "output_tokens", 0) or 0) if usage is not None else 0
+        cost = calculate_usage_cost(
+            provider_id=provider_cfg.provider_id,
+            model_id=provider_cfg.model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+        )
+        return {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cost": float(cost) if cost is not None else 0.0,
+        }
+
+    def _record_recovery_actuals(
+        self,
+        recovery_store: BulkRecoveryStore,
+        recovery_manifest: dict[str, object],
+        response: object,
+        *,
+        provider_cfg: ProviderConfig,
+        stage: str,
+        item: dict[str, object] | None = None,
+    ) -> None:
+        usage = self._response_usage_summary(response, provider_cfg=provider_cfg)
+        recovery_store.add_actuals(
+            recovery_manifest,
+            input_tokens=int(usage["input_tokens"]),
+            output_tokens=int(usage["output_tokens"]),
+            cost=float(usage["cost"]),
+        )
+        if item is not None:
+            item["actual_usage"] = {
+                "input_tokens": int(usage["input_tokens"]),
+                "output_tokens": int(usage["output_tokens"]),
+            }
+            item["actual_cost"] = float(usage["cost"])
+            item["last_stage"] = stage
 
     def _total_cost(self, *, provider_id: str | None, model_id: str | None) -> float | None:
         if not provider_id:
@@ -1089,6 +1243,8 @@ class BulkReduceWorker(DashboardWorker):
             "user_prompt_path": self._group.user_prompt_path,
             "placeholders": self._serialise_placeholders(placeholders),
         }
+        if self._estimate_summary:
+            manifest["cost_estimate"] = dict(self._estimate_summary)
         if citation_stats is not None:
             manifest["citations"] = {
                 "total": citation_stats.total,

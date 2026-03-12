@@ -72,6 +72,7 @@ class DraftReportWorker(ReportWorkerBase):
         max_report_tokens: int = 60_000,
         placeholder_values: Mapping[str, str] | None = None,
         project_name: str = "",
+        estimate_summary: Mapping[str, object] | None = None,
         llm_backend: LLMExecutionBackend | None = None,
     ) -> None:
         super().__init__(
@@ -89,6 +90,7 @@ class DraftReportWorker(ReportWorkerBase):
             max_report_tokens=max_report_tokens,
             llm_backend=llm_backend,
         )
+        self._estimate_summary = dict(estimate_summary or {})
         self._template_path = Path(template_path)
         self._transcript_path = Path(transcript_path) if transcript_path else None
         self._generation_user_prompt_path = Path(generation_user_prompt_path).expanduser()
@@ -264,6 +266,7 @@ class DraftReportWorker(ReportWorkerBase):
                 "section_count": len(section_outputs),
                 "usage": self._usage_summary(),
                 "cost": self._total_cost(),
+                "cost_estimate": dict(self._estimate_summary) if self._estimate_summary else None,
             }
             if result["cost"] is not None:
                 self.cost_calculated.emit(float(result["cost"]), self._provider_id, "report_draft")
@@ -412,6 +415,8 @@ class DraftReportWorker(ReportWorkerBase):
             "usage": self._usage_summary(),
             "cost": self._total_cost(),
         }
+        if self._estimate_summary:
+            manifest["cost_estimate"] = dict(self._estimate_summary)
         if citation_stats is not None:
             manifest["citations"] = {
                 "total": citation_stats.total,
@@ -450,6 +455,7 @@ class ReportRefinementWorker(ReportWorkerBase):
         max_report_tokens: int = 60_000,
         placeholder_values: Mapping[str, str] | None = None,
         project_name: str = "",
+        estimate_summary: Mapping[str, object] | None = None,
         llm_backend: LLMExecutionBackend | None = None,
     ) -> None:
         super().__init__(
@@ -467,6 +473,7 @@ class ReportRefinementWorker(ReportWorkerBase):
             max_report_tokens=max_report_tokens,
             llm_backend=llm_backend,
         )
+        self._estimate_summary = dict(estimate_summary or {})
         self._draft_path = Path(draft_path)
         self._template_path = Path(template_path) if template_path else None
         self._transcript_path = Path(transcript_path) if transcript_path else None
@@ -683,6 +690,7 @@ class ReportRefinementWorker(ReportWorkerBase):
                 "refinement_tokens": self._refine_usage,
                 "usage": self._usage_summary(),
                 "cost": self._total_cost(),
+                "cost_estimate": dict(self._estimate_summary) if self._estimate_summary else None,
             }
             if result["cost"] is not None:
                 self.cost_calculated.emit(float(result["cost"]), self._provider_id, "report_refinement")
@@ -778,6 +786,8 @@ class ReportRefinementWorker(ReportWorkerBase):
             },
             "cost": self._total_cost(),
         }
+        if self._estimate_summary:
+            manifest["cost_estimate"] = dict(self._estimate_summary)
         if citation_stats is not None:
             manifest["citations"] = {
                 "total": citation_stats.total,

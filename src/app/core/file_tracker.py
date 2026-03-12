@@ -17,6 +17,7 @@ from src.app.core.bulk_paths import (
     normalize_map_relative,
     resolve_map_output_path,
 )
+from src.app.core.bulk_recovery import recovery_summary
 
 if TYPE_CHECKING:
     from .bulk_analysis_groups import BulkAnalysisGroup
@@ -376,6 +377,12 @@ class WorkspaceGroupMetrics:
     combined_latest_at: datetime | None = None
     combined_is_stale: bool = False
     combined_last_run_input_count: int | None = None
+    map_resumable_documents: int = 0
+    map_resumable_chunks: int = 0
+    map_corrupt_chunks: int = 0
+    reduce_resumable_chunks: int = 0
+    reduce_corrupt_chunks: int = 0
+    recovery_actual_cost: float = 0.0
 
     def to_dict(self) -> Dict[str, object]:
         return {
@@ -393,6 +400,12 @@ class WorkspaceGroupMetrics:
             "combined_latest_at": self.combined_latest_at.isoformat() if self.combined_latest_at else None,
             "combined_is_stale": self.combined_is_stale,
             "combined_last_run_input_count": self.combined_last_run_input_count,
+            "map_resumable_documents": self.map_resumable_documents,
+            "map_resumable_chunks": self.map_resumable_chunks,
+            "map_corrupt_chunks": self.map_corrupt_chunks,
+            "reduce_resumable_chunks": self.reduce_resumable_chunks,
+            "reduce_corrupt_chunks": self.reduce_corrupt_chunks,
+            "recovery_actual_cost": self.recovery_actual_cost,
         }
 
 
@@ -489,6 +502,8 @@ def build_workspace_metrics(
                 _compute_combined_status(project_dir, group)
             )
 
+        recovery = recovery_summary(project_dir / "bulk_analysis" / slug) if project_dir is not None else {}
+
         metrics = WorkspaceGroupMetrics(
             group_id=group.group_id,
             name=group.name,
@@ -504,6 +519,15 @@ def build_workspace_metrics(
             combined_latest_at=combined_latest_at,
             combined_is_stale=combined_is_stale,
             combined_last_run_input_count=combined_last_run_input_count,
+            map_resumable_documents=int(recovery.get("map_resumable_documents", 0) or 0),
+            map_resumable_chunks=int(recovery.get("map_resumable_chunks", 0) or 0),
+            map_corrupt_chunks=int(recovery.get("map_corrupt_chunks", 0) or 0),
+            reduce_resumable_chunks=int(recovery.get("reduce_resumable_chunks", 0) or 0),
+            reduce_corrupt_chunks=int(recovery.get("reduce_corrupt_chunks", 0) or 0),
+            recovery_actual_cost=float(
+                float(recovery.get("map_actual_cost", 0.0) or 0.0)
+                + float(recovery.get("reduce_actual_cost", 0.0) or 0.0)
+            ),
         )
         group_metrics[group.group_id] = metrics
 
