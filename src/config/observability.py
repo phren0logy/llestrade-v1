@@ -1,105 +1,176 @@
-"""Phoenix observability integration for local tracing."""
+"""Target-neutral OpenTelemetry runtime helpers."""
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import socket
-import time
 from contextlib import contextmanager
+from dataclasses import dataclass
 from functools import wraps
-from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Mapping, Optional
+
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+from opentelemetry.sdk.resources import Resource
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry.trace import Status, StatusCode
 
 try:
     import phoenix as px
-    from opentelemetry import trace
-    from opentelemetry.trace import Status, StatusCode
-    from phoenix.otel import register
 
     PHOENIX_AVAILABLE = True
 except ImportError:  # pragma: no cover - optional dependency path
     PHOENIX_AVAILABLE = False
     px = None
-    trace = None
-    register = None
-    Status = None
-    StatusCode = None
 
 
-class PhoenixObservability:
-    """Manages Arize Phoenix startup and tracing decorators."""
+ObservabilityTarget = str
+ContentPolicy = str
+
+
+@dataclass(frozen=True, slots=True)
+class ObservabilitySettings:
+    enabled: bool = False
+    target: ObservabilityTarget = "phoenix_local"
+    project: str = "forensic-report-drafter"
+    content_policy: ContentPolicy = "unredacted"
+    include_binary_content: bool = False
+    phoenix_port: int | None = 6006
+    otlp_endpoint: str | None = None
+    otlp_headers: dict[str, str] | None = None
+
+    @classmethod
+    def from_mapping(cls, settings: Mapping[str, Any] | None = None) -> "ObservabilitySettings":
+        raw = dict(settings or {})
+        target = cls._resolve_target(raw.get("target"))
+        return cls(
+            enabled=bool(raw.get("enabled", False)),
+            target=target,
+            project=str(raw.get("project") or "forensic-report-drafter").strip() or "forensic-report-drafter",
+            content_policy=cls._resolve_content_policy(raw.get("content_policy"), target=target),
+            include_binary_content=bool(raw.get("include_binary_content", False)),
+            phoenix_port=cls._resolve_port(raw.get("phoenix_port")),
+            otlp_endpoint=cls._resolve_endpoint(raw.get("otlp_endpoint")),
+            otlp_headers=cls._resolve_headers(raw.get("otlp_headers")),
+        )
+
+    @staticmethod
+    def _resolve_target(value: Any) -> ObservabilityTarget:
+        target = str(value or "phoenix_local").strip().lower()
+        if target not in {"phoenix_local", "otlp_http"}:
+            return "phoenix_local"
+        return target
+
+    @staticmethod
+    def _resolve_content_policy(value: Any, *, target: ObservabilityTarget) -> ContentPolicy:
+        policy = str(value or "").strip().lower()
+        if policy in {"redacted", "unredacted"}:
+            return policy
+        return "unredacted" if target == "phoenix_local" else "redacted"
+
+    @staticmethod
+    def _resolve_port(value: Any) -> int | None:
+        if value in {None, ""}:
+            return 6006
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return 6006
+
+    @staticmethod
+    def _resolve_endpoint(value: Any) -> str | None:
+        endpoint = str(value or "").strip()
+        return endpoint or None
+
+    @staticmethod
+    def _resolve_headers(value: Any) -> dict[str, str]:
+        if not isinstance(value, Mapping):
+            return {}
+        headers: dict[str, str] = {}
+        for key, item in value.items():
+            key_text = str(key).strip()
+            if not key_text:
+                continue
+            headers[key_text] = str(item)
+        return headers
+
+
+class ObservabilityRuntime:
+    """Configures target-neutral OTEL tracing and model instrumentation."""
 
     def __init__(self) -> None:
         self.logger = logging.getLogger(__name__)
         self.enabled = False
-        self.client: Any = None
+        self.settings = ObservabilitySettings()
+        self.tracer_provider: TracerProvider | None = None
         self.tracer: Any = None
-        self._pydantic_ai_instrumentation: Any = None
-        self._target = "local_phoenix"
-        self._content_policy = "unredacted"
-        self._include_binary_content = False
-        self.project_name = "forensic-report-drafter"
-        self.export_fixtures = False
-        self.fixtures_dir = Path("var/test_output/fixtures")
+        self._model_instrumentation: Any = None
 
-    def initialize(self, settings: Optional[Dict[str, Any]] = None) -> Optional[Any]:
-        if not PHOENIX_AVAILABLE:
-            self.logger.warning("Phoenix not available. Install with: uv add --dev arize-phoenix")
-            return None
-
-        phoenix_settings = (settings or {}).get("phoenix_settings", {})
-        self.enabled = bool(phoenix_settings.get("enabled", os.getenv("PHOENIX_ENABLED", "false").lower() == "true"))
+    def initialize(self, settings: Mapping[str, Any] | None = None) -> TracerProvider | None:
+        self.shutdown()
+        self.settings = ObservabilitySettings.from_mapping(settings)
+        self.enabled = self.settings.enabled
         if not self.enabled:
-            self.logger.info("Phoenix observability disabled")
+            self.logger.info("Observability disabled")
             return None
-
-        port = int(phoenix_settings.get("port", os.getenv("PHOENIX_PORT", "6006")))
-        self.project_name = str(phoenix_settings.get("project", os.getenv("PHOENIX_PROJECT", "forensic-report-drafter")))
-        self.export_fixtures = bool(
-            phoenix_settings.get(
-                "export_fixtures",
-                os.getenv("PHOENIX_EXPORT_FIXTURES", "false").lower() == "true",
-            )
-        )
-        self._target = self._resolve_target(phoenix_settings)
-        self._content_policy = self._resolve_content_policy(phoenix_settings, target=self._target)
-        self._include_binary_content = self._resolve_include_binary_content(phoenix_settings)
-        self._pydantic_ai_instrumentation = None
 
         try:
-            if not self._is_port_open(port):
-                os.environ["PHOENIX_PORT"] = str(port)
-                os.environ["PHOENIX_HOST"] = "127.0.0.1"
-                px.launch_app()
-
-            register(project_name=self.project_name, endpoint=f"http://127.0.0.1:{port}/v1/traces")
-            self.tracer = trace.get_tracer(__name__)
-            self.client = px.Client()
-
-            if self.export_fixtures:
-                self.fixtures_dir.mkdir(parents=True, exist_ok=True)
-
-            self.logger.info("Phoenix initialized at http://127.0.0.1:%s", port)
-            return self.client
-
+            exporter = self._create_exporter(self.settings)
+            resource = Resource.create(
+                {
+                    "service.name": "llestrade",
+                    "llestrade.project": self.settings.project,
+                    "llestrade.observability.target": self.settings.target,
+                }
+            )
+            self.tracer_provider = TracerProvider(resource=resource)
+            self.tracer_provider.add_span_processor(BatchSpanProcessor(exporter))
+            self.tracer = self.tracer_provider.get_tracer("llestrade.observability")
+            self._model_instrumentation = None
+            self.logger.info(
+                "Observability initialized target=%s project=%s",
+                self.settings.target,
+                self.settings.project,
+            )
+            return self.tracer_provider
         except Exception as exc:
-            self.logger.error("Failed to initialize Phoenix: %s", exc)
-            self.enabled = False
-            self.client = None
-            self.tracer = None
-            self._pydantic_ai_instrumentation = None
+            self.logger.error("Failed to initialize observability: %s", exc)
+            self.shutdown()
             return None
 
-    def _is_port_open(self, port: int) -> bool:
+    def _create_exporter(self, settings: ObservabilitySettings) -> OTLPSpanExporter:
+        if settings.target == "phoenix_local":
+            endpoint = self._ensure_local_phoenix(settings)
+            return OTLPSpanExporter(endpoint=endpoint, headers={})
+        if settings.target == "otlp_http":
+            if not settings.otlp_endpoint:
+                raise RuntimeError("OTLP endpoint is required when target is 'otlp_http'")
+            return OTLPSpanExporter(
+                endpoint=settings.otlp_endpoint,
+                headers=dict(settings.otlp_headers or {}),
+            )
+        raise RuntimeError(f"Unsupported observability target: {settings.target}")
+
+    def _ensure_local_phoenix(self, settings: ObservabilitySettings) -> str:
+        if not PHOENIX_AVAILABLE:
+            raise RuntimeError("Phoenix is not installed; install arize-phoenix to use the local Phoenix target")
+        port = settings.phoenix_port or 6006
+        if not self._is_port_open(port):
+            os.environ["PHOENIX_PORT"] = str(port)
+            os.environ["PHOENIX_HOST"] = "127.0.0.1"
+            px.launch_app()
+        return f"http://127.0.0.1:{port}/v1/traces"
+
+    @staticmethod
+    def _is_port_open(port: int) -> bool:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             sock.settimeout(1)
             return sock.connect_ex(("127.0.0.1", port)) == 0
 
     @contextmanager
     def trace_operation(self, name: str, attributes: Optional[Dict[str, Any]] = None):
-        if not self.enabled or not self.tracer:
+        if not self.enabled or self.tracer is None:
             yield None
             return
 
@@ -134,13 +205,43 @@ class PhoenixObservability:
                     result = func(*args, **kwargs)
                     if span is not None:
                         self._record_result_attributes(span, result)
-                    if self.export_fixtures:
-                        self._save_fixture(runtime_model, kwargs, result)
                     return result
 
             return wrapper
 
         return decorator
+
+    def get_model_instrumentation_settings(self) -> Any | None:
+        if not self.enabled or self.tracer_provider is None:
+            return None
+        if self._model_instrumentation is not None:
+            return self._model_instrumentation
+
+        try:
+            from pydantic_ai.models.instrumented import InstrumentationSettings
+
+            self._model_instrumentation = InstrumentationSettings(
+                tracer_provider=self.tracer_provider,
+                include_content=self.settings.content_policy == "unredacted",
+                include_binary_content=self.settings.include_binary_content,
+            )
+        except Exception:
+            self.logger.debug("Failed to initialize model instrumentation settings", exc_info=True)
+            return None
+
+        return self._model_instrumentation
+
+    def shutdown(self) -> None:
+        if self.tracer_provider is not None:
+            try:
+                self.tracer_provider.shutdown()
+            except Exception:  # pragma: no cover - defensive
+                self.logger.debug("Failed to shutdown tracer provider", exc_info=True)
+        self.tracer_provider = None
+        self.tracer = None
+        self._model_instrumentation = None
+        self.enabled = False
+        self.settings = ObservabilitySettings()
 
     def _record_result_attributes(self, span: Any, result: Any) -> None:
         if isinstance(result, dict):
@@ -157,7 +258,8 @@ class PhoenixObservability:
         if hasattr(result, "content"):
             span.set_attribute("llm.output_messages", str(getattr(result, "content"))[:1000])
 
-    def _detect_provider(self, module_name: str) -> str:
+    @staticmethod
+    def _detect_provider(module_name: str) -> str:
         module = module_name.lower()
         if "anthropic" in module:
             return "anthropic"
@@ -167,105 +269,23 @@ class PhoenixObservability:
             return "google"
         return "unknown"
 
-    def _save_fixture(self, model: str, inputs: Dict[str, Any], output: Any) -> None:
-        if not self.export_fixtures:
-            return
 
-        try:
-            prompt = str(inputs.get("prompt", ""))
-            prompt_hash = abs(hash(prompt[:500])) % (10**8)
-            filename = f"{model}_{prompt_hash}_{int(time.time())}.json"
-            payload = {
-                "model": model,
-                "input": {
-                    "prompt": prompt[:1000],
-                    "temperature": inputs.get("temperature"),
-                    "max_tokens": inputs.get("max_tokens"),
-                },
-                "output": output if isinstance(output, dict) else str(output),
-            }
-            with (self.fixtures_dir / filename).open("w", encoding="utf-8") as fixture:
-                json.dump(payload, fixture, indent=2)
-        except Exception as exc:  # pragma: no cover - optional diagnostics path
-            self.logger.warning("Failed to save fixture: %s", exc)
-
-    def get_traces(self) -> Optional[list[Any]]:
-        if not self.client:
-            return None
-        self.logger.warning(
-            "Phoenix trace retrieval is not implemented; get_traces() currently returns an empty list."
-        )
-        return []
-
-    def shutdown(self) -> None:
-        self.client = None
-        self.tracer = None
-        self._pydantic_ai_instrumentation = None
-
-    def pydantic_ai_instrumentation(self) -> Any | None:
-        """Return redacted Pydantic AI instrumentation settings when Phoenix is enabled."""
-        if not self.enabled or not PHOENIX_AVAILABLE:
-            return None
-        if self._pydantic_ai_instrumentation is not None:
-            return self._pydantic_ai_instrumentation
-
-        try:
-            from pydantic_ai.models.instrumented import InstrumentationSettings
-
-            self._pydantic_ai_instrumentation = InstrumentationSettings(
-                include_content=self._content_policy == "unredacted",
-                include_binary_content=self._include_binary_content,
-            )
-        except Exception:
-            self.logger.debug("Failed to initialize Pydantic AI instrumentation", exc_info=True)
-            return None
-
-        return self._pydantic_ai_instrumentation
-
-    @staticmethod
-    def _resolve_target(phoenix_settings: Dict[str, Any]) -> str:
-        target = str(
-            os.getenv("PHOENIX_TARGET")
-            or phoenix_settings.get("target")
-            or "local_phoenix"
-        ).strip().lower()
-        return target or "local_phoenix"
-
-    @staticmethod
-    def _resolve_content_policy(phoenix_settings: Dict[str, Any], *, target: str) -> str:
-        policy = str(
-            os.getenv("PHOENIX_CONTENT_POLICY")
-            or phoenix_settings.get("content_policy")
-            or ""
-        ).strip().lower()
-        if policy in {"redacted", "unredacted"}:
-            return policy
-        return "unredacted" if target == "local_phoenix" else "redacted"
-
-    @staticmethod
-    def _resolve_include_binary_content(phoenix_settings: Dict[str, Any]) -> bool:
-        raw = os.getenv("PHOENIX_INCLUDE_BINARY_CONTENT")
-        if raw is not None:
-            return raw.strip().lower() in {"1", "true", "yes", "on"}
-        return bool(phoenix_settings.get("include_binary_content", False))
+observability = ObservabilityRuntime()
 
 
-phoenix = PhoenixObservability()
-
-
-def setup_observability(settings: Optional[Dict[str, Any]] = None):
-    return phoenix.initialize(settings)
+def initialize_observability(settings: Mapping[str, Any] | None = None):
+    return observability.initialize(settings)
 
 
 def trace_llm_call(model_name: Optional[str] = None):
-    return phoenix.trace_llm_call(model_name)
+    return observability.trace_llm_call(model_name)
 
 
 @contextmanager
 def trace_operation(name: str, attributes: Optional[Dict[str, Any]] = None):
-    with phoenix.trace_operation(name, attributes) as span:
+    with observability.trace_operation(name, attributes) as span:
         yield span
 
 
-def get_pydantic_ai_instrumentation() -> Any | None:
-    return phoenix.pydantic_ai_instrumentation()
+def get_model_instrumentation_settings() -> Any | None:
+    return observability.get_model_instrumentation_settings()

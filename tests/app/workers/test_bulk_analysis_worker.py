@@ -363,10 +363,12 @@ def test_bulk_map_trace_attributes_match_between_legacy_and_gateway(
     assert legacy_traces == gateway_traces == [
         (
             "bulk_analysis.invoke_llm",
-                {
-                    "llestrade.provider_id": "anthropic",
-                    "llestrade.model": "claude-sonnet-4-5",
-                    "llestrade.max_tokens": 32000,
+            {
+                "llestrade.transport": "direct",
+                "llestrade.provider_id": "anthropic",
+                "llestrade.model": "claude-sonnet-4-5",
+                "llestrade.reasoning": False,
+                "llestrade.max_tokens": 32000,
                 "llestrade.temperature": 0.1,
                 "llestrade.worker": "bulk_analysis",
                 "llestrade.stage": "bulk_map",

@@ -98,6 +98,12 @@ def backend_transport_name(backend: Any) -> str:
         return "gateway"
     return "direct"
 
+
+def backend_route_name(backend: Any) -> str | None:
+    if isinstance(backend, PydanticAIGatewayBackend):
+        return backend.current_route()
+    return None
+
 def normalize_model_name(provider_id: str, model: Optional[str]) -> str | None:
     """Normalize explicit model selections for a provider."""
     if model is None:
@@ -224,9 +230,9 @@ def supported_gateway_provider_ids() -> tuple[str, ...]:
 
 def _pydantic_ai_instrumentation() -> Any | None:
     try:
-        from src.config.observability import get_pydantic_ai_instrumentation
+        from src.config.observability import get_model_instrumentation_settings
 
-        return get_pydantic_ai_instrumentation()
+        return get_model_instrumentation_settings()
     except Exception:
         logger.debug("Unable to load Pydantic AI instrumentation settings", exc_info=True)
         return None
@@ -771,6 +777,9 @@ class PydanticAIGatewayBackend:
             or self._load_route_from_settings()
         )
 
+    def current_route(self) -> str | None:
+        return self._current_route()
+
     def _gateway_http_client(self) -> Any | None:
         if self._http_client is not None:
             return self._http_client
@@ -857,6 +866,7 @@ __all__ = [
     "default_model_for_provider",
     "build_model_settings",
     "backend_transport_name",
+    "backend_route_name",
     "normalize_model_name",
     "provider_capabilities",
     "resolve_model_name",

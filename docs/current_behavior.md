@@ -25,8 +25,8 @@ This document is the concise behavior baseline for cleanup, testing, and future 
 - Generated analyses/reports may include inline citation markers in the format `[CIT:ev_<id>]`.
 
 ## Observability Status
-- Phoenix wiring and fixture export paths exist.
-- Trace retrieval/export via `PhoenixObservability.get_traces()` is currently a stub path and should not be treated as a complete feature.
+- Observability is OTEL-first, with Local Phoenix supported as one export target.
+- Worker-stage spans and Pydantic AI model instrumentation are configured separately but run through the same observability runtime.
 
 ## Scope Note
 - Historical migration and legacy UI plans are archived under `docs/archive/`.

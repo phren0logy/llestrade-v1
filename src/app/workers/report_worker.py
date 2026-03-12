@@ -30,7 +30,12 @@ from src.common.markdown import (
     build_document_metadata,
     compute_file_checksum,
 )
-from .llm_backend import LLMExecutionBackend, LLMInvocationRequest
+from .llm_backend import (
+    LLMExecutionBackend,
+    LLMInvocationRequest,
+    backend_route_name,
+    backend_transport_name,
+)
 from .stage_contracts import (
     ReportDraftStageInput,
     ReportRefineStageInput,
@@ -303,8 +308,11 @@ class DraftReportWorker(ReportWorkerBase):
                 section_index=index,
                 section_total=total,
                 section_title=section.title,
+                transport=backend_transport_name(self._llm_backend),
                 provider_id=self._provider_id,
                 model=self._custom_model or self._model,
+                reasoning=self._use_reasoning,
+                gateway_route=backend_route_name(self._llm_backend),
                 max_tokens=self._max_report_tokens,
                 temperature=0.2,
             )
@@ -695,8 +703,11 @@ class ReportRefinementWorker(ReportWorkerBase):
         self.log_message.emit(self._llm_execution_summary())
         provider = self._create_provider()
         stage_input = ReportRefineStageInput(
+            transport=backend_transport_name(self._llm_backend),
             provider_id=self._provider_id,
             model=self._custom_model or self._model,
+            reasoning=self._use_reasoning,
+            gateway_route=backend_route_name(self._llm_backend),
             max_tokens=self._max_report_tokens,
             temperature=0.2,
         )

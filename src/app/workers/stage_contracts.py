@@ -16,6 +16,9 @@ class BulkMapStageInput:
     context_label: str
     max_tokens: int
     temperature: float
+    transport: str = "direct"
+    reasoning: bool = False
+    gateway_route: Optional[str] = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,6 +30,9 @@ class BulkReduceStageInput:
     model: Optional[str]
     max_tokens: int
     temperature: float
+    transport: str = "direct"
+    reasoning: bool = False
+    gateway_route: Optional[str] = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,6 +44,9 @@ class ReportDraftStageInput:
     model: str
     max_tokens: int
     temperature: float
+    transport: str = "direct"
+    reasoning: bool = False
+    gateway_route: Optional[str] = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,6 +55,9 @@ class ReportRefineStageInput:
     model: str
     max_tokens: int
     temperature: float
+    transport: str = "direct"
+    reasoning: bool = False
+    gateway_route: Optional[str] = None
 
 
 StageInput = Union[
@@ -59,11 +71,15 @@ StageInput = Union[
 def stage_trace_attributes(stage: StageInput) -> Dict[str, object]:
     """Produce stable trace attributes from typed stage inputs."""
     attrs: Dict[str, object] = {
+        "llestrade.transport": stage.transport,
         "llestrade.provider_id": stage.provider_id,
         "llestrade.model": stage.model,
+        "llestrade.reasoning": stage.reasoning,
         "llestrade.max_tokens": stage.max_tokens,
         "llestrade.temperature": stage.temperature,
     }
+    if stage.gateway_route:
+        attrs["llestrade.gateway.route"] = stage.gateway_route
 
     if isinstance(stage, BulkMapStageInput):
         attrs.update(

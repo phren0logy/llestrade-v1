@@ -48,9 +48,9 @@ Transform the current wizard-style UI into a dashboard-based workflow that suppo
 #### Worker Instrumentation & Observability
 
 - [ ] Emit consistent debug logging (job ID + status transitions) across all `DashboardWorker` subclasses.
-- [ ] Keep `observability.py` wiring current and add Phoenix spans that include bulk analysis group context.
-- [ ] Export Phoenix fixtures for deterministic tests.
-- [ ] Document that trace retrieval/export remains limited while `PhoenixObservability.get_traces()` is a stub path.
+- [ ] Keep `observability.py` wiring current and add OTEL worker spans that include bulk analysis group context.
+- [ ] Add a stubbed OTLP smoke path for deterministic observability tests.
+- [ ] Document the supported observability targets and content-policy defaults.
 
 #### Business Logic Testing
 
