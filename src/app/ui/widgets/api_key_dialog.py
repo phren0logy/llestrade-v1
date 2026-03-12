@@ -2,14 +2,15 @@
 API key configuration dialog for the new UI.
 """
 
+import json
 import logging
-from typing import Dict
+from typing import Any, Dict
 
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QFormLayout,
     QLineEdit, QPushButton, QLabel, QGroupBox,
     QDialogButtonBox, QMessageBox, QScrollArea,
-    QWidget, QTabWidget, QCheckBox, QComboBox
+    QWidget, QTabWidget, QCheckBox, QComboBox, QTextEdit
 )
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QDesktopServices
@@ -19,9 +20,13 @@ from PySide6.QtCore import QUrl
 class APIKeyDialog(QDialog):
     """Dialog for configuring API keys and service endpoints."""
 
-    _PHOENIX_CONTENT_POLICIES = (
-        ("Unredacted (Local Phoenix)", "unredacted"),
+    _OBSERVABILITY_CONTENT_POLICIES = (
+        ("Unredacted", "unredacted"),
         ("Redacted", "redacted"),
+    )
+    _OBSERVABILITY_TARGETS = (
+        ("Local Phoenix", "phoenix_local"),
+        ("OTLP Endpoint", "otlp_http"),
     )
     _MASKED_SECRET = "*" * 20
     
@@ -64,9 +69,9 @@ class APIKeyDialog(QDialog):
         azure_tab = self._create_azure_tab()
         tabs.addTab(azure_tab, "Azure Services")
         
-        # Phoenix Observability tab
-        phoenix_tab = self._create_phoenix_tab()
-        tabs.addTab(phoenix_tab, "Phoenix (Observability)")
+        # Observability tab
+        observability_tab = self._create_observability_tab()
+        tabs.addTab(observability_tab, "Observability")
         
         # Buttons
         buttons = QDialogButtonBox(
@@ -291,101 +296,121 @@ class APIKeyDialog(QDialog):
     
     def _open_phoenix_ui(self):
         """Open Phoenix UI in browser."""
-        port = self.phoenix_port.text() or "6006"
+        port = self.observability_phoenix_port.text() or "6006"
         QDesktopServices.openUrl(QUrl(f"http://localhost:{port}"))
-    
-    def _create_phoenix_tab(self) -> QWidget:
-        """Create the Phoenix observability tab."""
+
+    def _sync_observability_target_fields(self) -> None:
+        target = self.observability_target.currentData() or "phoenix_local"
+        is_phoenix = target == "phoenix_local"
+        self.observability_phoenix_port_row.setVisible(is_phoenix)
+        self.observability_open_phoenix_button.setVisible(is_phoenix)
+        self.observability_otlp_endpoint_row.setVisible(not is_phoenix)
+        self.observability_otlp_headers_row.setVisible(not is_phoenix)
+
+    def _create_observability_tab(self) -> QWidget:
+        """Create the generic observability tab."""
         widget = QWidget()
         layout = QVBoxLayout(widget)
-        
-        # Phoenix info
+
         info = QLabel(
-            "Arize Phoenix provides local LLM observability and debugging. "
-            "Enable Phoenix to trace LLM calls, capture costs, and debug issues. "
-            "Phoenix runs locally on your machine for complete data privacy."
+            "Configure OTEL-based tracing for model calls and worker spans. "
+            "Use Local Phoenix for private local tracing, or point the app at a generic OTLP HTTP endpoint."
         )
         info.setWordWrap(True)
         layout.addWidget(info)
-        
-        # Phoenix Settings
-        phoenix_group = QGroupBox("Phoenix Configuration")
-        phoenix_layout = QVBoxLayout(phoenix_group)
-        
-        # Enable/Disable Phoenix
-        self.phoenix_enabled = QCheckBox("Enable Phoenix Observability")
-        self.phoenix_enabled.setToolTip(
-            "When enabled, Phoenix will trace all LLM calls locally"
-        )
-        phoenix_layout.addWidget(self.phoenix_enabled)
-        
-        # Phoenix Port
-        port_layout = QFormLayout()
-        self.phoenix_port = QLineEdit()
-        self.phoenix_port.setText("6006")  # Default port
-        self.phoenix_port.setPlaceholderText("Default: 6006")
-        port_layout.addRow("Local Port:", self.phoenix_port)
-        phoenix_layout.addLayout(port_layout)
-        
-        # Project Name
-        project_layout = QFormLayout()
-        self.phoenix_project = QLineEdit()
-        self.phoenix_project.setText("forensic-report-drafter")
-        self.phoenix_project.setPlaceholderText("Project name for organizing traces")
-        project_layout.addRow("Project Name:", self.phoenix_project)
-        phoenix_layout.addLayout(project_layout)
-        
-        # Export Fixtures Option
-        self.phoenix_export_fixtures = QCheckBox("Export traces as test fixtures")
-        self.phoenix_export_fixtures.setToolTip(
-            "Automatically save LLM responses as test fixtures for mocking"
-        )
-        phoenix_layout.addWidget(self.phoenix_export_fixtures)
 
-        policy_layout = QFormLayout()
-        self.phoenix_content_policy = QComboBox()
-        for label, value in self._PHOENIX_CONTENT_POLICIES:
-            self.phoenix_content_policy.addItem(label, value)
-        self.phoenix_content_policy.setToolTip(
+        observability_group = QGroupBox("Observability Configuration")
+        observability_layout = QVBoxLayout(observability_group)
+
+        self.observability_enabled = QCheckBox("Enable Observability")
+        self.observability_enabled.setToolTip(
+            "When enabled, worker spans and instrumented model calls are exported via OpenTelemetry."
+        )
+        observability_layout.addWidget(self.observability_enabled)
+
+        form = QFormLayout()
+        self.observability_target = QComboBox()
+        for label, value in self._OBSERVABILITY_TARGETS:
+            self.observability_target.addItem(label, value)
+        form.addRow("Target:", self.observability_target)
+
+        self.observability_project = QLineEdit()
+        self.observability_project.setText("forensic-report-drafter")
+        self.observability_project.setPlaceholderText("Project name for organizing traces")
+        form.addRow("Project Name:", self.observability_project)
+
+        self.observability_content_policy = QComboBox()
+        for label, value in self._OBSERVABILITY_CONTENT_POLICIES:
+            self.observability_content_policy.addItem(label, value)
+        self.observability_content_policy.setToolTip(
             "Choose whether model instrumentation includes full prompt/response text."
         )
-        policy_layout.addRow("Content Policy:", self.phoenix_content_policy)
-        phoenix_layout.addLayout(policy_layout)
+        form.addRow("Content Policy:", self.observability_content_policy)
 
-        self.phoenix_include_binary_content = QCheckBox("Include binary/multimodal content")
-        self.phoenix_include_binary_content.setToolTip(
+        self.observability_include_binary_content = QCheckBox("Include binary/multimodal content")
+        self.observability_include_binary_content.setToolTip(
             "Include binary or multimodal payload bodies in model instrumentation."
         )
-        phoenix_layout.addWidget(self.phoenix_include_binary_content)
+        observability_layout.addLayout(form)
+        observability_layout.addWidget(self.observability_include_binary_content)
 
-        self.phoenix_policy_note = QLabel(
-            "Unredacted traces are appropriate for trusted local Phoenix deployments. "
-            "Use redacted traces if you later forward telemetry to a remote OTEL backend."
+        self.observability_policy_note = QLabel(
+            "Use unredacted traces only for trusted local environments. Remote OTLP endpoints should normally use redacted content."
         )
-        self.phoenix_policy_note.setWordWrap(True)
-        phoenix_layout.addWidget(self.phoenix_policy_note)
+        self.observability_policy_note.setWordWrap(True)
+        observability_layout.addWidget(self.observability_policy_note)
 
-        # Store config fields
-        self.config_fields["phoenix_enabled"] = self.phoenix_enabled
-        self.config_fields["phoenix_port"] = self.phoenix_port
-        self.config_fields["phoenix_project"] = self.phoenix_project
-        self.config_fields["phoenix_export_fixtures"] = self.phoenix_export_fixtures
-        self.config_fields["phoenix_content_policy"] = self.phoenix_content_policy
-        
-        # Help text
-        help_text = QLabel('<a href="https://phoenix.arize.com/">Learn more about Phoenix →</a>')
+        target_specific_form = QFormLayout()
+        self.observability_phoenix_port = QLineEdit()
+        self.observability_phoenix_port.setText("6006")
+        self.observability_phoenix_port.setPlaceholderText("6006")
+        self.observability_phoenix_port_row = QWidget()
+        phoenix_port_row_layout = QHBoxLayout(self.observability_phoenix_port_row)
+        phoenix_port_row_layout.setContentsMargins(0, 0, 0, 0)
+        phoenix_port_row_layout.addWidget(self.observability_phoenix_port)
+        target_specific_form.addRow("Local Phoenix Port:", self.observability_phoenix_port_row)
+
+        self.observability_otlp_endpoint = QLineEdit()
+        self.observability_otlp_endpoint.setPlaceholderText("https://otel.example.com/v1/traces")
+        self.observability_otlp_endpoint_row = QWidget()
+        otlp_endpoint_row_layout = QHBoxLayout(self.observability_otlp_endpoint_row)
+        otlp_endpoint_row_layout.setContentsMargins(0, 0, 0, 0)
+        otlp_endpoint_row_layout.addWidget(self.observability_otlp_endpoint)
+        target_specific_form.addRow("OTLP Endpoint:", self.observability_otlp_endpoint_row)
+
+        self.observability_otlp_headers = QTextEdit()
+        self.observability_otlp_headers.setPlaceholderText('{\n  "Authorization": "Bearer ..."\n}')
+        self.observability_otlp_headers.setFixedHeight(100)
+        self.observability_otlp_headers_row = QWidget()
+        otlp_headers_row_layout = QHBoxLayout(self.observability_otlp_headers_row)
+        otlp_headers_row_layout.setContentsMargins(0, 0, 0, 0)
+        otlp_headers_row_layout.addWidget(self.observability_otlp_headers)
+        target_specific_form.addRow("OTLP Headers:", self.observability_otlp_headers_row)
+        observability_layout.addLayout(target_specific_form)
+
+        help_text = QLabel('<a href="https://opentelemetry.io/docs/">Learn more about OpenTelemetry →</a>')
         help_text.setOpenExternalLinks(True)
         help_text.setStyleSheet("color: #1976d2;")
-        phoenix_layout.addWidget(help_text)
-        
-        # View Phoenix UI Button
-        view_button = QPushButton("Open Phoenix UI")
-        view_button.clicked.connect(self._open_phoenix_ui)
-        phoenix_layout.addWidget(view_button)
-        
-        layout.addWidget(phoenix_group)
-        
+        observability_layout.addWidget(help_text)
+
+        self.observability_open_phoenix_button = QPushButton("Open Phoenix UI")
+        self.observability_open_phoenix_button.clicked.connect(self._open_phoenix_ui)
+        observability_layout.addWidget(self.observability_open_phoenix_button)
+
+        self.observability_target.currentIndexChanged.connect(self._sync_observability_target_fields)
+
+        self.config_fields["observability_enabled"] = self.observability_enabled
+        self.config_fields["observability_target"] = self.observability_target
+        self.config_fields["observability_project"] = self.observability_project
+        self.config_fields["observability_content_policy"] = self.observability_content_policy
+        self.config_fields["observability_include_binary_content"] = self.observability_include_binary_content
+        self.config_fields["observability_phoenix_port"] = self.observability_phoenix_port
+        self.config_fields["observability_otlp_endpoint"] = self.observability_otlp_endpoint
+        self.config_fields["observability_otlp_headers"] = self.observability_otlp_headers
+
+        layout.addWidget(observability_group)
         layout.addStretch()
+        self._sync_observability_target_fields()
         return widget
     
     def load_keys(self):
@@ -426,22 +451,28 @@ class APIKeyDialog(QDialog):
         if route:
             self.gateway_route.setText(route)
 
-        # Load Phoenix settings
-        phoenix_settings = self.settings.get("phoenix_settings", {})
-        self.phoenix_enabled.setChecked(phoenix_settings.get("enabled", False))
-        if "port" in phoenix_settings:
-            self.phoenix_port.setText(str(phoenix_settings["port"]))
-        if "project" in phoenix_settings:
-            self.phoenix_project.setText(phoenix_settings["project"])
-        self.phoenix_export_fixtures.setChecked(
-            phoenix_settings.get("export_fixtures", False)
+        observability_settings = self.settings.get("observability_settings", {}) or {}
+        self.observability_enabled.setChecked(bool(observability_settings.get("enabled", False)))
+        target = str(observability_settings.get("target") or "phoenix_local").strip().lower()
+        target_index = self.observability_target.findData(target)
+        self.observability_target.setCurrentIndex(target_index if target_index >= 0 else 0)
+        if "project" in observability_settings:
+            self.observability_project.setText(str(observability_settings["project"]))
+        content_policy = str(observability_settings.get("content_policy") or "unredacted").strip().lower()
+        policy_index = self.observability_content_policy.findData(content_policy)
+        self.observability_content_policy.setCurrentIndex(policy_index if policy_index >= 0 else 0)
+        self.observability_include_binary_content.setChecked(
+            bool(observability_settings.get("include_binary_content", False))
         )
-        content_policy = str(phoenix_settings.get("content_policy") or "unredacted").strip().lower()
-        policy_index = self.phoenix_content_policy.findData(content_policy)
-        self.phoenix_content_policy.setCurrentIndex(policy_index if policy_index >= 0 else 0)
-        self.phoenix_include_binary_content.setChecked(
-            bool(phoenix_settings.get("include_binary_content", False))
+        if "phoenix_port" in observability_settings and observability_settings["phoenix_port"] is not None:
+            self.observability_phoenix_port.setText(str(observability_settings["phoenix_port"]))
+        if "otlp_endpoint" in observability_settings and observability_settings["otlp_endpoint"]:
+            self.observability_otlp_endpoint.setText(str(observability_settings["otlp_endpoint"]))
+        headers = observability_settings.get("otlp_headers") or {}
+        self.observability_otlp_headers.setPlainText(
+            json.dumps(headers, indent=2, sort_keys=True) if headers else "{}"
         )
+        self._sync_observability_target_fields()
     
     def save_keys(self):
         """Save API keys and settings to secure storage."""
@@ -506,18 +537,27 @@ class APIKeyDialog(QDialog):
             },
         )
 
-        # Save Phoenix settings
-        phoenix_settings = {
-            "enabled": self.phoenix_enabled.isChecked(),
-            "target": "local_phoenix",
-            "port": int(self.phoenix_port.text() or 6006),
-            "project": self.phoenix_project.text().strip() or "forensic-report-drafter",
-            "export_fixtures": self.phoenix_export_fixtures.isChecked(),
-            "content_policy": self.phoenix_content_policy.currentData() or "unredacted",
-            "include_binary_content": self.phoenix_include_binary_content.isChecked(),
-        }
-        self.settings.set("phoenix_settings", phoenix_settings)
-        
+        target = self.observability_target.currentData() or "phoenix_local"
+        observability_headers: dict[str, str] = {}
+        headers_text = self.observability_otlp_headers.toPlainText().strip() or "{}"
+        try:
+            parsed_headers: Any = json.loads(headers_text)
+            if not isinstance(parsed_headers, dict):
+                raise ValueError("OTLP headers must be a JSON object")
+            observability_headers = {str(key): str(value) for key, value in parsed_headers.items()}
+        except Exception as exc:
+            errors.append(f"Invalid OTLP headers JSON: {exc}")
+
+        phoenix_port: int | None = None
+        if target == "phoenix_local":
+            try:
+                phoenix_port = int(self.observability_phoenix_port.text().strip() or "6006")
+            except ValueError:
+                errors.append("Local Phoenix port must be a valid integer")
+        otlp_endpoint = self.observability_otlp_endpoint.text().strip() or None
+        if target == "otlp_http" and not otlp_endpoint:
+            errors.append("OTLP endpoint is required when the target is OTLP Endpoint")
+
         # Show result
         if errors:
             QMessageBox.warning(
@@ -526,6 +566,17 @@ class APIKeyDialog(QDialog):
                 "Some keys could not be saved:\n" + "\n".join(errors)
             )
         else:
+            observability_settings = {
+                "enabled": self.observability_enabled.isChecked(),
+                "target": target,
+                "project": self.observability_project.text().strip() or "forensic-report-drafter",
+                "content_policy": self.observability_content_policy.currentData() or "unredacted",
+                "include_binary_content": self.observability_include_binary_content.isChecked(),
+                "phoenix_port": phoenix_port,
+                "otlp_endpoint": otlp_endpoint,
+                "otlp_headers": observability_headers,
+            }
+            self.settings.set("observability_settings", observability_settings)
             if saved_count > 0:
                 QMessageBox.information(
                     self,

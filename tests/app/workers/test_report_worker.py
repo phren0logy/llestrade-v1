@@ -725,8 +725,10 @@ def test_report_draft_trace_attributes_match_between_legacy_and_gateway(
         (
             "report_draft.invoke_llm",
             {
+                "llestrade.transport": "direct",
                 "llestrade.provider_id": "anthropic",
                 "llestrade.model": "claude-sonnet-4-5",
+                "llestrade.reasoning": False,
                 "llestrade.max_tokens": 60000,
                 "llestrade.temperature": 0.2,
                 "llestrade.worker": "report_draft",
@@ -903,8 +905,10 @@ def test_report_refine_trace_attributes_match_between_legacy_and_gateway(
         (
             "report_refine.invoke_llm",
             {
+                "llestrade.transport": "direct",
                 "llestrade.provider_id": "anthropic",
                 "llestrade.model": "claude-sonnet-4-5",
+                "llestrade.reasoning": False,
                 "llestrade.max_tokens": 60000,
                 "llestrade.temperature": 0.2,
                 "llestrade.worker": "report_refine",

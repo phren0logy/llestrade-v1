@@ -176,7 +176,7 @@ def test_api_key_dialog_reports_mismatched_saved_key(
     assert "does not match the value entered" in warnings[0]
 
 
-def test_api_key_dialog_loads_and_saves_phoenix_content_policy(
+def test_api_key_dialog_loads_and_saves_observability_settings(
     tmp_path: Path,
     qt_app: QApplication,
     monkeypatch: pytest.MonkeyPatch,
@@ -188,41 +188,80 @@ def test_api_key_dialog_loads_and_saves_phoenix_content_policy(
 
     settings = SecureSettings()
     settings.set(
-        "phoenix_settings",
+        "observability_settings",
         {
             "enabled": True,
-            "target": "local_phoenix",
-            "port": 6006,
+            "target": "phoenix_local",
             "project": "forensic-report-drafter",
-            "export_fixtures": False,
             "content_policy": "redacted",
             "include_binary_content": True,
+            "phoenix_port": 6006,
+            "otlp_endpoint": None,
+            "otlp_headers": {},
         },
     )
 
     dialog = APIKeyDialog(settings)
     try:
-        assert dialog.phoenix_enabled.isChecked() is True
-        assert dialog.phoenix_content_policy.currentData() == "redacted"
-        assert dialog.phoenix_include_binary_content.isChecked() is True
+        assert dialog.observability_enabled.isChecked() is True
+        assert dialog.observability_target.currentData() == "phoenix_local"
+        assert dialog.observability_content_policy.currentData() == "redacted"
+        assert dialog.observability_include_binary_content.isChecked() is True
 
-        policy_index = dialog.phoenix_content_policy.findData("unredacted")
-        dialog.phoenix_content_policy.setCurrentIndex(policy_index)
-        dialog.phoenix_include_binary_content.setChecked(False)
+        policy_index = dialog.observability_content_policy.findData("unredacted")
+        dialog.observability_content_policy.setCurrentIndex(policy_index)
+        dialog.observability_include_binary_content.setChecked(False)
+        otlp_index = dialog.observability_target.findData("otlp_http")
+        dialog.observability_target.setCurrentIndex(otlp_index)
+        dialog.observability_otlp_endpoint.setText("https://otel.example.com/v1/traces")
+        dialog.observability_otlp_headers.setPlainText('{"Authorization": "Bearer token"}')
         dialog.save_keys()
     finally:
         dialog.deleteLater()
 
     reloaded = SecureSettings()
-    assert reloaded.get("phoenix_settings") == {
+    assert reloaded.get("observability_settings") == {
         "enabled": True,
-        "target": "local_phoenix",
-        "port": 6006,
+        "target": "otlp_http",
         "project": "forensic-report-drafter",
-        "export_fixtures": False,
         "content_policy": "unredacted",
         "include_binary_content": False,
+        "phoenix_port": None,
+        "otlp_endpoint": "https://otel.example.com/v1/traces",
+        "otlp_headers": {"Authorization": "Bearer token"},
     }
+
+
+def test_api_key_dialog_rejects_invalid_otlp_headers(
+    tmp_path: Path,
+    qt_app: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert qt_app is not None
+    monkeypatch.setenv("LLESTRADE_SETTINGS_DIR", str(tmp_path / "settings"))
+    monkeypatch.setattr(QMessageBox, "information", lambda *args, **kwargs: QMessageBox.Ok)
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "warning",
+        lambda _parent, _title, message: warnings.append(message) or QMessageBox.Ok,
+    )
+
+    settings = SecureSettings()
+
+    dialog = APIKeyDialog(settings)
+    try:
+        otlp_index = dialog.observability_target.findData("otlp_http")
+        dialog.observability_target.setCurrentIndex(otlp_index)
+        dialog.observability_enabled.setChecked(True)
+        dialog.observability_otlp_endpoint.setText("https://otel.example.com/v1/traces")
+        dialog.observability_otlp_headers.setPlainText('["not", "a", "dict"]')
+        dialog.save_keys()
+    finally:
+        dialog.deleteLater()
+
+    assert warnings
+    assert "Invalid OTLP headers JSON" in warnings[0]
 
 
 def test_api_key_dialog_excludes_bedrock_controls(

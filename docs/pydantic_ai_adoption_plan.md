@@ -189,7 +189,7 @@ Replacement status:
 
 ### 7. Use Instrumented Models for LLM-Layer Telemetry
 
-Adopt Pydantic AI's [Debugging and Monitoring / Logfire integration](https://ai.pydantic.dev/logfire/) and [`InstrumentedModel`](https://ai.pydantic.dev/api/models/instrumented/) for model-level telemetry.
+Adopt Pydantic AI [`InstrumentedModel`](https://ai.pydantic.dev/api/models/instrumented/) using a generic OpenTelemetry runtime rather than a Phoenix-specific abstraction.
 
 Why:
 
@@ -202,8 +202,9 @@ What it should replace:
 
 Replacement status:
 
-- Partial replacement.
+- In progress on the current instrumentation branch.
 - Keep current app-level worker/stage spans in [`src/config/observability.py`](../src/config/observability.py). They express domain workflow context that model instrumentation does not replace.
+- Treat Phoenix as one OTEL target, not as the core observability abstraction.
 
 ### 8. Use Pydantic AI Retry Transports for Pydantic-AI-Backed Provider Paths
 
@@ -240,7 +241,7 @@ Replacement status:
 
 - Partial replacement initially.
 - Gateway routing groups are the better long-term fit once Anthropic, Gemini, and OpenAI are all enabled behind the gateway.
-- The current worker runtime intentionally does not do app-side fallback anymore; the next failover step should use upstream routing/fallback abstractions rather than reintroducing local backend escape hatches.
+- The current worker runtime intentionally does not do app-side fallback anymore; failover should be implemented in a follow-up branch after the OTEL instrumentation work is stable.
 
 ## Useful Later
 
@@ -478,7 +479,7 @@ But Gateway does not remove the need for app-level policy around:
 1. Replace low-level custom `Agent(...)` invocation wrappers with Pydantic AI `direct` requests or a thinner backend wrapper built on `direct`.
 2. Centralize provider/model resolution around documented model strings and Gateway prefixes.
 3. Standardize token preflight on backend-supported `count_tokens(...)` plus `UsageLimits`, while keeping app-specific chunk planning.
-4. Add model-level concurrency limits, standardized retry transports, and provider/gateway failover through upstream abstractions.
+4. Add model-level concurrency limits, standardized retry transports, OTEL-first model instrumentation, and provider/gateway failover through upstream abstractions.
 5. Replace flattened worker response handling with full `ModelResponse` passthrough and exception-based failure handling.
 6. Unify bulk/report LLM operation settings above the backend seam, including provider/model selection, reasoning UX, and shared persistence adapters.
 7. Adopt structured outputs and validators for selected workflows that currently depend on fragile text parsing.
@@ -487,11 +488,11 @@ But Gateway does not remove the need for app-level policy around:
 
 Status against this sequence:
 
-- Steps 1-6 are functionally complete on this branch for worker execution and bulk/report settings consolidation.
-- The remaining work on this branch is merge-readiness work: manual app smoke, small residual cleanup, and doc/status sync.
-- Structured outputs are the next major adoption area, but they should be handled in a follow-up branch after this refactor branch lands.
-- Pydantic Evals should follow that structured-output work rather than being mixed into this refactor branch.
-- The biggest remaining platform gaps after this branch are failover and deeper instrumentation follow-through.
+- Steps 1-6 are functionally complete on `main`.
+- The current branch is focused narrowly on step 4's instrumentation portion: OTEL-first observability runtime cleanup plus Pydantic AI model instrumentation.
+- Failover is intentionally deferred to the next follow-up branch so it can build on the new observability surface.
+- Structured outputs remain the next major product-facing adoption area after instrumentation and failover are in place.
+- Pydantic Evals should follow that structured-output work rather than being mixed into infrastructure refactors.
 
 ## Sources
 

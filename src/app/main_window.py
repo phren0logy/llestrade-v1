@@ -24,7 +24,7 @@ from PySide6.QtCore import Qt, QTimer
 
 from src.config.logging_config import setup_logging
 from src.config.startup_config import configure_startup_logging
-from src.config.observability import setup_observability
+from src.config.observability import initialize_observability
 from src.app.core import (
     FeatureFlags,
     ProjectManager,
@@ -67,7 +67,7 @@ class SimplifiedMainWindow(QMainWindow):
         self._workspace_widget: QWidget | None = None
         self._welcome_stage: WelcomeStage | None = None
 
-        # Optional Phoenix observability
+        # Optional OTEL observability
         self._configure_observability()
 
         # Base window configuration
@@ -89,22 +89,12 @@ class SimplifiedMainWindow(QMainWindow):
     # UI construction helpers
     # ------------------------------------------------------------------
     def _configure_observability(self) -> None:
-        phoenix_settings = self.settings.get("phoenix_settings", {})
-        phoenix_enabled = (
-            phoenix_settings.get("enabled", False)
-            or os.getenv("PHOENIX_ENABLED", "false").lower() == "true"
-        )
-        if not phoenix_enabled:
+        observability_settings = self.settings.get("observability_settings", {}) or {}
+        if not bool(observability_settings.get("enabled", False)):
             return
 
-        self.logger.info("Initializing Phoenix observability")
-        if os.getenv("PHOENIX_ENABLED"):
-            phoenix_settings["enabled"] = True
-        if os.getenv("PHOENIX_PORT"):
-            phoenix_settings["port"] = int(os.getenv("PHOENIX_PORT"))
-        if os.getenv("PHOENIX_PROJECT"):
-            phoenix_settings["project"] = os.getenv("PHOENIX_PROJECT")
-        setup_observability({"phoenix_settings": phoenix_settings})
+        self.logger.info("Initializing observability target=%s", observability_settings.get("target", "phoenix_local"))
+        initialize_observability(observability_settings)
 
     def _create_menu_bar(self) -> None:
         menubar = self.menuBar()

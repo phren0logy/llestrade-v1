@@ -98,14 +98,15 @@ class SecureSettings(QObject):
                 "base_url": None,
                 "route": None,
             },
-            "phoenix_settings": {
+            "observability_settings": {
                 "enabled": False,
-                "target": "local_phoenix",
-                "port": 6006,
+                "target": "phoenix_local",
                 "project": "forensic-report-drafter",
-                "export_fixtures": False,
                 "content_policy": "unredacted",
                 "include_binary_content": False,
+                "phoenix_port": 6006,
+                "otlp_endpoint": None,
+                "otlp_headers": {},
             },
             "aws_bedrock_settings": {
                 "profile": None,

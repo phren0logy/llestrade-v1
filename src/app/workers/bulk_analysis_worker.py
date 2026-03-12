@@ -52,6 +52,7 @@ from .llm_backend import (
     LLMProviderRequest,
     PydanticAIDirectBackend,
     PydanticAIGatewayBackend,
+    backend_route_name,
     backend_transport_name,
 )
 from .stage_contracts import BulkMapStageInput, stage_trace_attributes
@@ -972,8 +973,11 @@ class BulkAnalysisWorker(DashboardWorker):
             group_id=self._group.group_id,
             group_name=self._group.name,
             group_slug=getattr(self._group, "slug", None) or self._group.folder_name,
+            transport=backend_transport_name(self._llm_backend),
             provider_id=provider_config.provider_id,
             model=provider_config.model,
+            reasoning=bool(getattr(self._group, "use_reasoning", False)),
+            gateway_route=backend_route_name(self._llm_backend),
             context_label=context_label,
             max_tokens=max_tokens,
             temperature=temperature,
