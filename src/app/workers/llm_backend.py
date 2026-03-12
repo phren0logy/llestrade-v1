@@ -5,14 +5,20 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 from dataclasses import dataclass, field
 from typing import Any, Literal, Mapping, Optional, Protocol
 
+import httpx
 from pydantic_ai.settings import ModelSettings
 
 from src.app.core.llm_catalog import default_model_for_provider
 
 logger = logging.getLogger(__name__)
+
+_MODEL_REQUEST_RETRY_ATTEMPTS = 3
+_MODEL_REQUEST_RETRY_BASE_DELAY_SECONDS = 0.5
+_MODEL_REQUEST_RETRY_MAX_DELAY_SECONDS = 2.0
 
 _BEDROCK_MODEL_ALIASES: dict[str, str] = {
     "claude-sonnet-4-5": "anthropic.claude-sonnet-4-5-v1",
@@ -324,11 +330,23 @@ def _check_after_response(*, response: Any, usage_limits: Any) -> None:
     usage_limits.check_tokens(usage)
 
 
+def _is_retryable_model_request_error(exc: BaseException) -> bool:
+    if isinstance(exc, (httpx.TimeoutException, httpx.TransportError, asyncio.TimeoutError)):
+        return True
+    return False
+
+
+def _retry_delay_seconds(attempt_number: int) -> float:
+    delay = _MODEL_REQUEST_RETRY_BASE_DELAY_SECONDS * (2 ** max(attempt_number - 1, 0))
+    return min(delay, _MODEL_REQUEST_RETRY_MAX_DELAY_SECONDS)
+
+
 def _invoke_model_response_sync(
     *,
     model: Any,
     request: LLMInvocationRequest,
     provider_id: str,
+    model_name: str | None,
     count_input_tokens_fn: Any,
 ) -> Any:
     from pydantic_ai.direct import model_request_sync
@@ -340,12 +358,37 @@ def _invoke_model_response_sync(
             count_input_tokens_fn=count_input_tokens_fn,
         )
 
-    response = model_request_sync(
-        model,
-        _build_messages(request),
-        model_settings=_build_model_settings(request),
-        instrument=_pydantic_ai_instrumentation(),
-    )
+    messages = _build_messages(request)
+    model_settings = _build_model_settings(request)
+    instrumentation = _pydantic_ai_instrumentation()
+
+    response = None
+    for attempt in range(1, _MODEL_REQUEST_RETRY_ATTEMPTS + 1):
+        try:
+            response = model_request_sync(
+                model,
+                messages,
+                model_settings=model_settings,
+                instrument=instrumentation,
+            )
+            break
+        except Exception as exc:
+            if not _is_retryable_model_request_error(exc) or attempt >= _MODEL_REQUEST_RETRY_ATTEMPTS:
+                raise
+            delay_seconds = _retry_delay_seconds(attempt)
+            logger.warning(
+                "Transient LLM transport failure for provider=%s model=%s attempt=%s/%s; retrying in %.2fs",
+                provider_id,
+                model_name or request.model or "",
+                attempt,
+                _MODEL_REQUEST_RETRY_ATTEMPTS,
+                delay_seconds,
+                exc_info=True,
+            )
+            time.sleep(delay_seconds)
+
+    if response is None:
+        raise RuntimeError("LLM request completed without a response")
     if usage_limits is not None:
         _check_after_response(response=response, usage_limits=usage_limits)
     return response
@@ -541,6 +584,7 @@ class PydanticAIDirectBackend:
             model=self._build_direct_model(provider=provider, model_name=model_name),
             request=request,
             provider_id=provider.app_provider_id,
+            model_name=model_name,
             count_input_tokens_fn=lambda: self._count_input_tokens_direct(provider, request),
         )
         return _require_response_text(
@@ -697,6 +741,7 @@ class PydanticAIGatewayBackend:
             model=self._build_model(provider_id=provider_id, model_name=model_name),
             request=request,
             provider_id=provider_id,
+            model_name=model_name,
             count_input_tokens_fn=lambda: self.count_input_tokens(provider, request),
         )
         return _require_response_text(

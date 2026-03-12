@@ -365,6 +365,108 @@ def test_direct_provider_backend_invoke_response_returns_model_response(
     assert response.text == "Direct response"
 
 
+def test_direct_provider_backend_retries_transient_transport_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = {"count": 0}
+
+    def _flaky_model_request_sync(
+        model: Any,
+        messages: Any,
+        *,
+        model_settings: Dict[str, Any],
+        model_request_parameters: Any = None,
+        instrument: Any = None,
+    ) -> ModelResponse:
+        _ = model, messages, model_settings, model_request_parameters, instrument
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise httpx.RemoteProtocolError("incomplete chunked read")
+        return ModelResponse(
+            parts=[TextPart("Recovered response")],
+            usage=RequestUsage(input_tokens=25, output_tokens=10),
+            model_name="claude-sonnet-4-5",
+        )
+
+    monkeypatch.setattr("pydantic_ai.direct.model_request_sync", _flaky_model_request_sync)
+    monkeypatch.setattr("src.app.workers.llm_backend.time.sleep", lambda _seconds: None)
+
+    backend = PydanticAIDirectBackend()
+    monkeypatch.setattr(
+        backend,
+        "_build_direct_model",
+        lambda **kwargs: {"provider": kwargs["provider"].provider_name, "model_name": kwargs["model_name"]},
+        raising=True,
+    )
+    provider = DirectProviderMetadata(
+        app_provider_id="anthropic",
+        provider_name="anthropic",
+        default_model="claude-sonnet-4-5",
+        provider=object(),
+    )
+
+    response = backend.invoke_response(
+        provider,
+        LLMInvocationRequest(
+            prompt="Summarize this",
+            system_prompt="System prompt",
+            model="claude-sonnet-4-5",
+            model_settings={"temperature": 0.2, "max_tokens": 512},
+        ),
+    )
+
+    assert response.text == "Recovered response"
+    assert calls["count"] == 2
+
+
+def test_direct_provider_backend_does_not_retry_non_transient_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = {"count": 0}
+
+    def _failing_model_request_sync(
+        model: Any,
+        messages: Any,
+        *,
+        model_settings: Dict[str, Any],
+        model_request_parameters: Any = None,
+        instrument: Any = None,
+    ) -> ModelResponse:
+        _ = model, messages, model_settings, model_request_parameters, instrument
+        calls["count"] += 1
+        raise RuntimeError("semantic failure")
+
+    monkeypatch.setattr("pydantic_ai.direct.model_request_sync", _failing_model_request_sync)
+    monkeypatch.setattr("src.app.workers.llm_backend.time.sleep", lambda _seconds: None)
+
+    backend = PydanticAIDirectBackend()
+    monkeypatch.setattr(
+        backend,
+        "_build_direct_model",
+        lambda **kwargs: {"provider": kwargs["provider"].provider_name, "model_name": kwargs["model_name"]},
+        raising=True,
+    )
+    provider = DirectProviderMetadata(
+        app_provider_id="anthropic",
+        provider_name="anthropic",
+        default_model="claude-sonnet-4-5",
+        provider=object(),
+    )
+
+    with pytest.raises(RuntimeError, match="semantic failure"):
+        backend.invoke_response(
+            provider,
+            LLMInvocationRequest(
+                prompt="Summarize this",
+                system_prompt="System prompt",
+                model="claude-sonnet-4-5",
+                model_settings={"temperature": 0.2, "max_tokens": 512},
+            ),
+        )
+
+    assert calls["count"] == 1
+
+
 def test_direct_provider_backend_enforces_input_limit_before_request_when_counting_is_available(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -869,6 +971,53 @@ def test_gateway_backend_reports_empty_output_as_failure(
                 model_settings={"temperature": 0.2, "max_tokens": 4096},
             ),
         )
+
+
+def test_gateway_backend_retries_transient_transport_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = {"count": 0}
+
+    def _flaky_model_request_sync(
+        model: Any,
+        messages: Any,
+        *,
+        model_settings: Dict[str, Any],
+        model_request_parameters: Any = None,
+        instrument: Any = None,
+    ) -> ModelResponse:
+        _ = model, messages, model_settings, model_request_parameters, instrument
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise httpx.RemoteProtocolError("incomplete chunked read")
+        return ModelResponse(
+            parts=[TextPart("Gateway recovered")],
+            usage=RequestUsage(input_tokens=20, output_tokens=10),
+            model_name="claude-sonnet-4-6",
+        )
+
+    monkeypatch.setattr("pydantic_ai.direct.model_request_sync", _flaky_model_request_sync)
+    monkeypatch.setattr("src.app.workers.llm_backend.time.sleep", lambda _seconds: None)
+    backend = PydanticAIGatewayBackend(api_key="pylf_test_key")
+    monkeypatch.setattr(
+        backend,
+        "_build_model",
+        lambda **kwargs: {"provider_id": kwargs["provider_id"], "model_name": kwargs["model_name"]},
+        raising=True,
+    )
+
+    response = backend.invoke_response(
+        _ProviderMeta("anthropic"),
+        LLMInvocationRequest(
+            prompt="Summarize this",
+            system_prompt="System prompt",
+            model="claude-sonnet-4-6",
+            model_settings={"temperature": 0.2, "max_tokens": 4096},
+        ),
+    )
+
+    assert response.text == "Gateway recovered"
+    assert calls["count"] == 2
 
 
 def test_gateway_backend_build_model_uses_canonical_gateway_model_ids(
