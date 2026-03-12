@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import os
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -17,6 +16,8 @@ from PySide6.QtCore import Signal
 
 from src.app.core.azure_artifacts import is_azure_raw_artifact
 from src.app.core.bulk_analysis_groups import BulkAnalysisGroup
+from src.app.core.llm_catalog import calculate_usage_cost
+from src.app.core.llm_operation_settings import normalize_context_window_override
 from src.app.core.bulk_analysis_runner import (
     BulkAnalysisCancelled,
     PromptBundle,
@@ -38,9 +39,8 @@ from src.app.core.bulk_paths import (
 from src.app.core.bulk_prompt_context import build_bulk_placeholders
 from src.app.core.placeholders.system import SourceFileContext
 from src.app.core.project_manager import ProjectMetadata
-from src.app.core.secure_settings import SecureSettings
-from src.common.llm.base import BaseLLMProvider
-from src.common.llm.factory import create_provider
+from src.common.llm.budgets import compute_input_token_budget
+from src.common.llm.tokens import TokenCounter
 from src.config.observability import trace_operation
 from src.common.markdown import (
     PromptReference,
@@ -56,9 +56,9 @@ from .checkpoint_manager import CheckpointManager, _sha256
 from .llm_backend import (
     LLMExecutionBackend,
     LLMInvocationRequest,
-    LegacyProviderBackend,
-    ProviderMetadata,
-    default_model_for_provider,
+    LLMProviderRequest,
+    PydanticAIDirectBackend,
+    backend_transport_name,
 )
 from .stage_contracts import BulkReduceStageInput, stage_trace_attributes
 
@@ -67,6 +67,7 @@ LOGGER = logging.getLogger(__name__)
 
 _MANIFEST_VERSION = 2
 _PAGE_MARKER_RE = re.compile(r"<!---\\s*.+?#page=(\\d+)\\s*--->")
+_MIN_INPUT_TOKEN_BUDGET = 4_000
 
 _DYNAMIC_REDUCE_KEYS: frozenset[str] = frozenset(
     {
@@ -202,6 +203,7 @@ class BulkReduceWorker(DashboardWorker):
     file_failed = Signal(str, str)  # path, error
     finished = Signal(int, int)  # successes, failures
     log_message = Signal(str)
+    cost_calculated = Signal(float, str, str)
 
     def __init__(
         self,
@@ -222,11 +224,15 @@ class BulkReduceWorker(DashboardWorker):
         self._base_placeholders = dict(placeholder_values or {})
         self._project_name = project_name
         self._run_timestamp = datetime.now(timezone.utc)
-        self._llm_backend: LLMExecutionBackend = llm_backend or LegacyProviderBackend()
+        self._llm_backend: LLMExecutionBackend = llm_backend or PydanticAIDirectBackend()
         try:
             self._citation_store: CitationStore | None = CitationStore(project_dir)
         except Exception:
             self._citation_store = None
+        self._usage_totals = {
+            "input_tokens": 0,
+            "output_tokens": 0,
+        }
 
     # ------------------------------------------------------------------
     # QRunnable API
@@ -348,6 +354,10 @@ class BulkReduceWorker(DashboardWorker):
     def _run(self) -> None:  # pragma: no cover - executed in worker thread
         try:
             provider_cfg = self._resolve_provider()
+            self.log_message.emit(
+                f"Using {backend_transport_name(self._llm_backend)} backend: "
+                f"{provider_cfg.provider_id}/{provider_cfg.model or '<default>'}"
+            )
             bundle = load_prompts(self._project_dir, self._group, self._metadata)
 
             inputs = self._resolve_inputs()
@@ -384,7 +394,7 @@ class BulkReduceWorker(DashboardWorker):
                 placeholder_values=self._base_placeholders,
             )
 
-            provider = self._create_provider(provider_cfg, system_prompt)
+            provider = self._create_provider(provider_cfg)
             if provider is None:
                 raise RuntimeError("Reduce provider failed to initialise")
 
@@ -472,6 +482,8 @@ class BulkReduceWorker(DashboardWorker):
                 "max_tokens": max_tokens,
                 "chunking": bool(needs_chunking),
             }
+            input_budget = self._max_input_budget(provider_cfg, max_output_tokens=32_000)
+            run_details["input_budget"] = input_budget
 
             if not needs_chunking:
                 prompt = render_user_prompt(
@@ -482,7 +494,13 @@ class BulkReduceWorker(DashboardWorker):
                     placeholder_values=placeholders_global,
                 )
                 prompt = self._append_citation_ledger(prompt, evidence_ledger)
-                result = self._invoke_provider(provider, provider_cfg, prompt, system_prompt)
+                result = self._invoke_provider(
+                    provider,
+                    provider_cfg,
+                    prompt,
+                    system_prompt,
+                    input_budget=input_budget,
+                )
                 run_details["chunk_count"] = 1
                 chunk_state = current_manifest.get("chunks", {"count": 0, "done": [], "checksums": {}})
                 chunk_state["count"] = 1
@@ -499,7 +517,13 @@ class BulkReduceWorker(DashboardWorker):
                         placeholder_values=placeholders_global,
                     )
                     prompt = self._append_citation_ledger(prompt, evidence_ledger)
-                    result = self._invoke_provider(provider, provider_cfg, prompt, system_prompt)
+                    result = self._invoke_provider(
+                        provider,
+                        provider_cfg,
+                        prompt,
+                        system_prompt,
+                        input_budget=input_budget,
+                    )
                     run_details["chunk_count"] = 1
                     run_details["chunking"] = False
                 else:
@@ -543,7 +567,13 @@ class BulkReduceWorker(DashboardWorker):
                                 base_ledger=evidence_ledger,
                             )
                             prompt = self._append_citation_ledger(prompt, chunk_ledger)
-                            summary = self._invoke_provider(provider, provider_cfg, prompt, system_prompt)
+                            summary = self._invoke_provider(
+                                provider,
+                                provider_cfg,
+                                prompt,
+                                system_prompt,
+                                input_budget=input_budget,
+                            )
                             checkpoint_mgr.save_reduce_chunk(idx, summary, chunk_checksum)
 
                         chunk_state.setdefault("checksums", {})[str(idx)] = chunk_checksum
@@ -561,7 +591,13 @@ class BulkReduceWorker(DashboardWorker):
                     # This handles large documents that would exceed token limits
                     def invoke_combine(prompt: str) -> str:
                         """Wrapper for provider invocation during hierarchical reduction."""
-                        return self._invoke_provider(provider, provider_cfg, prompt, system_prompt)
+                        return self._invoke_provider(
+                            provider,
+                            provider_cfg,
+                            prompt,
+                            system_prompt,
+                            input_budget=input_budget,
+                        )
 
                     def load_batch(level: int, batch_index: int, checksum: str) -> Optional[str]:
                         cached = checkpoint_mgr.load_reduce_batch(level, batch_index)
@@ -629,6 +665,9 @@ class BulkReduceWorker(DashboardWorker):
             checkpoint_mgr.clear_reduce()
 
             self.progress.emit(1, 1, "Completed")
+            total_cost = self._total_cost(provider_id=provider_cfg.provider_id, model_id=provider_cfg.model)
+            if total_cost is not None:
+                self.cost_calculated.emit(total_cost, provider_cfg.provider_id, "bulk_combined")
             self.finished.emit(1, 0)
 
         except BulkAnalysisCancelled:
@@ -899,53 +938,32 @@ class BulkReduceWorker(DashboardWorker):
         return stats
 
     def _resolve_provider(self) -> ProviderConfig:
-        provider_id = self._group.provider_id or "anthropic"
-        model = self._group.model or None
+        provider_id = str(self._group.provider_id or "").strip()
+        if not provider_id:
+            raise RuntimeError(
+                "Bulk analysis group has no saved provider selection. Edit the group and choose a provider."
+            )
+        model = self._llm_backend.normalize_model(provider_id, self._group.model or None)
         temperature = 0.1
-        if getattr(self._group, "use_reasoning", False):
-            # crude detection for thinking models; can be refined as needed
-            name = (model or "").lower()
-            if "think" in name or "reason" in name:
-                temperature = 1.0
         return ProviderConfig(provider_id=provider_id, model=model, temperature=temperature)
 
-    def _create_provider(self, config: ProviderConfig, system_prompt: str) -> object:
-        if not self._llm_backend.requires_native_provider():
-            return ProviderMetadata(
-                provider_name=config.provider_id,
-                default_model=config.model or default_model_for_provider(config.provider_id),
+    def _create_provider(self, config: ProviderConfig) -> object:
+        return self._llm_backend.create_provider(
+            LLMProviderRequest(
+                provider_id=config.provider_id,
+                model=config.model,
             )
-
-        settings = SecureSettings()
-        api_key = settings.get_api_key(config.provider_id)
-        kwargs = {
-            "provider": config.provider_id,
-            "default_system_prompt": system_prompt,
-            "api_key": api_key,
-        }
-        if config.provider_id == "azure_openai":
-            azure_settings = settings.get("azure_openai_settings", {}) or {}
-            kwargs["azure_endpoint"] = azure_settings.get("endpoint")
-            kwargs["api_version"] = azure_settings.get("api_version")
-        elif config.provider_id == "anthropic_bedrock":
-            bedrock_settings = settings.get("aws_bedrock_settings", {}) or {}
-            kwargs["aws_region"] = bedrock_settings.get("region") or os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION")
-            kwargs["aws_profile"] = bedrock_settings.get("profile")
-        provider = create_provider(**kwargs)
-        if provider is None or not getattr(provider, "initialized", False):
-            raise RuntimeError(
-                f"Unable to initialise provider '{config.provider_id}'. Check API keys and model configuration in Settings."
-            )
-        return provider
+        )
 
     def _invoke_provider(
         self,
-        provider: BaseLLMProvider,
+        provider: object,
         provider_cfg: ProviderConfig,
         prompt: str,
         system_prompt: str,
         *,
         max_tokens: int = 32_000,
+        input_budget: Optional[int] = None,
     ) -> str:
         if self._cancel_event.is_set():
             raise BulkAnalysisCancelled
@@ -960,25 +978,70 @@ class BulkReduceWorker(DashboardWorker):
         )
         trace_attributes = stage_trace_attributes(stage_input)
         with trace_operation("bulk_reduce.invoke_llm", trace_attributes):
-            response = self._llm_backend.invoke(
+            response = self._llm_backend.invoke_response(
                 provider,
                 LLMInvocationRequest(
                     prompt=prompt,
                     model=provider_cfg.model,
                     system_prompt=system_prompt,
-                    temperature=provider_cfg.temperature,
-                    max_tokens=max_tokens,
+                    model_settings=self._llm_backend.build_model_settings(
+                        provider_cfg.provider_id,
+                        provider_cfg.model,
+                        temperature=provider_cfg.temperature,
+                        max_tokens=max_tokens,
+                        use_reasoning=getattr(self._group, "use_reasoning", False),
+                    ),
+                    input_tokens_limit=input_budget,
                 ),
             )
-        if not response.success:
-            raise RuntimeError(response.error or "Unknown LLM error")
-        content = response.content.strip()
+        self._record_response_usage(response)
+        content = str(response.text or "").strip()
         if not content:
             raise RuntimeError("LLM returned empty response")
         return content
 
+    def _max_input_budget(self, provider_cfg: ProviderConfig, *, max_output_tokens: int) -> int | None:
+        raw_context_window = normalize_context_window_override(
+            provider_id=provider_cfg.provider_id,
+            model_id=provider_cfg.model,
+            context_window=getattr(self._group, "model_context_window", None),
+        )
+        if not isinstance(raw_context_window, int) or raw_context_window <= 0:
+            model_key = provider_cfg.model or provider_cfg.provider_id
+            raw_context_window = TokenCounter.get_model_context_window(
+                model_key,
+                ratio=1.0,
+                provider_id=provider_cfg.provider_id,
+            )
+
+        return compute_input_token_budget(
+            raw_context_window=raw_context_window,
+            max_output_tokens=max_output_tokens,
+            minimum_budget=_MIN_INPUT_TOKEN_BUDGET,
+        )
+
     def _timestamp(self) -> str:
         return datetime.now().strftime("%Y%m%d-%H%M")
+
+    def _record_response_usage(self, response: object) -> None:
+        usage = getattr(response, "usage", None)
+        if usage is None:
+            return
+        self._usage_totals["input_tokens"] += int(getattr(usage, "input_tokens", 0) or 0)
+        self._usage_totals["output_tokens"] += int(getattr(usage, "output_tokens", 0) or 0)
+
+    def _total_cost(self, *, provider_id: str | None, model_id: str | None) -> float | None:
+        if not provider_id:
+            return None
+        amount = calculate_usage_cost(
+            provider_id=provider_id,
+            model_id=model_id,
+            input_tokens=self._usage_totals["input_tokens"],
+            output_tokens=self._usage_totals["output_tokens"],
+        )
+        if amount is None:
+            return None
+        return float(amount)
 
     def _output_paths(self) -> tuple[Path, Path]:
         slug = getattr(self._group, "slug", None) or self._group.folder_name

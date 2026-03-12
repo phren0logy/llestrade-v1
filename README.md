@@ -281,6 +281,9 @@ Report draft/refinement and bulk map/reduce use a Gateway-backed execution backe
 - Optional custom endpoint (self-hosted Gateway):
   - `PYDANTIC_AI_GATEWAY_BASE_URL=<gateway base url>` (or `PAIG_BASE_URL`)
   - `PYDANTIC_AI_GATEWAY_ROUTE=<route override>`
+- Optional shared concurrency cap for Gateway-backed worker requests:
+  - `PYDANTIC_AI_GATEWAY_MAX_CONCURRENCY=4`
+  - set `0` to disable model-level concurrency limiting
 - Fallback switch (force legacy native provider clients):
   - `FRD_ENABLE_PYDANTIC_AI_GATEWAY=false`
 

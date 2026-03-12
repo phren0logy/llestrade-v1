@@ -12,6 +12,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 
+from src.app.core.llm_operation_settings import normalize_context_window_override
+
 LOGGER = logging.getLogger(__name__)
 
 CONFIG_FILENAME = "config.json"
@@ -166,10 +168,14 @@ class BulkAnalysisGroup:
             prompt_template=str(payload.get("prompt_template", "")),
             provider_id=str(payload.get("provider_id", "")),
             model=str(payload.get("model", "")),
-            model_context_window=(
-                int(payload.get("model_context_window"))
-                if str(payload.get("model_context_window", "")).strip().isdigit()
-                else None
+            model_context_window=normalize_context_window_override(
+                provider_id=str(payload.get("provider_id", "")),
+                model_id=str(payload.get("model", "")),
+                context_window=(
+                    int(payload.get("model_context_window"))
+                    if str(payload.get("model_context_window", "")).strip().isdigit()
+                    else None
+                ),
             ),
             system_prompt_path=str(payload.get("system_prompt_path", "")),
             user_prompt_path=str(payload.get("user_prompt_path", "")),

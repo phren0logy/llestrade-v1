@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-import inspect
 import json
-import os
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -16,6 +14,8 @@ import frontmatter
 from PySide6.QtCore import Signal
 
 from src.app.core.bulk_analysis_groups import BulkAnalysisGroup
+from src.app.core.llm_catalog import calculate_usage_cost
+from src.app.core.llm_operation_settings import normalize_context_window_override
 from src.app.core.bulk_analysis_runner import (
     BulkAnalysisCancelled,
     BulkAnalysisDocument,
@@ -32,9 +32,7 @@ from src.app.core.citations import CitationRecordStats, CitationStore
 from src.app.core.bulk_prompt_context import build_bulk_placeholders
 from src.app.core.placeholders.system import SourceFileContext
 from src.app.core.project_manager import ProjectMetadata
-from src.app.core.secure_settings import SecureSettings
-from src.common.llm.base import BaseLLMProvider
-from src.common.llm.factory import create_provider
+from src.common.llm.budgets import compute_input_token_budget
 from src.common.llm.tokens import TokenCounter
 from src.config.observability import trace_operation
 from src.common.markdown import (
@@ -51,9 +49,10 @@ from .checkpoint_manager import CheckpointManager, _sha256
 from .llm_backend import (
     LLMExecutionBackend,
     LLMInvocationRequest,
-    LegacyProviderBackend,
-    ProviderMetadata,
-    default_model_for_provider,
+    LLMProviderRequest,
+    PydanticAIDirectBackend,
+    PydanticAIGatewayBackend,
+    backend_transport_name,
 )
 from .stage_contracts import BulkMapStageInput, stage_trace_attributes
 
@@ -69,8 +68,6 @@ class ProviderConfig:
 _MANIFEST_VERSION = 2
 _MTIME_TOLERANCE = 1e-6
 _DEFAULT_MAX_OUTPUT_TOKENS = 32_000
-_INPUT_BUDGET_RATIO = 0.85
-_INPUT_BUDGET_BUFFER = 1_000
 _MIN_CHUNK_TOKEN_TARGET = 4_000
 _PAGE_MARKER_RE = re.compile(r"<!---\\s*.+?#page=(\\d+)\\s*--->")
 
@@ -212,6 +209,7 @@ class BulkAnalysisWorker(DashboardWorker):
     file_failed = Signal(str, str)  # relative path, error message
     finished = Signal(int, int)  # successes, failures
     log_message = Signal(str)
+    cost_calculated = Signal(float, str, str)
 
     def __init__(
         self,
@@ -237,12 +235,16 @@ class BulkAnalysisWorker(DashboardWorker):
         self._base_placeholders = dict(placeholder_values or {})
         self._project_name = project_name
         self._run_timestamp = datetime.now(timezone.utc)
-        self._llm_backend: LLMExecutionBackend = llm_backend or LegacyProviderBackend()
-        self._invoke_compat_warning_emitted = False
+        self._llm_backend: LLMExecutionBackend = llm_backend or PydanticAIDirectBackend()
         try:
             self._citation_store: CitationStore | None = CitationStore(project_dir)
         except Exception:
             self._citation_store = None
+        self._usage_totals = {
+            "input_tokens": 0,
+            "output_tokens": 0,
+        }
+        self._prompt_token_cache: dict[str, int] = {}
 
     # ------------------------------------------------------------------
     # QRunnable API
@@ -318,7 +320,7 @@ class BulkAnalysisWorker(DashboardWorker):
         return body, metadata, source_context
 
     def _run(self) -> None:  # pragma: no cover - executed in worker thread
-        provider: Optional[BaseLLMProvider] = None
+        provider: Optional[object] = None
         successes = 0
         failures = 0
         skipped = 0
@@ -336,6 +338,10 @@ class BulkAnalysisWorker(DashboardWorker):
 
             self.logger.info("%s starting bulk analysis (docs=%s)", self.job_tag, total)
             provider_config = self._resolve_provider()
+            self.log_message.emit(
+                f"Using {backend_transport_name(self._llm_backend)} backend: "
+                f"{provider_config.provider_id}/{provider_config.model or '<default>'}"
+            )
             bundle = load_prompts(self._project_dir, self._group, self._metadata)
             global_placeholders = self._build_placeholder_map()
 
@@ -350,7 +356,7 @@ class BulkAnalysisWorker(DashboardWorker):
                 self._metadata,
                 placeholder_values=global_placeholders,
             )
-            provider = self._create_provider(provider_config, system_prompt)
+            provider = self._create_provider(provider_config)
             if provider is None:
                 raise RuntimeError("Bulk analysis provider failed to initialise")
 
@@ -481,7 +487,7 @@ class BulkAnalysisWorker(DashboardWorker):
             self.log_message.emit(f"Bulk analysis worker encountered an error: {exc}")
             failures = max(failures, 1)
         finally:
-            if provider and isinstance(provider, BaseLLMProvider) and hasattr(provider, "deleteLater"):
+            if provider and hasattr(provider, "deleteLater"):
                 provider.deleteLater()
             if manifest is not None and manifest_path is not None:
                 try:
@@ -490,6 +496,12 @@ class BulkAnalysisWorker(DashboardWorker):
                     self.logger.debug("%s failed to save bulk analysis manifest", self.job_tag, exc_info=True)
             if skipped:
                 self.log_message.emit(f"Skipped {skipped} document(s) (no changes detected)")
+            total_cost = self._total_cost(
+                provider_id=provider_config.provider_id if "provider_config" in locals() else None,
+                model_id=provider_config.model if "provider_config" in locals() else None,
+            )
+            if total_cost is not None:
+                self.cost_calculated.emit(total_cost, provider_config.provider_id, "bulk_map")
             self.logger.info("%s finished: successes=%s failures=%s skipped=%s", self.job_tag, successes, failures, skipped)
             self.finished.emit(successes, failures)
     def cancel(self) -> None:
@@ -500,7 +512,7 @@ class BulkAnalysisWorker(DashboardWorker):
     # ------------------------------------------------------------------
     def _process_document(
         self,
-        provider: BaseLLMProvider,
+        provider: object,
         provider_config: ProviderConfig,
         bundle: PromptBundle,
         system_prompt: str,
@@ -523,7 +535,11 @@ class BulkAnalysisWorker(DashboardWorker):
             dynamic_keys=_DYNAMIC_DOCUMENT_KEYS,
         )
 
-        override_window = getattr(self._group, "model_context_window", None)
+        override_window = normalize_context_window_override(
+            provider_id=provider_config.provider_id,
+            model_id=provider_config.model,
+            context_window=getattr(self._group, "model_context_window", None),
+        )
         if isinstance(override_window, int) and override_window > 0:
             raw_context_window = int(override_window)
             body_token_info = TokenCounter.count(
@@ -543,6 +559,7 @@ class BulkAnalysisWorker(DashboardWorker):
             raw_context_window = TokenCounter.get_model_context_window(
                 provider_config.model or provider_config.provider_id,
                 ratio=1.0,
+                provider_id=provider_config.provider_id,
             )
 
         input_budget = self._max_input_budget(
@@ -566,6 +583,7 @@ class BulkAnalysisWorker(DashboardWorker):
             provider_config,
             system_prompt,
             full_prompt,
+            allow_backend_preflight=False,
         )
         if full_prompt_tokens > input_budget:
             needs_chunking = True
@@ -593,7 +611,7 @@ class BulkAnalysisWorker(DashboardWorker):
 
         if not needs_chunking:
             run_details["chunk_count"] = 1
-            result = self._invoke_provider_compat(
+            result = self._invoke_provider(
                 provider,
                 provider_config,
                 full_prompt,
@@ -621,7 +639,7 @@ class BulkAnalysisWorker(DashboardWorker):
         if not chunks:
             run_details["chunk_count"] = 1
             run_details["chunking"] = False
-            result = self._invoke_provider_compat(
+            result = self._invoke_provider(
                 provider,
                 provider_config,
                 full_prompt,
@@ -692,7 +710,7 @@ class BulkAnalysisWorker(DashboardWorker):
                     content=chunk,
                 )
                 chunk_prompt = self._append_citation_ledger(chunk_prompt, chunk_ledger)
-                summary = self._invoke_provider_compat(
+                summary = self._invoke_provider(
                     provider,
                     provider_config,
                     chunk_prompt,
@@ -715,7 +733,7 @@ class BulkAnalysisWorker(DashboardWorker):
             chunk_summaries.append(summary)
 
         def invoke_combine(prompt: str) -> str:
-            return self._invoke_provider_compat(
+            return self._invoke_provider(
                 provider,
                 provider_config,
                 prompt,
@@ -744,68 +762,121 @@ class BulkAnalysisWorker(DashboardWorker):
         return result, run_details, doc_placeholders
 
     def _max_input_budget(self, *, raw_context_window: int, max_output_tokens: int) -> int:
-        ratio_budget = int(raw_context_window * _INPUT_BUDGET_RATIO)
-        available_budget = raw_context_window - max_output_tokens - _INPUT_BUDGET_BUFFER
-        budget = min(ratio_budget, available_budget)
-        return max(int(budget), _MIN_CHUNK_TOKEN_TARGET)
+        budget = compute_input_token_budget(
+            raw_context_window=raw_context_window,
+            max_output_tokens=max_output_tokens,
+            minimum_budget=_MIN_CHUNK_TOKEN_TARGET,
+        )
+        return budget or _MIN_CHUNK_TOKEN_TARGET
 
     def _count_prompt_tokens(
         self,
-        provider: BaseLLMProvider,
+        provider: object,
         provider_config: ProviderConfig,
         system_prompt: str,
         user_prompt: str,
         *,
         max_tokens: int = _DEFAULT_MAX_OUTPUT_TOKENS,
+        allow_backend_preflight: bool = True,
     ) -> int:
         combined_prompt = f"{system_prompt.strip()}\n\n{user_prompt.strip()}".strip()
         if not combined_prompt:
             return 0
 
-        try:
-            provider_tokens = provider.count_tokens(text=combined_prompt)
-            if provider_tokens.get("success"):
-                counted = int(provider_tokens.get("token_count") or 0)
-                if counted > 0:
-                    return counted
-        except Exception:
-            self.logger.debug("Provider token preflight failed; falling back to local estimate", exc_info=True)
+        cache_key = self._prompt_token_cache_key(
+            provider_id=provider_config.provider_id,
+            model=provider_config.model,
+            combined_prompt=combined_prompt,
+            max_tokens=max_tokens,
+            use_reasoning=bool(getattr(self._group, "use_reasoning", False)),
+            mode="backend" if allow_backend_preflight else "estimate",
+        )
+        cached = self._prompt_token_cache.get(cache_key)
+        if cached is not None:
+            return cached
 
-        backend_counter = getattr(self._llm_backend, "count_input_tokens", None)
-        if callable(backend_counter):
+        if allow_backend_preflight:
             try:
-                counted = backend_counter(
+                counted = self._llm_backend.count_input_tokens(
                     provider,
                     LLMInvocationRequest(
                         prompt=user_prompt,
                         system_prompt=system_prompt,
                         model=provider_config.model,
-                        temperature=0.1,
-                        max_tokens=max_tokens,
+                        model_settings=self._llm_backend.build_model_settings(
+                            provider_config.provider_id,
+                            provider_config.model,
+                            temperature=0.1,
+                            max_tokens=max_tokens,
+                            use_reasoning=bool(getattr(self._group, "use_reasoning", False)),
+                        ),
                     ),
                 )
                 if counted is not None and counted >= 0:
-                    return int(counted)
+                    result = int(counted)
+                    self._prompt_token_cache[cache_key] = result
+                    return result
             except Exception:
                 self.logger.debug("Backend token preflight failed; falling back to local estimate", exc_info=True)
 
-        token_info = TokenCounter.count(
+        result = self._estimate_prompt_tokens(
             text=combined_prompt,
             provider=provider_config.provider_id,
             model=provider_config.model or "",
         )
+        self._prompt_token_cache[cache_key] = result
+        return result
+
+    def _estimate_prompt_tokens(self, *, text: str, provider: str, model: str) -> int:
+        token_info = TokenCounter.count(
+            text=text,
+            provider=provider,
+            model=model,
+        )
         if token_info.get("success"):
             counted = int(token_info.get("token_count") or 0)
-            if provider_config.provider_id in {"anthropic", "anthropic_bedrock"}:
-                return max(counted, max(len(combined_prompt) // 3, 1))
+            capabilities = self._llm_backend.capabilities(
+                provider,
+                model or None,
+            )
+            if capabilities.reasoning_mode == "anthropic":
+                return max(counted, max(len(text) // 3, 1))
             if counted > 0:
                 return counted
-        return max(len(combined_prompt) // 3, 1)
+        return max(len(text) // 3, 1)
+
+    def _prompt_token_cache_key(
+        self,
+        *,
+        provider_id: str,
+        model: str | None,
+        combined_prompt: str,
+        max_tokens: int,
+        use_reasoning: bool,
+        mode: str,
+    ) -> str:
+        payload = {
+            "provider_id": provider_id,
+            "model": model or "",
+            "prompt_sha": _sha256(combined_prompt),
+            "max_tokens": max_tokens,
+            "use_reasoning": use_reasoning,
+            "mode": mode,
+        }
+        return _sha256(json.dumps(payload, sort_keys=True))
+
+    def _defer_exact_backend_preflight(self, provider_config: ProviderConfig) -> bool:
+        if not isinstance(self._llm_backend, (PydanticAIDirectBackend, PydanticAIGatewayBackend)):
+            return False
+        return self._llm_backend.capabilities(
+            provider_config.provider_id,
+            provider_config.model,
+        ).supports_pre_request_token_count
 
     def _generate_fitting_chunks(
         self,
         *,
-        provider: BaseLLMProvider,
+        provider: object,
         provider_config: ProviderConfig,
         bundle: PromptBundle,
         system_prompt: str,
@@ -838,12 +909,13 @@ class BulkAnalysisWorker(DashboardWorker):
                     content=chunk,
                 )
                 prompt = self._append_citation_ledger(prompt, chunk_ledger)
-                prompt_tokens = self._count_prompt_tokens_compat(
+                prompt_tokens = self._count_prompt_tokens(
                     provider,
                     provider_config,
                     system_prompt,
                     prompt,
                     max_tokens=_DEFAULT_MAX_OUTPUT_TOKENS,
+                    allow_backend_preflight=False,
                 )
                 if prompt_tokens > input_budget:
                     oversized.append((idx, prompt_tokens))
@@ -865,99 +937,9 @@ class BulkAnalysisWorker(DashboardWorker):
                 f"Reducing chunk target for {document.relative_path}: {previous_target} -> {chunk_target} tokens"
             )
 
-    def _invoke_provider_compat(
-        self,
-        provider: BaseLLMProvider,
-        provider_config: ProviderConfig,
-        prompt: str,
-        system_prompt: str,
-        **kwargs: object,
-    ) -> str:
-        """Call `_invoke_provider` while tolerating stale test/debug overrides.
-
-        Some tests monkeypatch `_invoke_provider` with simplified call signatures.
-        This adapter drops unsupported keyword arguments (for example
-        `input_budget`) when the override does not accept them.
-        """
-        invoke = self._invoke_provider
-        call_kwargs = dict(kwargs)
-        dropped: list[str] = []
-
-        try:
-            signature = inspect.signature(invoke)
-        except (TypeError, ValueError):
-            signature = None
-
-        if signature is not None:
-            accepts_var_kw = any(
-                param.kind == inspect.Parameter.VAR_KEYWORD
-                for param in signature.parameters.values()
-            )
-            if not accepts_var_kw:
-                accepted = {
-                    name
-                    for name, param in signature.parameters.items()
-                    if param.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
-                }
-                dropped = sorted(key for key in call_kwargs if key not in accepted)
-                for key in dropped:
-                    call_kwargs.pop(key, None)
-
-        if dropped and not self._invoke_compat_warning_emitted:
-            self._invoke_compat_warning_emitted = True
-            self.logger.warning(
-                "%s _invoke_provider override dropped unsupported kwargs: %s",
-                self.job_tag,
-                ", ".join(dropped),
-            )
-
-        return invoke(
-            provider,
-            provider_config,
-            prompt,
-            system_prompt,
-            **call_kwargs,
-        )
-
-    def _count_prompt_tokens_compat(
-        self,
-        provider: BaseLLMProvider,
-        provider_config: ProviderConfig,
-        system_prompt: str,
-        user_prompt: str,
-        *,
-        max_tokens: int = _DEFAULT_MAX_OUTPUT_TOKENS,
-    ) -> int:
-        count_fn = self._count_prompt_tokens
-        try:
-            signature = inspect.signature(count_fn)
-        except (TypeError, ValueError):
-            signature = None
-
-        if signature is not None:
-            accepts_var_kw = any(
-                param.kind == inspect.Parameter.VAR_KEYWORD
-                for param in signature.parameters.values()
-            )
-            if not accepts_var_kw and "max_tokens" not in signature.parameters:
-                return count_fn(  # type: ignore[misc]
-                    provider,
-                    provider_config,
-                    system_prompt,
-                    user_prompt,
-                )
-
-        return count_fn(
-            provider,
-            provider_config,
-            system_prompt,
-            user_prompt,
-            max_tokens=max_tokens,
-        )
-
     def _invoke_provider(
         self,
-        provider: BaseLLMProvider,
+        provider: object,
         provider_config: ProviderConfig,
         prompt: str,
         system_prompt: str,
@@ -971,12 +953,14 @@ class BulkAnalysisWorker(DashboardWorker):
             raise BulkAnalysisCancelled
 
         if input_budget is not None:
-            prompt_tokens = self._count_prompt_tokens_compat(
+            defer_exact_backend_preflight = self._defer_exact_backend_preflight(provider_config)
+            prompt_tokens = self._count_prompt_tokens(
                 provider,
                 provider_config,
                 system_prompt,
                 prompt,
                 max_tokens=max_tokens,
+                allow_backend_preflight=not defer_exact_backend_preflight,
             )
             if prompt_tokens > input_budget:
                 raise RuntimeError(
@@ -996,63 +980,70 @@ class BulkAnalysisWorker(DashboardWorker):
         )
         trace_attributes = stage_trace_attributes(stage_input)
         with trace_operation("bulk_analysis.invoke_llm", trace_attributes):
-            response = self._llm_backend.invoke(
+            response = self._llm_backend.invoke_response(
                 provider,
                 LLMInvocationRequest(
                     prompt=prompt,
                     model=provider_config.model,
                     system_prompt=system_prompt,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
+                    model_settings=self._llm_backend.build_model_settings(
+                        provider_config.provider_id,
+                        provider_config.model,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        use_reasoning=getattr(self._group, "use_reasoning", False),
+                    ),
+                    input_tokens_limit=input_budget,
                 ),
             )
-        if not response.success:
-            raise RuntimeError(response.error or "Unknown LLM error")
-        content = response.content.strip()
+        self._record_response_usage(response)
+        content = str(response.text or "").strip()
         if not content:
             raise RuntimeError("LLM returned empty response")
         return content
 
+    def _record_response_usage(self, response: object) -> None:
+        usage = getattr(response, "usage", None)
+        if usage is None:
+            return
+        self._usage_totals["input_tokens"] += int(getattr(usage, "input_tokens", 0) or 0)
+        self._usage_totals["output_tokens"] += int(getattr(usage, "output_tokens", 0) or 0)
+
+    def _total_cost(self, *, provider_id: str | None, model_id: str | None) -> float | None:
+        if not provider_id:
+            return None
+        amount = calculate_usage_cost(
+            provider_id=provider_id,
+            model_id=model_id,
+            input_tokens=self._usage_totals["input_tokens"],
+            output_tokens=self._usage_totals["output_tokens"],
+        )
+        if amount is None:
+            return None
+        return float(amount)
+
     def _resolve_provider(self) -> ProviderConfig:
-        provider_id = self._group.provider_id or self._default_provider[0] or "anthropic"
-        model = self._group.model or self._default_provider[1]
+        provider_id = str(self._group.provider_id or "").strip()
+        if not provider_id:
+            raise RuntimeError(
+                "Bulk analysis group has no saved provider selection. Edit the group and choose a provider."
+            )
+        model = self._llm_backend.normalize_model(
+            provider_id,
+            self._group.model or self._default_provider[1],
+        )
         return ProviderConfig(provider_id=provider_id, model=model)
 
     def _create_provider(
         self,
         config: ProviderConfig,
-        system_prompt: str,
     ) -> object:
-        if not self._llm_backend.requires_native_provider():
-            return ProviderMetadata(
-                provider_name=config.provider_id,
-                default_model=config.model or default_model_for_provider(config.provider_id),
+        return self._llm_backend.create_provider(
+            LLMProviderRequest(
+                provider_id=config.provider_id,
+                model=config.model,
             )
-
-        settings = SecureSettings()
-        api_key = settings.get_api_key(config.provider_id)
-        kwargs = {
-            "provider": config.provider_id,
-            "default_system_prompt": system_prompt,
-            "api_key": api_key,
-        }
-
-        if config.provider_id == "azure_openai":
-            azure_settings = settings.get("azure_openai_settings", {}) or {}
-            kwargs["azure_endpoint"] = azure_settings.get("endpoint")
-            kwargs["api_version"] = azure_settings.get("api_version")
-        elif config.provider_id == "anthropic_bedrock":
-            bedrock_settings = settings.get("aws_bedrock_settings", {}) or {}
-            kwargs["aws_region"] = bedrock_settings.get("region") or os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION")
-            kwargs["aws_profile"] = bedrock_settings.get("profile")
-
-        provider = create_provider(**kwargs)
-        if provider is None or not getattr(provider, "initialized", False):
-            raise RuntimeError(
-                f"Unable to initialise provider '{config.provider_id}'. "
-                "Check API keys and model configuration in Settings."
-            )
-        return provider
+        )
 
     def _build_summary_metadata(
         self,

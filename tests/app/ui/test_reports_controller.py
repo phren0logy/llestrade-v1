@@ -42,7 +42,6 @@ def qt_app() -> QApplication:
 def _build_controller(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> ReportsController:
     workspace = QWidget()
     tab = ReportsTab(parent=workspace)
-    monkeypatch.setattr(reports_module, "list_bedrock_models", lambda **_kwargs: [])
     return ReportsController(workspace, tab, service=_ServiceStub())
 
 

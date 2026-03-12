@@ -60,7 +60,12 @@ def _create_project_with_group(tmp_path: Path) -> tuple[ProjectManager, BulkAnal
     # Ensure the tracker sees our converted document so the workspace resolves it.
     FileTracker(manager.project_dir).scan()
 
-    group = BulkAnalysisGroup.create(name="Demo Group", files=["folder/record.md"])
+    group = BulkAnalysisGroup.create(
+        name="Demo Group",
+        files=["folder/record.md"],
+        provider_id="anthropic",
+        model="claude-sonnet-4-5",
+    )
     saved = manager.save_bulk_analysis_group(group)
     return manager, saved
 
@@ -77,7 +82,11 @@ def _create_project_with_combined_group(tmp_path: Path) -> tuple[ProjectManager,
     converted_doc.write_text("# Heading\nBody", encoding="utf-8")
     FileTracker(manager.project_dir).scan()
 
-    group = BulkAnalysisGroup.create(name="Combined Demo")
+    group = BulkAnalysisGroup.create(
+        name="Combined Demo",
+        provider_id="anthropic",
+        model="claude-sonnet-4-5",
+    )
     group.operation = "combined"
     group.combine_converted_files = ["folder/record.md"]
     saved = manager.save_bulk_analysis_group(group)
@@ -102,7 +111,7 @@ def test_workspace_run_executes_worker_and_updates_ui(tmp_path: Path, qt_app: QA
     monkeypatch.setattr(
         bulk_analysis_worker.BulkAnalysisWorker,
         "_create_provider",
-        lambda self, config, system_prompt: object(),
+        lambda self, config: object(),
     )
     monkeypatch.setattr(
         bulk_analysis_worker.BulkAnalysisWorker,

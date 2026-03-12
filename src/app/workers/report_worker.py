@@ -47,6 +47,7 @@ class DraftReportWorker(ReportWorkerBase):
     log_message = Signal(str)
     finished = Signal(dict)
     failed = Signal(str)
+    cost_calculated = Signal(float, str, str)
 
     def __init__(
         self,
@@ -62,6 +63,7 @@ class DraftReportWorker(ReportWorkerBase):
         generation_user_prompt_path: Path,
         generation_system_prompt_path: Path,
         metadata: ProjectMetadata,
+        use_reasoning: bool = False,
         max_report_tokens: int = 60_000,
         placeholder_values: Mapping[str, str] | None = None,
         project_name: str = "",
@@ -75,6 +77,7 @@ class DraftReportWorker(ReportWorkerBase):
             model=model,
             custom_model=custom_model,
             context_window=context_window,
+            use_reasoning=use_reasoning,
             metadata=metadata,
             placeholder_values=placeholder_values,
             project_name=project_name,
@@ -247,13 +250,18 @@ class DraftReportWorker(ReportWorkerBase):
                 "model": self._custom_model or self._model,
                 "custom_model": self._custom_model,
                 "context_window": self._context_window,
+                "use_reasoning": self._use_reasoning,
                 "inputs": [item[1] for item in self._inputs],
                 "template_path": str(self._template_path),
                 "transcript_path": str(self._transcript_path) if self._transcript_path else None,
                 "generation_user_prompt": str(self._generation_user_prompt_path),
                 "generation_system_prompt": str(self._generation_system_prompt_path),
                 "section_count": len(section_outputs),
+                "usage": self._usage_summary(),
+                "cost": self._total_cost(),
             }
+            if result["cost"] is not None:
+                self.cost_calculated.emit(float(result["cost"]), self._provider_id, "report_draft")
             self.progress.emit(100, "Draft generated")
             self.finished.emit(result)
         except Exception as exc:  # pragma: no cover - defensive
@@ -273,7 +281,8 @@ class DraftReportWorker(ReportWorkerBase):
         placeholder_map: Mapping[str, str],
         evidence_ledger: str,
     ) -> List[dict]:
-        provider = self._create_provider(system_prompt)
+        self.log_message.emit(self._llm_execution_summary())
+        provider = self._create_provider()
         outputs: List[dict] = []
 
         total = len(sections)
@@ -301,21 +310,26 @@ class DraftReportWorker(ReportWorkerBase):
             )
             trace_attributes = stage_trace_attributes(stage_input)
             with trace_operation("report_draft.invoke_llm", trace_attributes):
-                response = self._llm_backend.invoke(
+                response = self._llm_backend.invoke_response(
                     provider,
                     LLMInvocationRequest(
                         prompt=prompt,
                         system_prompt=system_prompt,
                         model=self._custom_model or self._model,
-                        temperature=0.2,
-                        max_tokens=self._max_report_tokens,
+                        model_settings=self._llm_backend.build_model_settings(
+                            self._provider_id,
+                            self._custom_model or self._model,
+                            temperature=0.2,
+                            max_tokens=self._max_report_tokens,
+                            use_reasoning=self._use_reasoning,
+                        ),
+                        input_tokens_limit=self._input_token_limit(
+                            max_output_tokens=self._max_report_tokens
+                        ),
                     ),
                 )
-            if not response.success:
-                raise RuntimeError(
-                    response.error or f"Failed to generate section: {section.title}"
-                )
-            content = response.content.strip()
+            self._record_response_usage(response)
+            content = str(response.text or "").strip()
             if not content:
                 raise RuntimeError(f"Generated section is empty: {section.title}")
             outputs.append(
@@ -372,6 +386,7 @@ class DraftReportWorker(ReportWorkerBase):
             "model": self._model,
             "custom_model": self._custom_model,
             "context_window": self._context_window,
+            "use_reasoning": self._use_reasoning,
             "draft_path": str(draft_path),
             "inputs_path": str(inputs_path),
             "template_path": str(template_path),
@@ -386,6 +401,8 @@ class DraftReportWorker(ReportWorkerBase):
                 }
                 for payload in sections
             ],
+            "usage": self._usage_summary(),
+            "cost": self._total_cost(),
         }
         if citation_stats is not None:
             manifest["citations"] = {
@@ -404,6 +421,7 @@ class ReportRefinementWorker(ReportWorkerBase):
     log_message = Signal(str)
     finished = Signal(dict)
     failed = Signal(str)
+    cost_calculated = Signal(float, str, str)
 
     def __init__(
         self,
@@ -420,6 +438,7 @@ class ReportRefinementWorker(ReportWorkerBase):
         refinement_user_prompt_path: Path,
         refinement_system_prompt_path: Path,
         metadata: ProjectMetadata,
+        use_reasoning: bool = False,
         max_report_tokens: int = 60_000,
         placeholder_values: Mapping[str, str] | None = None,
         project_name: str = "",
@@ -433,6 +452,7 @@ class ReportRefinementWorker(ReportWorkerBase):
             model=model,
             custom_model=custom_model,
             context_window=context_window,
+            use_reasoning=use_reasoning,
             metadata=metadata,
             placeholder_values=placeholder_values,
             project_name=project_name,
@@ -646,13 +666,18 @@ class ReportRefinementWorker(ReportWorkerBase):
                 "model": self._custom_model or self._model,
                 "custom_model": self._custom_model,
                 "context_window": self._context_window,
+                "use_reasoning": self._use_reasoning,
                 "inputs": [item[1] for item in self._inputs],
                 "template_path": str(self._template_path) if self._template_path else None,
                 "transcript_path": str(self._transcript_path) if self._transcript_path else None,
                 "refinement_user_prompt": str(self._refinement_user_prompt_path),
                 "refinement_system_prompt": str(self._refinement_system_prompt_path),
                 "refinement_tokens": self._refine_usage,
+                "usage": self._usage_summary(),
+                "cost": self._total_cost(),
             }
+            if result["cost"] is not None:
+                self.cost_calculated.emit(float(result["cost"]), self._provider_id, "report_refinement")
             self.progress.emit(100, "Refinement completed")
             self.finished.emit(result)
         except Exception as exc:  # pragma: no cover - defensive
@@ -667,7 +692,8 @@ class ReportRefinementWorker(ReportWorkerBase):
         prompt: str,
         system_prompt: str,
     ) -> tuple[str, Optional[str]]:
-        provider = self._create_provider(system_prompt)
+        self.log_message.emit(self._llm_execution_summary())
+        provider = self._create_provider()
         stage_input = ReportRefineStageInput(
             provider_id=self._provider_id,
             model=self._custom_model or self._model,
@@ -676,23 +702,30 @@ class ReportRefinementWorker(ReportWorkerBase):
         )
         trace_attributes = stage_trace_attributes(stage_input)
         with trace_operation("report_refine.invoke_llm", trace_attributes):
-            response = self._llm_backend.invoke(
+            response = self._llm_backend.invoke_response(
                 provider,
                 LLMInvocationRequest(
                     prompt=prompt,
                     system_prompt=system_prompt,
                     model=self._custom_model or self._model,
-                    temperature=0.2,
-                    max_tokens=self._max_report_tokens,
+                    model_settings=self._llm_backend.build_model_settings(
+                        self._provider_id,
+                        self._custom_model or self._model,
+                        temperature=0.2,
+                        max_tokens=self._max_report_tokens,
+                        use_reasoning=self._use_reasoning,
+                    ),
+                    input_tokens_limit=self._input_token_limit(
+                        max_output_tokens=self._max_report_tokens
+                    ),
                 ),
             )
-        if not response.success:
-            raise RuntimeError(response.error or "Unknown error during refinement")
-        content = response.content.strip()
+        self._record_response_usage(response)
+        content = str(response.text or "").strip()
         if not content:
             raise RuntimeError("Refinement step returned empty content")
-        reasoning = response.raw.get("reasoning") or response.raw.get("thinking")
-        self._refine_usage = response.usage.get("output_tokens")
+        reasoning = response.thinking
+        self._refine_usage = int(getattr(response.usage, "output_tokens", 0) or 0)
         return content + "\n", reasoning
 
     def _build_refinement_manifest(
@@ -718,6 +751,7 @@ class ReportRefinementWorker(ReportWorkerBase):
             "model": self._model,
             "custom_model": self._custom_model,
             "context_window": self._context_window,
+            "use_reasoning": self._use_reasoning,
             "draft_path": str(draft_path),
             "refined_path": str(refined_path),
             "reasoning_path": str(reasoning_path) if reasoning_path else None,
@@ -729,7 +763,9 @@ class ReportRefinementWorker(ReportWorkerBase):
             "inputs": list(inputs_metadata),
             "usage": {
                 "refined_tokens": self._refine_usage,
+                **self._usage_summary(),
             },
+            "cost": self._total_cost(),
         }
         if citation_stats is not None:
             manifest["citations"] = {

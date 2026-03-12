@@ -49,7 +49,7 @@ def test_hierarchical_combiner_reuses_cached_batches(monkeypatch) -> None:
     monkeypatch.setattr(
         runner.TokenCounter,
         "get_model_context_window",
-        staticmethod(lambda model, ratio=None: 500),
+        staticmethod(lambda model, ratio=None, provider_id=None: 500),
     )
 
     summaries = ["x" * 4000, "y" * 4000, "z" * 4000]
@@ -79,7 +79,7 @@ def test_hierarchical_combiner_reuses_cached_batches(monkeypatch) -> None:
         metadata=None,
         placeholder_values=None,
         provider_id="anthropic",
-        model=None,
+        model="claude-sonnet-4-5",
         invoke_fn=invoke_fn,
         is_cancelled_fn=None,
         load_batch_fn=load_batch_fn,

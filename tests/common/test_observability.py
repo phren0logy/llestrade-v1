@@ -36,3 +36,52 @@ def test_detect_provider_from_module_name() -> None:
     assert obs._detect_provider("src.common.llm.providers.azure_openai") == "openai"
     assert obs._detect_provider("src.common.llm.providers.gemini") == "google"
     assert obs._detect_provider("src.something.else") == "unknown"
+
+
+def test_pydantic_ai_instrumentation_redacts_content_when_enabled(monkeypatch) -> None:
+    obs = PhoenixObservability()
+    obs.enabled = True
+    obs._content_policy = "redacted"
+
+    class _FakeInstrumentationSettings:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    monkeypatch.setattr(
+        "pydantic_ai.models.instrumented.InstrumentationSettings",
+        _FakeInstrumentationSettings,
+    )
+
+    instrumentation = obs.pydantic_ai_instrumentation()
+
+    assert instrumentation is not None
+    assert instrumentation.kwargs["include_content"] is False
+    assert instrumentation.kwargs["include_binary_content"] is False
+    assert obs.pydantic_ai_instrumentation() is instrumentation
+
+
+def test_pydantic_ai_instrumentation_defaults_to_unredacted_for_local_phoenix(monkeypatch) -> None:
+    obs = PhoenixObservability()
+    obs.enabled = True
+    obs._content_policy = "unredacted"
+    obs._include_binary_content = False
+
+    class _FakeInstrumentationSettings:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    monkeypatch.setattr(
+        "pydantic_ai.models.instrumented.InstrumentationSettings",
+        _FakeInstrumentationSettings,
+    )
+
+    instrumentation = obs.pydantic_ai_instrumentation()
+
+    assert instrumentation is not None
+    assert instrumentation.kwargs["include_content"] is True
+    assert instrumentation.kwargs["include_binary_content"] is False
+
+
+def test_content_policy_defaults_are_target_aware() -> None:
+    assert PhoenixObservability._resolve_content_policy({}, target="local_phoenix") == "unredacted"
+    assert PhoenixObservability._resolve_content_policy({}, target="remote_otel") == "redacted"

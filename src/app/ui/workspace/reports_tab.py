@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QComboBox,
     QFrame,
     QGroupBox,
     QHBoxLayout,
@@ -13,13 +12,14 @@ from PySide6.QtWidgets import (
     QPushButton,
     QProgressBar,
     QSizePolicy,
-    QSpinBox,
     QTextEdit,
     QToolButton,
     QTreeWidget,
     QVBoxLayout,
     QWidget,
 )
+
+from src.app.ui.widgets import LLMSettingsPanel
 
 
 class CollapsibleGroupBox(QWidget):
@@ -76,16 +76,15 @@ class ReportsTab(QWidget):
         self.inputs_tree.setUniformRowHeights(True)
         self.inputs_tree.setSelectionMode(QTreeWidget.NoSelection)
 
-        self.model_combo = QComboBox()
-        self.model_combo.setEditable(False)
-
-        self.custom_model_label = QLabel("Custom model id:")
-        self.custom_model_edit = QLineEdit()
-
-        self.custom_context_label = QLabel("Context window:")
-        self.custom_context_spin = QSpinBox()
-        self.custom_context_spin.setRange(10_000, 400_000)
-        self.custom_context_spin.setSingleStep(1_000)
+        self.llm_settings_panel = LLMSettingsPanel(parent=self)
+        self.provider_combo = self.llm_settings_panel.provider_combo
+        self.model_combo = self.llm_settings_panel.model_combo
+        self.custom_model_label = self.llm_settings_panel.custom_model_label
+        self.custom_model_edit = self.llm_settings_panel.custom_model_edit
+        self.custom_context_label = self.llm_settings_panel.custom_context_label
+        self.custom_context_spin = self.llm_settings_panel.custom_context_spin
+        self.reasoning_checkbox = self.llm_settings_panel.reasoning_checkbox
+        self.advanced_reasoning_toggle = self.llm_settings_panel.advanced_toggle
 
         self.template_edit = QLineEdit()
         self.template_browse_button = QPushButton("Browse…")
@@ -152,24 +151,7 @@ class ReportsTab(QWidget):
         config_layout = QVBoxLayout(config_group)
         config_layout.setSpacing(6)
 
-        model_row = QHBoxLayout()
-        model_row.setContentsMargins(0, 0, 0, 0)
-        model_row.addWidget(QLabel("Model:"))
-        model_row.addWidget(self.model_combo)
-        config_layout.addLayout(model_row)
-
-        custom_model_row = QHBoxLayout()
-        custom_model_row.setContentsMargins(0, 0, 0, 0)
-        custom_model_row.addWidget(self.custom_model_label)
-        custom_model_row.addWidget(self.custom_model_edit)
-        config_layout.addLayout(custom_model_row)
-
-        context_row = QHBoxLayout()
-        context_row.setContentsMargins(0, 0, 0, 0)
-        context_row.addWidget(self.custom_context_label)
-        context_row.addWidget(self.custom_context_spin)
-        context_row.addWidget(QLabel("tokens"))
-        config_layout.addLayout(context_row)
+        config_layout.addWidget(self.llm_settings_panel)
 
         template_label = QLabel("Template (required):")
         config_layout.addWidget(template_label)

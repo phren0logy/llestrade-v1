@@ -29,20 +29,57 @@ import os
 
 from pydantic_ai import Agent
 from pydantic_ai.models.anthropic import AnthropicModel
+from pydantic_ai.models.google import GoogleModel
+from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.gateway import gateway_provider
 
-gateway = gateway_provider(
+anthropic_gateway = gateway_provider(
     "anthropic",
     api_key=os.environ["GATEWAY_VERIFY_API_KEY"],
     base_url=os.environ["GATEWAY_VERIFY_BASE_URL"],
 )
-agent = Agent(
-    model=AnthropicModel("claude-sonnet-4-5", provider=gateway),
+anthropic_agent = Agent(
+    model=AnthropicModel("claude-sonnet-4-5", provider=anthropic_gateway),
     system_prompt="Reply with the single word OK.",
 )
-result = agent.run_sync("Return exactly OK.", model_settings={"max_tokens": 16, "temperature": 0})
-if not str(result.output).strip().startswith("OK"):
-    raise SystemExit(f"Gateway verification returned unexpected output: {result.output!r}")
+anthropic_result = anthropic_agent.run_sync(
+    "Return exactly OK.",
+    model_settings={"max_tokens": 16, "temperature": 0},
+)
+if not str(anthropic_result.output).strip().startswith("OK"):
+    raise SystemExit(f"Anthropic gateway verification returned unexpected output: {anthropic_result.output!r}")
+
+openai_gateway = gateway_provider(
+    "openai",
+    api_key=os.environ["GATEWAY_VERIFY_API_KEY"],
+    base_url=os.environ["GATEWAY_VERIFY_BASE_URL"],
+)
+openai_agent = Agent(
+    model=OpenAIChatModel("gpt-4.1", provider=openai_gateway),
+    system_prompt="Reply with the single word OK.",
+)
+openai_result = openai_agent.run_sync(
+    "Return exactly OK.",
+    model_settings={"max_tokens": 16, "temperature": 0},
+)
+if not str(openai_result.output).strip().startswith("OK"):
+    raise SystemExit(f"OpenAI gateway verification returned unexpected output: {openai_result.output!r}")
+
+google_gateway = gateway_provider(
+    "gemini",
+    api_key=os.environ["GATEWAY_VERIFY_API_KEY"],
+    base_url=os.environ["GATEWAY_VERIFY_BASE_URL"],
+)
+google_agent = Agent(
+    model=GoogleModel("gemini-2.5-pro", provider=google_gateway),
+    system_prompt="Reply with the single word OK.",
+)
+google_result = google_agent.run_sync(
+    "Return exactly OK.",
+    model_settings={"max_tokens": 64, "temperature": 0},
+)
+if not str(google_result.output).strip().startswith("OK"):
+    raise SystemExit(f"Google Vertex gateway verification returned unexpected output: {google_result.output!r}")
 PY
 
 log "Gateway verification succeeded."

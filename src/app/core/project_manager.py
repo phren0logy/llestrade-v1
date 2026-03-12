@@ -15,12 +15,19 @@ from dataclasses import dataclass, asdict, field
 
 from PySide6.QtCore import QObject, Signal, QTimer
 
+from src.app.core.llm_catalog import default_model_for_provider
+from src.app.core.llm_operation_settings import settings_from_report_preferences
+
 if TYPE_CHECKING:
     from .bulk_analysis_groups import BulkAnalysisGroup
 
 from .secure_settings import SecureSettings
 from .file_tracker import DashboardMetrics, WorkspaceMetrics, build_workspace_metrics
 from .placeholders import PlaceholderEntry, ProjectPlaceholders, SYSTEM_PLACEHOLDERS, system_placeholder_map
+
+
+def _default_primary_model() -> str:
+    return default_model_for_provider("anthropic") or ""
 
 
 @dataclass
@@ -204,6 +211,7 @@ class ReportHistoryEntry:
     model: str = ""
     custom_model: Optional[str] = None
     context_window: Optional[int] = None
+    use_reasoning: bool = False
     inputs: List[str] = field(default_factory=list)
     template_path: Optional[str] = None
     transcript_path: Optional[str] = None
@@ -242,6 +250,7 @@ class ReportHistoryEntry:
                 or str(data.get("context_window", "")).strip().isdigit()
                 else None
             ),
+            use_reasoning=bool(data.get("use_reasoning", False)),
             inputs=list(data.get("inputs", [])),
             template_path=data.get("template_path"),
             transcript_path=data.get("transcript_path"),
@@ -271,9 +280,10 @@ class ReportState:
 
     last_selected_inputs: List[str] = field(default_factory=list)
     last_provider: str = "anthropic"
-    last_model: str = "claude-sonnet-4-5-20250929"
+    last_model: str = field(default_factory=_default_primary_model)
     last_custom_model: Optional[str] = None
     last_context_window: Optional[int] = None
+    last_use_reasoning: bool = False
     last_template: Optional[str] = None
     last_transcript: Optional[str] = None
     last_generation_user_prompt: Optional[str] = None
@@ -290,6 +300,7 @@ class ReportState:
             "last_model": self.last_model,
             "last_custom_model": self.last_custom_model,
             "last_context_window": self.last_context_window,
+            "last_use_reasoning": self.last_use_reasoning,
             "last_template": self.last_template,
             "last_transcript": self.last_transcript,
             "last_generation_user_prompt": self.last_generation_user_prompt,
@@ -313,14 +324,6 @@ class ReportState:
                 continue
         state = cls(
             last_selected_inputs=list(data.get("last_selected_inputs", [])),
-            last_provider=str(data.get("last_provider", "anthropic")),
-            last_model=str(data.get("last_model", "claude-sonnet-4-5-20250929")),
-            last_custom_model=data.get("last_custom_model"),
-            last_context_window=(
-                int(data["last_context_window"])
-                if str(data.get("last_context_window", "")).strip().isdigit()
-                else None
-            ),
             last_template=data.get("last_template"),
             last_transcript=data.get("last_transcript"),
             last_generation_user_prompt=data.get("last_generation_user_prompt"),
@@ -332,6 +335,22 @@ class ReportState:
             last_refinement_draft=data.get("last_refinement_draft"),
             history=history,
         )
+        llm_settings = settings_from_report_preferences(
+            provider_id=str(data.get("last_provider", "anthropic")),
+            model=str(data.get("last_model", _default_primary_model())),
+            custom_model=data.get("last_custom_model"),
+            context_window=(
+                int(data["last_context_window"])
+                if str(data.get("last_context_window", "")).strip().isdigit()
+                else None
+            ),
+            use_reasoning=bool(data.get("last_use_reasoning", False)),
+        )
+        state.last_provider = llm_settings.provider_id
+        state.last_model = llm_settings.model_id
+        state.last_custom_model = llm_settings.custom_model_id
+        state.last_context_window = llm_settings.context_window
+        state.last_use_reasoning = llm_settings.use_reasoning
         return state
 
 
@@ -438,7 +457,7 @@ class ProjectManager(QObject):
         self.workflow_state = WorkflowState()
         self.settings = {
             "llm_provider": "anthropic",
-            "llm_model": "claude-sonnet-4-5-20250929",
+            "llm_model": _default_primary_model(),
             "template_id": "standard_competency"
         }
         self.source_state = SourceTreeState()
@@ -1108,6 +1127,7 @@ class ProjectManager(QObject):
         model: str,
         custom_model: Optional[str],
         context_window: Optional[int],
+        use_reasoning: bool,
         template_path: Optional[str],
         transcript_path: Optional[str],
         generation_user_prompt: Optional[str],
@@ -1122,6 +1142,7 @@ class ProjectManager(QObject):
         state.last_model = model
         state.last_custom_model = custom_model
         state.last_context_window = context_window
+        state.last_use_reasoning = use_reasoning
         state.last_template = template_path
         state.last_transcript = transcript_path
         state.last_generation_user_prompt = generation_user_prompt
@@ -1148,6 +1169,7 @@ class ProjectManager(QObject):
         transcript_path: Optional[str],
         generation_user_prompt: Optional[str],
         generation_system_prompt: Optional[str],
+        use_reasoning: bool = False,
         draft_tokens: Optional[int] = None,
     ) -> None:
         entry = ReportHistoryEntry(
@@ -1162,6 +1184,7 @@ class ProjectManager(QObject):
             model=model,
             custom_model=custom_model,
             context_window=context_window,
+            use_reasoning=use_reasoning,
             inputs=list(inputs),
             template_path=str(template_path) if template_path else None,
             transcript_path=str(transcript_path) if transcript_path else None,
@@ -1193,6 +1216,7 @@ class ProjectManager(QObject):
         transcript_path: Optional[str],
         refinement_user_prompt: Optional[str],
         refinement_system_prompt: Optional[str],
+        use_reasoning: bool = False,
         refined_tokens: Optional[int] = None,
     ) -> None:
         entry = ReportHistoryEntry(
@@ -1207,6 +1231,7 @@ class ProjectManager(QObject):
             model=model,
             custom_model=custom_model,
             context_window=context_window,
+            use_reasoning=use_reasoning,
             inputs=list(inputs),
             template_path=str(template_path) if template_path else None,
             transcript_path=str(transcript_path) if transcript_path else None,

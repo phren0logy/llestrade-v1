@@ -5,6 +5,8 @@ from pathlib import Path
 from typing import Sequence
 
 import pytest
+from pydantic_ai.messages import ModelResponse, TextPart
+from pydantic_ai.usage import RequestUsage
 
 from src.app.workers.checkpoint_manager import CheckpointManager
 
@@ -21,47 +23,76 @@ from src.app.workers.bulk_analysis_worker import (
     _save_manifest,
     _should_process_document,
 )
-from src.app.workers.llm_backend import LLMExecutionBackend, LLMInvocationRequest, LLMInvocationResult
+from src.app.workers.llm_backend import (
+    LLMExecutionBackend,
+    LLMInvocationRequest,
+    LLMProviderRequest,
+    PydanticAIGatewayBackend,
+    ProviderMetadata,
+    build_model_settings,
+    normalize_model_name,
+    provider_capabilities,
+    resolve_model_name,
+)
 
 
-class _FakeProvider:
-    def __init__(self) -> None:
-        self.calls: list[str] = []
-
-    def generate(self, *, prompt: str, model=None, system_prompt=None, temperature=0.1, max_tokens=32000):  # noqa: ANN001
-        self.calls.append(prompt)
-        return {"success": True, "content": "summary"}
-
-    def count_tokens(self, text=None, messages=None):  # noqa: ANN001
-        content = text or ""
-        return {"success": True, "token_count": max(len(content) // 4, 1)}
+def _model_response(
+    content: str,
+    *,
+    model_name: str = "claude",
+    output_tokens: int = 1,
+) -> ModelResponse:
+    return ModelResponse(
+        parts=[TextPart(content)],
+        usage=RequestUsage(input_tokens=1, output_tokens=output_tokens),
+        model_name=model_name,
+    )
 
 
 class _NoNativeBackend(LLMExecutionBackend):
-    def requires_native_provider(self) -> bool:
-        return False
+    def normalize_model(self, provider_id: str, model: str | None) -> str | None:
+        return normalize_model_name(provider_id, model)
 
-    def invoke(self, provider, request: LLMInvocationRequest) -> LLMInvocationResult:  # noqa: ANN001
-        return LLMInvocationResult(
-            success=True,
-            content="summary",
-            error=None,
-            usage={"output_tokens": 1},
-            provider="gateway/anthropic",
-            model=request.model,
-            raw={},
-        )
+    def resolve_model(self, provider_id: str, model: str | None) -> str | None:
+        return resolve_model_name(provider_id, model)
+
+    def capabilities(self, provider_id: str, model: str | None):
+        return provider_capabilities(provider_id, model)
+
+    def build_model_settings(self, provider_id: str, model: str | None, **kwargs):
+        return build_model_settings(provider_id, model, **kwargs)
+
+    def create_provider(self, request: LLMProviderRequest) -> object:
+        return ProviderMetadata(provider_name=request.provider_id, default_model=request.model or "default-model")
+
+    def invoke_response(self, provider, request: LLMInvocationRequest) -> ModelResponse:  # noqa: ANN001
+        _ = provider
+        return _model_response("summary", model_name=request.model or "claude", output_tokens=1)
 
 
 class _ResultBackend(LLMExecutionBackend):
-    def __init__(self, result: LLMInvocationResult) -> None:
+    def __init__(self, result: ModelResponse | Exception) -> None:
         self._result = result
 
-    def requires_native_provider(self) -> bool:
-        return False
+    def normalize_model(self, provider_id: str, model: str | None) -> str | None:
+        return normalize_model_name(provider_id, model)
 
-    def invoke(self, provider, request: LLMInvocationRequest) -> LLMInvocationResult:  # noqa: ANN001
+    def resolve_model(self, provider_id: str, model: str | None) -> str | None:
+        return resolve_model_name(provider_id, model)
+
+    def capabilities(self, provider_id: str, model: str | None):
+        return provider_capabilities(provider_id, model)
+
+    def build_model_settings(self, provider_id: str, model: str | None, **kwargs):
+        return build_model_settings(provider_id, model, **kwargs)
+
+    def create_provider(self, request: LLMProviderRequest) -> object:
+        return ProviderMetadata(provider_name=request.provider_id, default_model=request.model or "default-model")
+
+    def invoke_response(self, provider, request: LLMInvocationRequest) -> ModelResponse:  # noqa: ANN001
         _ = provider, request
+        if isinstance(self._result, Exception):
+            raise self._result
         return self._result
 
 
@@ -69,26 +100,32 @@ class _CountingBackend(LLMExecutionBackend):
     def __init__(self, *, token_count: int) -> None:
         self.token_count = token_count
         self.invoked = False
+        self.requests: list[LLMInvocationRequest] = []
 
-    def requires_native_provider(self) -> bool:
-        return False
+    def normalize_model(self, provider_id: str, model: str | None) -> str | None:
+        return normalize_model_name(provider_id, model)
+
+    def resolve_model(self, provider_id: str, model: str | None) -> str | None:
+        return resolve_model_name(provider_id, model)
+
+    def capabilities(self, provider_id: str, model: str | None):
+        return provider_capabilities(provider_id, model)
+
+    def build_model_settings(self, provider_id: str, model: str | None, **kwargs):
+        return build_model_settings(provider_id, model, **kwargs)
+
+    def create_provider(self, request: LLMProviderRequest) -> object:
+        return ProviderMetadata(provider_name=request.provider_id, default_model=request.model or "default-model")
 
     def count_input_tokens(self, provider, request: LLMInvocationRequest) -> int | None:  # noqa: ANN001
         _ = provider, request
         return self.token_count
 
-    def invoke(self, provider, request: LLMInvocationRequest) -> LLMInvocationResult:  # noqa: ANN001
+    def invoke_response(self, provider, request: LLMInvocationRequest) -> ModelResponse:  # noqa: ANN001
         _ = provider, request
         self.invoked = True
-        return LLMInvocationResult(
-            success=True,
-            content="summary",
-            error=None,
-            usage={},
-            provider="gateway/anthropic",
-            model="claude",
-            raw={},
-        )
+        self.requests.append(request)
+        return _model_response("summary", model_name="claude-sonnet-4-5", output_tokens=1)
 
 
 def _capture_traces(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, dict[str, object] | None]]:
@@ -140,7 +177,7 @@ def test_compute_prompt_hash_changes_on_prompt_and_settings() -> None:
     group = BulkAnalysisGroup.create("Group")
     metadata = ProjectMetadata(case_name="Case A", subject_name="Subject", case_description="Desc")
     bundle = PromptBundle(system_template="System", user_template="User {document_content}")
-    config = ProviderConfig(provider_id="anthropic", model="claude")
+    config = ProviderConfig(provider_id="anthropic", model="claude-sonnet-4-5")
 
     first = _compute_prompt_hash(bundle, config, group, metadata)
 
@@ -178,45 +215,62 @@ def test_bulk_map_create_provider_skips_native_bootstrap_for_no_native_backend(
     monkeypatch.setattr(worker_module, "create_provider", _fail_create_provider, raising=False)
     provider = worker._create_provider(
         ProviderConfig(provider_id="anthropic", model=None),
-        "system prompt",
     )
 
     assert provider.provider_name == "anthropic"
     assert provider.default_model
 
 
+def test_bulk_map_resolve_provider_normalizes_bedrock_model(tmp_path: Path) -> None:
+    group = BulkAnalysisGroup.create("Group")
+    group.provider_id = "anthropic_bedrock"
+    group.model = "claude-sonnet-4-5"
+    worker = BulkAnalysisWorker(
+        project_dir=tmp_path,
+        group=group,
+        files=[],
+        metadata=ProjectMetadata(case_name="Case"),
+        force_rerun=False,
+        llm_backend=_NoNativeBackend(),
+    )
+
+    config = worker._resolve_provider()
+
+    assert config.provider_id == "anthropic_bedrock"
+    assert config.model == "anthropic.claude-sonnet-4-5-v1"
+
+
+def test_bulk_map_resolve_provider_requires_saved_provider_selection(tmp_path: Path) -> None:
+    group = BulkAnalysisGroup.create("Group")
+    worker = BulkAnalysisWorker(
+        project_dir=tmp_path,
+        group=group,
+        files=[],
+        metadata=ProjectMetadata(case_name="Case"),
+        force_rerun=False,
+        llm_backend=_NoNativeBackend(),
+    )
+
+    with pytest.raises(RuntimeError, match="no saved provider selection"):
+        worker._resolve_provider()
+
+
 @pytest.mark.parametrize(
     ("result", "message"),
     [
         (
-            LLMInvocationResult(
-                success=False,
-                content="",
-                error="Gateway timeout",
-                usage={},
-                provider="gateway/anthropic",
-                model="claude",
-                raw={},
-            ),
+            RuntimeError("Gateway timeout"),
             "Gateway timeout",
         ),
         (
-            LLMInvocationResult(
-                success=True,
-                content="   ",
-                error=None,
-                usage={},
-                provider="gateway/anthropic",
-                model="claude",
-                raw={},
-            ),
+            _model_response("   ", model_name="claude-sonnet-4-5", output_tokens=1),
             "LLM returned empty response",
         ),
     ],
 )
 def test_bulk_map_invoke_provider_raises_for_failed_or_empty_backend_result(
     tmp_path: Path,
-    result: LLMInvocationResult,
+    result: ModelResponse | Exception,
     message: str,
 ) -> None:
     group = BulkAnalysisGroup.create("Group")
@@ -232,7 +286,7 @@ def test_bulk_map_invoke_provider_raises_for_failed_or_empty_backend_result(
     with pytest.raises(RuntimeError, match=message):
         worker._invoke_provider(
             provider=object(),
-            provider_config=ProviderConfig(provider_id="anthropic", model="claude"),
+            provider_config=ProviderConfig(provider_id="anthropic", model="claude-sonnet-4-5"),
             prompt="Prompt",
             system_prompt="System",
         )
@@ -252,7 +306,7 @@ def test_bulk_map_invoke_provider_raises_cancelled_when_worker_cancelled(tmp_pat
     with pytest.raises(worker_module.BulkAnalysisCancelled):
         worker._invoke_provider(
             provider=object(),
-            provider_config=ProviderConfig(provider_id="anthropic", model="claude"),
+            provider_config=ProviderConfig(provider_id="anthropic", model="claude-sonnet-4-5"),
             prompt="Prompt",
             system_prompt="System",
         )
@@ -264,7 +318,7 @@ def test_bulk_map_trace_attributes_match_between_legacy_and_gateway(
 ) -> None:
     group = BulkAnalysisGroup.create("Group")
     group.slug = "group-slug"
-    config = ProviderConfig(provider_id="anthropic", model="claude")
+    config = ProviderConfig(provider_id="anthropic", model="claude-sonnet-4-5")
 
     legacy_worker = BulkAnalysisWorker(
         project_dir=tmp_path,
@@ -272,10 +326,13 @@ def test_bulk_map_trace_attributes_match_between_legacy_and_gateway(
         files=[],
         metadata=ProjectMetadata(case_name="Case"),
         force_rerun=False,
+        llm_backend=_ResultBackend(
+            _model_response("summary", model_name="claude-sonnet-4-5", output_tokens=1)
+        ),
     )
     legacy_traces = _capture_traces(monkeypatch)
     legacy_result = legacy_worker._invoke_provider(
-        provider=_FakeProvider(),
+        provider=object(),
         provider_config=config,
         prompt="Prompt",
         system_prompt="System",
@@ -289,15 +346,7 @@ def test_bulk_map_trace_attributes_match_between_legacy_and_gateway(
         metadata=ProjectMetadata(case_name="Case"),
         force_rerun=False,
         llm_backend=_ResultBackend(
-            LLMInvocationResult(
-                success=True,
-                content="summary",
-                error=None,
-                usage={"output_tokens": 1},
-                provider="gateway/anthropic",
-                model="claude",
-                raw={},
-            )
+            _model_response("summary", model_name="claude-sonnet-4-5", output_tokens=1)
         ),
     )
     gateway_traces = _capture_traces(monkeypatch)
@@ -314,10 +363,10 @@ def test_bulk_map_trace_attributes_match_between_legacy_and_gateway(
     assert legacy_traces == gateway_traces == [
         (
             "bulk_analysis.invoke_llm",
-            {
-                "llestrade.provider_id": "anthropic",
-                "llestrade.model": "claude",
-                "llestrade.max_tokens": 32000,
+                {
+                    "llestrade.provider_id": "anthropic",
+                    "llestrade.model": "claude-sonnet-4-5",
+                    "llestrade.max_tokens": 32000,
                 "llestrade.temperature": 0.1,
                 "llestrade.worker": "bulk_analysis",
                 "llestrade.stage": "bulk_map",
@@ -344,14 +393,120 @@ def test_bulk_worker_uses_backend_token_count_for_gateway_preflight(tmp_path: Pa
 
     with pytest.raises(RuntimeError, match="500 tokens > 400 budget"):
         worker._invoke_provider(
-            provider=worker._create_provider(ProviderConfig(provider_id="anthropic", model="claude"), "System"),
-            provider_config=ProviderConfig(provider_id="anthropic", model="claude"),
+            provider=worker._create_provider(ProviderConfig(provider_id="anthropic", model="claude-sonnet-4-5")),
+            provider_config=ProviderConfig(provider_id="anthropic", model="claude-sonnet-4-5"),
             prompt="Prompt",
             system_prompt="System",
             input_budget=400,
         )
 
     assert backend.invoked is False
+
+
+def test_bulk_worker_chunk_fit_uses_local_estimates_for_real_gateway_backend(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    group = BulkAnalysisGroup.create("Group")
+    worker = BulkAnalysisWorker(
+        project_dir=tmp_path,
+        group=group,
+        files=[],
+        metadata=ProjectMetadata(case_name="Case"),
+        force_rerun=False,
+        llm_backend=PydanticAIGatewayBackend(api_key="gateway-key", base_url="https://gateway.example.com"),
+    )
+
+    monkeypatch.setattr(worker._llm_backend, "count_input_tokens", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("backend count should not be used during chunk fit")))
+
+    document = worker_module.BulkAnalysisDocument(
+        source_path=tmp_path / "doc.md",
+        relative_path="doc.md",
+        output_path=tmp_path / "out.md",
+    )
+    bundle = worker_module.PromptBundle(
+        system_template="System",
+        user_template="Analyze {document_content}",
+    )
+
+    chunks = worker._generate_fitting_chunks(
+        provider=object(),
+        provider_config=ProviderConfig(provider_id="anthropic", model="claude-sonnet-4-6"),
+        bundle=bundle,
+        system_prompt="System",
+        document=document,
+        body="Short body text",
+        placeholder_values={},
+        input_budget=10_000,
+        initial_chunk_tokens=4_000,
+    )
+
+    assert chunks
+
+
+def test_bulk_worker_real_gateway_backend_skips_duplicate_exact_preflight(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    group = BulkAnalysisGroup.create("Group")
+    backend = PydanticAIGatewayBackend(api_key="gateway-key", base_url="https://gateway.example.com")
+    worker = BulkAnalysisWorker(
+        project_dir=tmp_path,
+        group=group,
+        files=[],
+        metadata=ProjectMetadata(case_name="Case"),
+        force_rerun=False,
+        llm_backend=backend,
+    )
+
+    monkeypatch.setattr(
+        backend,
+        "count_input_tokens",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("duplicate exact preflight should be deferred to backend invoke")),
+    )
+    monkeypatch.setattr(
+        backend,
+        "invoke_response",
+        lambda *_args, **_kwargs: _model_response("summary", model_name="claude-sonnet-4-6", output_tokens=1),
+    )
+
+    result = worker._invoke_provider(
+        provider=object(),
+        provider_config=ProviderConfig(provider_id="anthropic", model="claude-sonnet-4-6"),
+        prompt="Prompt",
+        system_prompt="System",
+        input_budget=10_000,
+    )
+
+    assert result == "summary"
+
+
+def test_bulk_worker_applies_reasoning_settings_to_llm_request(tmp_path: Path) -> None:
+    group = BulkAnalysisGroup.create("Group")
+    group.use_reasoning = True
+    backend = _CountingBackend(token_count=10)
+    worker = BulkAnalysisWorker(
+        project_dir=tmp_path,
+        group=group,
+        files=[],
+        metadata=ProjectMetadata(case_name="Case"),
+        force_rerun=False,
+        llm_backend=backend,
+    )
+
+    result = worker._invoke_provider(
+        provider=worker._create_provider(ProviderConfig(provider_id="anthropic", model="claude-sonnet-4-5")),
+        provider_config=ProviderConfig(provider_id="anthropic", model="claude-sonnet-4-5"),
+        prompt="Prompt",
+        system_prompt="System",
+    )
+
+    assert result == "summary"
+    assert backend.invoked is True
+    assert backend.requests[0].model_settings["anthropic_thinking"] == {
+        "type": "enabled",
+        "budget_tokens": 4000,
+    }
 
 
 def test_bulk_worker_force_rerun_reprocesses(tmp_path: Path, qtbot, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -467,7 +622,7 @@ def test_bulk_worker_applies_placeholder_values(tmp_path: Path, monkeypatch: pyt
         user_template="Summary of {source_pdf_filename} for {client_name}",
     )
 
-    provider_config = ProviderConfig(provider_id="anthropic", model="model")
+    provider_config = ProviderConfig(provider_id="anthropic", model="claude-sonnet-4-5")
     captured: dict[str, list[str]] = {"system": [], "user": []}
 
     def fake_invoke(self, provider, config, prompt, system_prompt, **_kwargs):  # noqa: ANN001
@@ -516,9 +671,11 @@ def test_invoke_provider_rejects_over_budget_prompt(tmp_path: Path) -> None:
         files=[],
         metadata=ProjectMetadata(case_name="Case"),
         force_rerun=True,
+        llm_backend=_ResultBackend(
+            _model_response("summary", model_name="claude-sonnet-4-5-20250929", output_tokens=1)
+        ),
     )
 
-    provider = _FakeProvider()
     config = ProviderConfig(provider_id="anthropic", model="claude-sonnet-4-5-20250929")
 
     def fake_count(*_args, **_kwargs):  # noqa: ANN001
@@ -528,49 +685,13 @@ def test_invoke_provider_rejects_over_budget_prompt(tmp_path: Path) -> None:
 
     with pytest.raises(RuntimeError, match="Prompt exceeds model input budget"):
         worker._invoke_provider(
-            provider,  # type: ignore[arg-type]
+            object(),
             config,
             "user prompt",
             "system prompt",
             input_budget=10_000,
             context_label="document 'doc.md'",
         )
-
-
-def test_invoke_provider_compat_supports_legacy_override_signature(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    group = BulkAnalysisGroup.create("Group")
-    worker = BulkAnalysisWorker(
-        project_dir=tmp_path,
-        group=group,
-        files=[],
-        metadata=ProjectMetadata(case_name="Case"),
-        force_rerun=True,
-    )
-    config = ProviderConfig(provider_id="anthropic", model="claude")
-
-    def legacy_invoke(self, provider, provider_config, prompt, system_prompt):  # noqa: ANN001
-        return "summary"
-
-    monkeypatch.setattr(BulkAnalysisWorker, "_invoke_provider", legacy_invoke)
-    caplog.clear()
-    caplog.set_level("WARNING")
-
-    result = worker._invoke_provider_compat(
-        object(),  # type: ignore[arg-type]
-        config,
-        "prompt",
-        "system",
-        input_budget=5_000,
-        context_label="legacy-override",
-    )
-
-    assert result == "summary"
-    assert any("dropped unsupported kwargs" in rec.message for rec in caplog.records)
-
 
 def test_process_document_forces_chunking_when_full_prompt_exceeds_budget(
     tmp_path: Path,
@@ -593,6 +714,9 @@ def test_process_document_forces_chunking_when_full_prompt_exceeds_budget(
         force_rerun=True,
         placeholder_values={},
         project_name="Project XYZ",
+        llm_backend=_ResultBackend(
+            _model_response("summary", model_name="claude-sonnet-4-5-20250929", output_tokens=1)
+        ),
     )
 
     bundle = worker_module.PromptBundle(
@@ -600,13 +724,22 @@ def test_process_document_forces_chunking_when_full_prompt_exceeds_budget(
         user_template="Analyze {document_content}",
     )
     provider_config = ProviderConfig(provider_id="anthropic", model="claude-sonnet-4-5-20250929")
-    provider = _FakeProvider()
 
     monkeypatch.setattr(worker_module, "should_chunk", lambda *_args, **_kwargs: (False, 100, 130_000))
     monkeypatch.setattr(worker, "_max_input_budget", lambda **_kwargs: 50_000)
     monkeypatch.setattr(worker_module, "generate_chunks", lambda *_args, **_kwargs: ["chunk-1", "chunk-2"])
 
-    def fake_count(_provider, _config, _system, prompt):  # noqa: ANN001
+    def fake_count(
+        _provider,
+        _config,
+        _system,
+        prompt,
+        *,
+        max_tokens=32_000,
+        allow_backend_preflight=True,
+    ):  # noqa: ANN001
+        assert max_tokens > 0
+        _ = allow_backend_preflight
         if "chunk 1 of 2" in prompt:
             return 8_000
         if "chunk 2 of 2" in prompt:
@@ -634,7 +767,7 @@ def test_process_document_forces_chunking_when_full_prompt_exceeds_budget(
     )
 
     summary, run_details, _ = worker._process_document(
-        provider=provider,  # type: ignore[arg-type]
+        provider=object(),
         provider_config=provider_config,
         bundle=bundle,
         system_prompt=system_prompt,
@@ -673,7 +806,7 @@ def test_bulk_worker_surfaces_gateway_spend_limit_rejection(
     monkeypatch.setattr(
         BulkAnalysisWorker,
         "_resolve_provider",
-        lambda self: ProviderConfig(provider_id="anthropic", model="claude"),
+        lambda self: ProviderConfig(provider_id="anthropic", model="claude-sonnet-4-5"),
     )
     monkeypatch.setattr(
         BulkAnalysisWorker,
@@ -688,15 +821,7 @@ def test_bulk_worker_surfaces_gateway_spend_limit_rejection(
         metadata=metadata,
         force_rerun=True,
         llm_backend=_ResultBackend(
-            LLMInvocationResult(
-                success=False,
-                content="",
-                error="Gateway spend limit exceeded",
-                usage={},
-                provider="gateway/anthropic",
-                model="claude",
-                raw={},
-            )
+            RuntimeError("Gateway spend limit exceeded")
         ),
     )
 

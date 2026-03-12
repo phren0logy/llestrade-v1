@@ -9,6 +9,8 @@ from typing import Any, Sequence
 
 import frontmatter
 import pytest
+from pydantic_ai.messages import ModelResponse, TextPart, ThinkingPart
+from pydantic_ai.usage import RequestUsage
 
 PySide6 = pytest.importorskip("PySide6")
 from PySide6.QtWidgets import QApplication
@@ -21,10 +23,17 @@ from src.app.core.report_inputs import REPORT_CATEGORY_CONVERTED
 from src.app.workers import bulk_analysis_worker, bulk_reduce_worker, report_common, report_worker
 from src.app.workers.bulk_analysis_worker import BulkAnalysisWorker
 from src.app.workers.bulk_reduce_worker import BulkReduceWorker
-from src.app.workers.llm_backend import LLMExecutionBackend, LLMInvocationRequest, LLMInvocationResult
+from src.app.workers.llm_backend import (
+    LLMExecutionBackend,
+    LLMInvocationRequest,
+    LLMProviderRequest,
+    ProviderMetadata,
+    build_model_settings,
+    normalize_model_name,
+    provider_capabilities,
+    resolve_model_name,
+)
 from src.app.workers.report_worker import DraftReportWorker, ReportRefinementWorker
-from src.common.llm.base import BaseLLMProvider
-from src.common.llm.tokens import TokenCounter
 
 _FIXED_NOW = datetime(2026, 3, 9, 12, 34, 56, tzinfo=timezone.utc)
 _FIXED_EPOCH = _FIXED_NOW.timestamp()
@@ -46,59 +55,51 @@ class _FrozenDateTime(datetime):
         return _FIXED_NOW.astimezone(tz)
 
 
-class _SequenceLegacyProvider(BaseLLMProvider):
-    def __init__(self, payloads: Sequence[dict[str, Any]]) -> None:
-        super().__init__(timeout=0, max_retries=0, default_system_prompt="stub", debug=False)
-        self.set_initialized(True)
-        self._payloads = [dict(payload) for payload in payloads]
-
-    def generate(  # type: ignore[override]
-        self,
-        prompt: str,
-        model: str | None = None,
-        max_tokens: int = 32000,
-        temperature: float = 0.1,
-        system_prompt: str | None = None,
-    ) -> dict[str, Any]:
-        _ = prompt, model, max_tokens, temperature, system_prompt
-        if not self._payloads:
-            raise AssertionError("Legacy provider called more times than expected")
-        return self._payloads.pop(0)
-
-    def count_tokens(self, text: str | None = None, messages: list[dict] | None = None) -> dict[str, Any]:  # noqa: ARG002
-        content = text or ""
-        token_info = TokenCounter.count(
-            text=content,
-            provider=self.provider_name,
-            model=self.default_model,
-        )
-        if token_info.get("success"):
-            counted = int(token_info.get("token_count") or 0)
-            conservative = max(len(content) // 3, 1)
-            return {"success": True, "token_count": max(counted, conservative)}
-        return {"success": True, "token_count": max(len(content) // 4, 1)}
-
-    @property
-    def provider_name(self) -> str:  # type: ignore[override]
-        return "anthropic"
-
-    @property
-    def default_model(self) -> str:  # type: ignore[override]
-        return "claude-sonnet-4-5"
+def _model_response(
+    content: str,
+    *,
+    model_name: str = "claude-sonnet-4-5",
+    output_tokens: int = 101,
+    reasoning: str | None = None,
+) -> ModelResponse:
+    parts: list[object] = []
+    if reasoning:
+        parts.append(ThinkingPart(reasoning))
+    parts.append(TextPart(content))
+    return ModelResponse(
+        parts=parts,
+        usage=RequestUsage(input_tokens=1, output_tokens=output_tokens),
+        model_name=model_name,
+    )
 
 
-class _SequenceGatewayBackend(LLMExecutionBackend):
-    def __init__(self, payloads: Sequence[LLMInvocationResult]) -> None:
+class _SequenceBackend(LLMExecutionBackend):
+    def __init__(self, payloads: Sequence[ModelResponse | Exception]) -> None:
         self._payloads = list(payloads)
 
-    def requires_native_provider(self) -> bool:
-        return False
+    def normalize_model(self, provider_id: str, model: str | None) -> str | None:
+        return normalize_model_name(provider_id, model)
 
-    def invoke(self, provider, request: LLMInvocationRequest) -> LLMInvocationResult:  # noqa: ANN001
+    def resolve_model(self, provider_id: str, model: str | None) -> str | None:
+        return resolve_model_name(provider_id, model)
+
+    def capabilities(self, provider_id: str, model: str | None):
+        return provider_capabilities(provider_id, model)
+
+    def build_model_settings(self, provider_id: str, model: str | None, **kwargs):
+        return build_model_settings(provider_id, model, **kwargs)
+
+    def create_provider(self, request: LLMProviderRequest) -> object:
+        return ProviderMetadata(provider_name=request.provider_id, default_model=request.model or "default-model")
+
+    def invoke_response(self, provider, request: LLMInvocationRequest) -> ModelResponse:  # noqa: ANN001
         _ = provider, request
         if not self._payloads:
-            raise AssertionError("Gateway backend called more times than expected")
-        return self._payloads.pop(0)
+            raise AssertionError("Sequence backend called more times than expected")
+        payload = self._payloads.pop(0)
+        if isinstance(payload, Exception):
+            raise payload
+        return payload
 
 
 def _freeze_worker_time(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -241,6 +242,7 @@ def _prepare_bulk_project(project_dir: Path) -> tuple[BulkAnalysisGroup, BulkAna
     map_group = BulkAnalysisGroup.create(
         "Parity Map",
         files=["doc.md"],
+        provider_id="anthropic",
         model="claude-sonnet-4-5",
         system_prompt_path="prompts/bulk_system.md",
         user_prompt_path="prompts/bulk_user.md",
@@ -250,6 +252,7 @@ def _prepare_bulk_project(project_dir: Path) -> tuple[BulkAnalysisGroup, BulkAna
 
     reduce_group = BulkAnalysisGroup.create(
         "Parity Reduce",
+        provider_id="anthropic",
         model="claude-sonnet-4-5",
         system_prompt_path="prompts/bulk_system.md",
         user_prompt_path="prompts/reduce_user.md",
@@ -268,16 +271,13 @@ def _gateway_result(
     *,
     model: str = "claude-sonnet-4-5",
     output_tokens: int = 101,
-    raw: dict[str, Any] | None = None,
-) -> LLMInvocationResult:
-    return LLMInvocationResult(
-        success=True,
-        content=content,
-        error=None,
-        usage={"output_tokens": output_tokens},
-        provider="gateway/anthropic",
-        model=model,
-        raw=raw or {},
+    reasoning: str | None = None,
+) -> ModelResponse:
+    return _model_response(
+        content,
+        model_name=model,
+        output_tokens=output_tokens,
+        reasoning=reasoning,
     )
 
 
@@ -298,16 +298,14 @@ def _run_report_pipeline(
     placeholder_values = {"client_name": "ACME Inc"}
 
     if legacy:
-        draft_provider = _SequenceLegacyProvider(
+        draft_backend = _SequenceBackend(
             [
-                {"success": True, "content": "Section output 1", "usage": {"output_tokens": 101}},
-                {"success": True, "content": "Section output 2", "usage": {"output_tokens": 102}},
+                _model_response("Section output 1", model_name="claude-sonnet-4-5", output_tokens=101),
+                _model_response("Section output 2", model_name="claude-sonnet-4-5", output_tokens=102),
             ]
         )
-        monkeypatch.setattr(report_common, "create_provider", lambda **_: draft_provider, raising=False)
-        draft_backend = None
     else:
-        draft_backend = _SequenceGatewayBackend(
+        draft_backend = _SequenceBackend(
             [
                 _gateway_result("Section output 1"),
                 _gateway_result("Section output 2", output_tokens=102),
@@ -343,25 +341,23 @@ def _run_report_pipeline(
     draft_path = Path(draft_result["draft_path"])
 
     if legacy:
-        refine_provider = _SequenceLegacyProvider(
+        refine_backend = _SequenceBackend(
             [
-                {
-                    "success": True,
-                    "content": "Refined content",
-                    "usage": {"output_tokens": 111},
-                    "reasoning": "Reasoning trace",
-                }
+                _model_response(
+                    "Refined content",
+                    model_name="claude-sonnet-4-5",
+                    output_tokens=111,
+                    reasoning="Reasoning trace",
+                )
             ]
         )
-        monkeypatch.setattr(report_common, "create_provider", lambda **_: refine_provider, raising=False)
-        refine_backend = None
     else:
-        refine_backend = _SequenceGatewayBackend(
+        refine_backend = _SequenceBackend(
             [
                 _gateway_result(
                     "Refined content",
                     output_tokens=111,
-                    raw={"reasoning": "Reasoning trace"},
+                    reasoning="Reasoning trace",
                 )
             ]
         )
@@ -416,11 +412,13 @@ def _run_bulk_map(
     metadata = ProjectMetadata(case_name="Case")
 
     if legacy:
-        provider = _SequenceLegacyProvider([{"success": True, "content": "summary", "usage": {"output_tokens": 7}}])
-        monkeypatch.setattr(bulk_analysis_worker, "create_provider", lambda **_: provider, raising=False)
-        llm_backend = None
+        llm_backend = _SequenceBackend(
+            [
+                _model_response("summary", model_name="claude-sonnet-4-5", output_tokens=7)
+            ]
+        )
     else:
-        llm_backend = _SequenceGatewayBackend([_gateway_result("summary", output_tokens=7)])
+        llm_backend = _SequenceBackend([_gateway_result("summary", output_tokens=7)])
 
     worker = BulkAnalysisWorker(
         project_dir=project_dir,
@@ -452,11 +450,13 @@ def _run_bulk_reduce(
     metadata = ProjectMetadata(case_name="Case")
 
     if legacy:
-        provider = _SequenceLegacyProvider([{"success": True, "content": "summary", "usage": {"output_tokens": 7}}])
-        monkeypatch.setattr(bulk_reduce_worker, "create_provider", lambda **_: provider, raising=False)
-        llm_backend = None
+        llm_backend = _SequenceBackend(
+            [
+                _model_response("summary", model_name="claude-sonnet-4-5", output_tokens=7)
+            ]
+        )
     else:
-        llm_backend = _SequenceGatewayBackend([_gateway_result("summary", output_tokens=7)])
+        llm_backend = _SequenceBackend([_gateway_result("summary", output_tokens=7)])
 
     worker = BulkReduceWorker(
         project_dir=project_dir,

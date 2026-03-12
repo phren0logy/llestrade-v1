@@ -29,6 +29,7 @@ class ReportDraftJobConfig:
     generation_user_prompt_path: Path
     generation_system_prompt_path: Path
     metadata: ProjectMetadata
+    use_reasoning: bool = False
     max_report_tokens: int = 60_000
     placeholder_values: Mapping[str, str] | None = None
     project_name: str = ""
@@ -50,6 +51,7 @@ class ReportRefinementJobConfig:
     refinement_user_prompt_path: Path
     refinement_system_prompt_path: Path
     metadata: ProjectMetadata
+    use_reasoning: bool = False
     max_report_tokens: int = 60_000
     placeholder_values: Mapping[str, str] | None = None
     project_name: str = ""
@@ -91,6 +93,7 @@ class ReportsService:
         on_log: Callable[[str], None],
         on_finished: Callable[[dict], None],
         on_failed: Callable[[str], None],
+        on_cost: Callable[[float, str, str], None],
     ) -> bool:
         if self.is_running():
             return False
@@ -102,6 +105,7 @@ class ReportsService:
             model=config.model,
             custom_model=config.custom_model,
             context_window=config.context_window,
+            use_reasoning=config.use_reasoning,
             template_path=config.template_path,
             transcript_path=config.transcript_path,
             generation_user_prompt_path=config.generation_user_prompt_path,
@@ -121,6 +125,7 @@ class ReportsService:
             on_log=on_log,
             on_finished=on_finished,
             on_failed=on_failed,
+            on_cost=on_cost,
         )
 
     # ------------------------------------------------------------------
@@ -135,6 +140,7 @@ class ReportsService:
         on_log: Callable[[str], None],
         on_finished: Callable[[dict], None],
         on_failed: Callable[[str], None],
+        on_cost: Callable[[float, str, str], None],
     ) -> bool:
         if self.is_running():
             return False
@@ -147,6 +153,7 @@ class ReportsService:
             model=config.model,
             custom_model=config.custom_model,
             context_window=config.context_window,
+            use_reasoning=config.use_reasoning,
             template_path=config.template_path,
             transcript_path=config.transcript_path,
             refinement_user_prompt_path=config.refinement_user_prompt_path,
@@ -166,6 +173,7 @@ class ReportsService:
             on_log=on_log,
             on_finished=on_finished,
             on_failed=on_failed,
+            on_cost=on_cost,
         )
 
     # ------------------------------------------------------------------
@@ -181,9 +189,12 @@ class ReportsService:
         on_log: Callable[[str], None],
         on_finished: Callable[[dict], None],
         on_failed: Callable[[str], None],
+        on_cost: Callable[[float, str, str], None],
     ) -> bool:
         worker.progress.connect(on_progress)
         worker.log_message.connect(on_log)
+        if hasattr(worker, "cost_calculated"):
+            worker.cost_calculated.connect(on_cost)
         worker.finished.connect(lambda result, w=worker, k=key: self._handle_finished(k, w, result, on_finished))
         worker.failed.connect(lambda message, w=worker, k=key: self._handle_failed(k, w, message, on_failed))
 

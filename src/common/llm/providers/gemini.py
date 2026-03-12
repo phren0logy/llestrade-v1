@@ -29,6 +29,7 @@ class GeminiProvider(BaseLLMProvider):
         super().__init__(timeout, max_retries, default_system_prompt, debug, parent)
         self.client: Any = None
         self._genai_module: Any = None
+        self._default_model_name: str = os.getenv("GEMINI_MODEL", "").strip()
         self._init_client(api_key)
 
     def _resolve_api_key(self, explicit_key: Optional[str]) -> Optional[str]:
@@ -74,7 +75,13 @@ class GeminiProvider(BaseLLMProvider):
 
     @property
     def default_model(self) -> str:
-        return os.getenv("GEMINI_MODEL", "gemini-2.5-pro")
+        if self._default_model_name:
+            return self._default_model_name
+
+        from src.app.core.llm_catalog import runtime_default_model_for_provider
+
+        self._default_model_name = runtime_default_model_for_provider("gemini") or ""
+        return self._default_model_name
 
     def _build_prompt(self, prompt: str, system_prompt: Optional[str]) -> str:
         active_system = system_prompt or self.default_system_prompt

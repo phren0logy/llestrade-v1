@@ -42,12 +42,14 @@ def test_gemini_client():
     
     assert gemini_client.initialized, "Failed to initialize Gemini client"
     logging.info("✅ Gemini client initialized successfully")
+    model_name = gemini_client.default_model
+    assert model_name, "Gemini client should expose a default model"
     
     # Test a simple response
     logging.info("Testing Gemini response generation...")
     response = gemini_client.generate(
         prompt="What is the capital of France?",
-        model="gemini-2.5-pro-preview-05-06",
+        model=model_name,
         temperature=0.1,
     )
     
@@ -84,11 +86,13 @@ def test_auto_client_fallback():
         
         assert hasattr(auto_client, 'initialized') and auto_client.initialized, "Auto client selection should have initialized a working client"
         logging.info("✅ Auto client selection correctly fell back to a working client")
+        model_name = getattr(auto_client, "default_model", "")
+        assert model_name, "Auto-selected client should expose a default model"
         
         # Test a response
         response = auto_client.generate(
             prompt="Tell me a short joke.",
-            model="gemini-2.5-pro-preview-05-06",
+            model=model_name,
             temperature=0.7,
         )
         

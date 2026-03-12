@@ -19,11 +19,12 @@ def test_bulk_analysis_group_save_and_load(project_manager: ProjectManager):
         name="Clinical Records",
         files=["medical/doc1.md"],
         directories=["medical"],
-        provider_id="anthropic",
-        model="claude-sonnet-4-5-20250929",
+        provider_id="openai",
+        model="gpt-4.1",
         system_prompt_path="resources/prompts/system.md",
         user_prompt_path="resources/prompts/user.md",
     )
+    group.use_reasoning = True
 
     saved = project_manager.save_bulk_analysis_group(group)
     assert saved.group_id in {g.group_id for g in project_manager.list_bulk_analysis_groups()}
@@ -36,7 +37,8 @@ def test_bulk_analysis_group_save_and_load(project_manager: ProjectManager):
     assert loaded_group.directories == ["medical"]
     assert loaded_group.system_prompt_path == "resources/prompts/system.md"
     assert loaded_group.user_prompt_path == "resources/prompts/user.md"
-    assert loaded_group.provider_id == "anthropic"
+    assert loaded_group.provider_id == "openai"
+    assert loaded_group.use_reasoning is True
 
 
 def test_bulk_analysis_group_slug_uniqueness(project_manager: ProjectManager):
@@ -60,3 +62,21 @@ def test_refresh_bulk_analysis_groups_updates_cache(project_manager: ProjectMana
     project_manager.bulk_analysis_groups = {}
     groups = project_manager.refresh_bulk_analysis_groups()
     assert len(groups) == 1
+
+
+def test_bulk_analysis_group_load_clears_stale_context_for_catalog_model(
+    project_manager: ProjectManager,
+):
+    group = BulkAnalysisGroup.create(
+        name="Anthropic Group",
+        files=["medical/doc1.md"],
+        provider_id="anthropic",
+        model="claude-sonnet-4-6",
+    )
+    group.model_context_window = 1_000_000
+
+    project_manager.save_bulk_analysis_group(group)
+
+    reloaded = load_bulk_analysis_groups(project_manager.project_dir)
+    assert len(reloaded) == 1
+    assert reloaded[0].model_context_window is None

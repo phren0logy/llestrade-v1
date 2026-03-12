@@ -11,15 +11,40 @@ Current local baseline:
 - Installed package: `pydantic-ai-slim 1.67.0`
 - Current app pattern: worker-driven imperative LLM calls, custom provider wrappers, custom token budgeting, custom retry/fallback paths, and custom Phoenix/OpenTelemetry spans
 
+## Current Progress
+
+The worker runtime has already advanced materially beyond the original starting point for this plan.
+
+Completed in the current worker/backend layer:
+
+- `direct` Pydantic AI requests now power both the direct-provider and gateway-backed worker paths in [`src/app/workers/llm_backend.py`](../src/app/workers/llm_backend.py).
+- Provider/model normalization is centralized in [`src/app/workers/llm_backend.py`](../src/app/workers/llm_backend.py), including gateway model IDs and provider-specific aliases such as Bedrock Claude mappings.
+- `UsageLimits` is now used in the worker backend layer for request budgeting, with provider-aware pre-request token counting where supported.
+- Gateway-specific retry transport and model-level concurrency limiting are implemented in [`src/app/workers/llm_backend.py`](../src/app/workers/llm_backend.py).
+- The old worker-runtime fallback escape hatch has been removed. Worker execution no longer falls back to `src.common.llm.factory` or legacy `provider.generate(...)` paths.
+- The old `LegacyProviderBackend` name has been retired in favor of `PydanticAIDirectBackend`.
+- Full `ModelResponse` passthrough is implemented in the worker backend. Success paths return raw Pydantic AI responses and failure paths raise exceptions.
+- `genai-prices` now backs preset model catalogs, context windows, and run-cost calculation in the current bulk/report path.
+- Gemini preset selection now uses live Google model discovery with cached fallback, while `genai-prices` continues to supply pricing metadata when available.
+
+Still open:
+
+- model-level instrumentation via Pydantic AI / InstrumentedModel
+- upstream failover via `FallbackModel` and/or Gateway routing groups
+- residual cleanup in non-worker legacy code under [`src/common/llm/`](../src/common/llm/) and [`src/config/app_config.py`](../src/config/app_config.py)
+- later-phase items such as structured outputs, evals, toolsets, and durable execution
+
 ## Current State
 
 The current LLM execution path is centered on custom abstractions:
 
-- [`src/app/workers/llm_backend.py`](../src/app/workers/llm_backend.py) provides `LLMExecutionBackend`, `LegacyProviderBackend`, and `PydanticAIGatewayBackend`.
+- [`src/app/workers/llm_backend.py`](../src/app/workers/llm_backend.py) provides `LLMExecutionBackend`, `PydanticAIDirectBackend`, and `PydanticAIGatewayBackend`.
 - [`src/app/workers/bulk_analysis_worker.py`](../src/app/workers/bulk_analysis_worker.py) and [`src/app/workers/bulk_reduce_worker.py`](../src/app/workers/bulk_reduce_worker.py) perform custom prompt budgeting, chunk sizing, and provider invocation.
 - [`src/app/workers/report_common.py`](../src/app/workers/report_common.py) and [`src/app/workers/report_worker.py`](../src/app/workers/report_worker.py) build prompts and call providers imperatively.
 - [`src/common/llm/tokens.py`](../src/common/llm/tokens.py) implements mixed token-counting strategies, including provider-specific fallbacks and character-based estimates.
 - [`src/config/observability.py`](../src/config/observability.py) emits app-specific Phoenix/OpenTelemetry spans around worker stages.
+- The worker backend now uses Pydantic AI `direct` plus raw `ModelResponse` passthrough for worker execution. Remaining custom logic is primarily in prompt assembly, chunk planning, checkpointing, and the surrounding worker orchestration.
+- Above that worker backend seam, bulk-analysis and reports now share one selector/settings surface. The main remaining drift is in legacy bootstrap/settings code outside the shared worker path.
 
 This architecture is reasonable for a desktop app with long-running jobs and file-based checkpoints, but it currently duplicates several upstream capabilities that Pydantic AI already provides.
 
@@ -40,10 +65,32 @@ What it should replace:
 
 Replacement status:
 
-- Partial replacement at first. Keep the app-level worker abstractions, cancellation, checkpointing, and prompt assembly.
-- Replace only the low-level request execution and response normalization layer.
+- Completed for the worker runtime.
+- The app-level worker abstractions, cancellation, checkpointing, and prompt assembly still remain, but low-level request execution has already moved onto Pydantic AI `direct`.
 
-### 2. Use Model Strings and Provider/Profile Resolution Instead of Expanding Custom Provider Branches
+### 2. Use Full ModelResponse Passthrough for Worker Results
+
+Use raw [`ModelResponse`](https://ai.pydantic.dev/api/messages/) objects as the worker-backend success result instead of flattening them into a custom `content/raw` envelope.
+
+Why:
+
+- Pydantic AI represents reasoning through `ModelResponse.parts`, including `ThinkingPart`, rather than through a flat reasoning string.
+- Flattening to `response.text` discards structured response parts and makes reasoning support brittle.
+- A full passthrough boundary keeps the app aligned with upstream abstractions and avoids inventing a partial custom mirror of Pydantic AI's response model.
+
+What it should replace:
+
+- flattened `response.text`-only normalization in [`src/app/workers/llm_backend.py`](../src/app/workers/llm_backend.py)
+- `response.raw["reasoning"]` / `response.raw["thinking"]` recovery logic in worker call sites
+- worker-side reasoning heuristics that depend on guessed response shape instead of real Pydantic AI response parts
+
+Replacement status:
+
+- Implemented for the worker runtime.
+- Backend success now returns raw `ModelResponse`; backend failure raises exceptions instead of returning a flattened success/error envelope.
+- Workers should continue consuming `response.text` for final answer text, `response.parts` for reasoning-aware behavior, and `response.usage` for token accounting.
+
+### 3. Use Model Strings and Provider/Profile Resolution Instead of Expanding Custom Provider Branches
 
 Use the model-string approach documented in the [Models overview](https://ai.pydantic.dev/models/overview/) and [Gateway docs](https://ai.pydantic.dev/gateway/) rather than continuing to grow custom provider branching logic.
 
@@ -59,10 +106,11 @@ What it should replace:
 
 Replacement status:
 
-- Full replacement for provider/model selection logic in the Gateway-backed path.
-- Keep a narrow compatibility layer only where the app still needs settings-specific provider construction for legacy providers.
+- Largely complete for worker execution.
+- Direct-provider and gateway-backed workers now resolve provider/model naming centrally in [`src/app/workers/llm_backend.py`](../src/app/workers/llm_backend.py).
+- Remaining legacy compatibility is outside the worker runtime, primarily in [`src/common/llm/`](../src/common/llm/) and [`src/config/app_config.py`](../src/config/app_config.py).
 
-### 3. Use UsageLimits for Pre-Request Token Enforcement Where Supported
+### 4. Use UsageLimits for Pre-Request Token Enforcement Where Supported
 
 Use [`UsageLimits`](https://ai.pydantic.dev/api/usage/) and `count_tokens_before_request=True` for providers that support real token preflight.
 
@@ -77,15 +125,51 @@ What it should replace:
 
 Replacement status:
 
-- Partial replacement.
-- Keep custom chunk planning and file/document-level budgeting because the app still has domain-specific prompt assembly, evidence ledgers, and hierarchical chunking.
+- Implemented in the worker backend layer.
+- The remaining custom logic is the app-specific part that should stay custom: chunk planning, file/document-level budgeting, evidence ledgers, and hierarchical chunking.
 
 Provider caveat:
 
 - In the current installed version, Anthropic, Google, and Bedrock support real `count_tokens(...)` preflight.
 - Installed `OpenAIChatModel` still raises `NotImplementedError` for pre-request token counting, so OpenAI and Azure OpenAI must continue to use fallback counting for this specific feature.
 
-### 4. Use ConcurrencyLimitedModel for Shared Provider/Gateway Throughput Caps
+### 5. Unify LLM Operation Settings Across Bulk Analysis and Reports
+
+Use one shared LLM operation settings contract plus one shared selector surface above the worker backend seam.
+
+Why:
+
+- Bulk and reports already share the same worker backend, but still duplicate provider/model selection, reasoning enablement, and persistence adapters.
+- This is the next useful consolidation step after backend cutover because it removes UI and controller drift without forcing worker-orchestration unification.
+- It keeps the app aligned with the current backend architecture: one shared provider-capability layer with workflow-specific orchestration above it.
+
+What it should replace:
+
+- duplicated provider/model selector construction in bulk and report UI
+- report-specific fake `custom` provider handling and bulk-specific silent Anthropic custom-model coercion
+- separate reasoning UX policy above the backend seam for bulk and reports
+
+Initial scope:
+
+- one shared settings contract for `provider_id`, `model_id`, optional custom `context_window`, and `use_reasoning`
+- one shared selector UI for Anthropic, OpenAI, and Gemini, backed by `genai-prices`
+- binary `use_reasoning` as the primary control in both workflows
+- an “Advanced reasoning settings” affordance that uses provider defaults when no richer stable controls are exposed
+
+Out of scope:
+
+- unifying report and bulk worker orchestration
+- changing workflow-specific prompt assembly, checkpointing, manifests, or chunk planning
+- exposing Azure OpenAI in the shared selector before the non-Azure providers are validated in the unified UI
+
+Replacement status:
+
+- Implemented for the bulk/report UI and persistence layer above the worker backend seam.
+- Preset model metadata in the shared selector now comes from `genai-prices`, with Gemini availability and context windows refined by live Google model discovery plus cached fallback.
+- Bedrock remains supported in backend/legacy paths but is not part of the shared preset selector.
+- Workflow-specific execution defaults such as report and bulk token/temperature settings remain intentionally separate.
+
+### 6. Use ConcurrencyLimitedModel for Shared Provider/Gateway Throughput Caps
 
 Adopt [`ConcurrencyLimitedModel`](https://ai.pydantic.dev/api/concurrency/) for model-level concurrency limits.
 
@@ -100,10 +184,10 @@ What it should replace:
 
 Replacement status:
 
-- Partial replacement.
-- Keep the current worker orchestration and job coordination; use model-level concurrency only for network request limiting.
+- Implemented for the worker backend layer.
+- Keep the current worker orchestration and job coordination; model-level concurrency is now used only for network request limiting.
 
-### 5. Use Instrumented Models for LLM-Layer Telemetry
+### 7. Use Instrumented Models for LLM-Layer Telemetry
 
 Adopt Pydantic AI's [Debugging and Monitoring / Logfire integration](https://ai.pydantic.dev/logfire/) and [`InstrumentedModel`](https://ai.pydantic.dev/api/models/instrumented/) for model-level telemetry.
 
@@ -121,7 +205,7 @@ Replacement status:
 - Partial replacement.
 - Keep current app-level worker/stage spans in [`src/config/observability.py`](../src/config/observability.py). They express domain workflow context that model instrumentation does not replace.
 
-### 6. Use Pydantic AI Retry Transports for Pydantic-AI-Backed Provider Paths
+### 8. Use Pydantic AI Retry Transports for Pydantic-AI-Backed Provider Paths
 
 Use the retry utilities in [HTTP Request Retries](https://ai.pydantic.dev/retries/) for paths that are executed through Pydantic AI providers or Gateway providers.
 
@@ -136,10 +220,10 @@ What it should replace:
 
 Replacement status:
 
-- Partial replacement.
+- Implemented for Gateway-backed worker execution, and standardized for the direct Pydantic AI worker backend as well.
 - Keep custom retry behavior when it is tied to provider SDK semantics or worker-level resume/cancellation behavior.
 
-### 7. Use FallbackModel and Gateway Routing for Cross-Provider Failover
+### 9. Use FallbackModel and Gateway Routing for Cross-Provider Failover
 
 Prefer [`FallbackModel`](https://ai.pydantic.dev/api/models/fallback/) and Gateway routing groups over app-specific failover logic.
 
@@ -156,6 +240,7 @@ Replacement status:
 
 - Partial replacement initially.
 - Gateway routing groups are the better long-term fit once Anthropic, Gemini, and OpenAI are all enabled behind the gateway.
+- The current worker runtime intentionally does not do app-side fallback anymore; the next failover step should use upstream routing/fallback abstractions rather than reintroducing local backend escape hatches.
 
 ## Useful Later
 
@@ -315,7 +400,8 @@ Do not remove current worker/stage observability just because Pydantic AI can em
 ### Confirmed Current Baseline
 
 - Installed locally: `pydantic-ai-slim 1.67.0`
-- Confirmed current app providers: Anthropic, Gemini, OpenAI, Azure OpenAI, Anthropic Bedrock
+- Confirmed current app/backend providers: Anthropic, Gemini, OpenAI, Azure OpenAI, Anthropic Bedrock
+- Current shared bulk/report preset selector providers: Anthropic, OpenAI, Gemini
 
 ### Real Token Preflight
 
@@ -330,6 +416,30 @@ Implication:
 
 - Real preflight token counting can be standardized for Anthropic, Gemini, and Bedrock now.
 - OpenAI and Azure OpenAI should use the same abstraction, but must still fall back for this specific feature until upstream support exists.
+
+### Reasoning / Thinking Support Is Not Yet Uniform
+
+Pydantic AI already provides a more uniform reasoning representation through [`ModelResponse.parts`](https://ai.pydantic.dev/api/messages/) and [`ThinkingPart`](https://ai.pydantic.dev/api/messages/), which is the main reason the worker backend should stop flattening responses.
+
+But reasoning enablement is still provider-specific in the current upstream docs:
+
+- Anthropic uses `anthropic_thinking`
+- Google uses `google_thinking_config`
+- OpenAI Responses uses `openai_reasoning_effort` and `openai_reasoning_summary`
+
+Implication:
+
+- the app should keep `use_reasoning` as a product-level intent flag
+- provider-specific reasoning settings should be centralized in the backend
+- the primary UX should stay binary: reasoning off/on
+- provider-specific advanced reasoning controls should live behind an affordance and default to safe backend-provided settings when unset
+- the app should not expect a single provider-agnostic reasoning-mode switch yet
+
+Roadmap reading:
+
+- There is no explicit upstream roadmap commitment to one provider-agnostic reasoning-mode API.
+- The direction appears to be toward more uniform reasoning representation, not fully uniform reasoning configuration semantics.
+- Reasoning-related upstream issues are best read as directional signals rather than promises.
 
 ### Multi-Provider Model Naming
 
@@ -369,9 +479,19 @@ But Gateway does not remove the need for app-level policy around:
 2. Centralize provider/model resolution around documented model strings and Gateway prefixes.
 3. Standardize token preflight on backend-supported `count_tokens(...)` plus `UsageLimits`, while keeping app-specific chunk planning.
 4. Add model-level concurrency limits, standardized retry transports, and provider/gateway failover through upstream abstractions.
-5. Adopt structured outputs and validators for selected workflows that currently depend on fragile text parsing.
-6. Add Pydantic Evals and span-based regression coverage after model-level instrumentation is stable.
-7. Revisit durable execution only if the product moves beyond the current desktop/file-checkpoint model.
+5. Replace flattened worker response handling with full `ModelResponse` passthrough and exception-based failure handling.
+6. Unify bulk/report LLM operation settings above the backend seam, including provider/model selection, reasoning UX, and shared persistence adapters.
+7. Adopt structured outputs and validators for selected workflows that currently depend on fragile text parsing.
+8. Add Pydantic Evals and span-based regression coverage after model-level instrumentation is stable.
+9. Revisit durable execution only if the product moves beyond the current desktop/file-checkpoint model.
+
+Status against this sequence:
+
+- Steps 1-6 are functionally complete on this branch for worker execution and bulk/report settings consolidation.
+- The remaining work on this branch is merge-readiness work: manual app smoke, small residual cleanup, and doc/status sync.
+- Structured outputs are the next major adoption area, but they should be handled in a follow-up branch after this refactor branch lands.
+- Pydantic Evals should follow that structured-output work rather than being mixed into this refactor branch.
+- The biggest remaining platform gaps after this branch are failover and deeper instrumentation follow-through.
 
 ## Sources
 
@@ -380,9 +500,11 @@ But Gateway does not remove the need for app-level policy around:
 - [Models overview](https://ai.pydantic.dev/models/overview/)
 - [Gateway overview](https://ai.pydantic.dev/gateway/)
 - [Providers API](https://ai.pydantic.dev/api/providers/)
+- [Messages API](https://ai.pydantic.dev/api/messages/)
 - [Usage / UsageLimits](https://ai.pydantic.dev/api/usage/)
 - [Concurrency](https://ai.pydantic.dev/api/concurrency/)
 - [FallbackModel](https://ai.pydantic.dev/api/models/fallback/)
+- [Thinking](https://ai.pydantic.dev/thinking/)
 - [Output](https://ai.pydantic.dev/output/)
 - [Dependencies](https://ai.pydantic.dev/dependencies/)
 - [Toolsets](https://ai.pydantic.dev/toolsets/)
@@ -390,8 +512,13 @@ But Gateway does not remove the need for app-level policy around:
 - [Built-in Tools](https://ai.pydantic.dev/builtin-tools/)
 - [Testing](https://ai.pydantic.dev/testing/)
 - [HTTP Request Retries](https://ai.pydantic.dev/retries/)
+- [Changelog](https://ai.pydantic.dev/changelog/)
 - [Logfire / Debugging and Monitoring](https://ai.pydantic.dev/logfire/)
 - [Instrumented Models API](https://ai.pydantic.dev/api/models/instrumented/)
 - [Pydantic Evals](https://ai.pydantic.dev/evals/)
 - [Span-Based Evaluation](https://ai.pydantic.dev/evals/evaluators/span-based/)
 - [Durable Execution Overview](https://ai.pydantic.dev/durable_execution/overview/)
+- [Roadmap issue](https://github.com/pydantic/pydantic-ai/issues/913)
+- [Reasoning response support](https://github.com/pydantic/pydantic-ai/issues/907)
+- [OpenAI encrypted thinking tokens](https://github.com/pydantic/pydantic-ai/issues/2127)
+- [ThinkingPart support for OpenAI chat models](https://github.com/pydantic/pydantic-ai/issues/2701)

@@ -13,6 +13,8 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 
 _ = PySide6
 
+from src.app.core.llm_catalog import default_model_for_provider
+from src.app.core.bulk_analysis_groups import BulkAnalysisGroup
 from src.app.core.conversion_manager import ConversionJob
 from src.app.core.project_manager import ProjectManager, ProjectMetadata
 from src.app.ui.dialogs.new_project_dialog import NewProjectDialog
@@ -216,6 +218,19 @@ def test_project_manager_update_conversion_helper_replaces_options(qt_app: QAppl
     assert manager.conversion_settings.options == {}
 
 
+def test_new_project_uses_catalog_backed_llm_defaults(tmp_path: Path, qt_app: QApplication) -> None:
+    assert qt_app is not None
+    manager = ProjectManager()
+
+    manager.create_project(tmp_path, ProjectMetadata(case_name="Default Model Demo"))
+
+    expected_model = default_model_for_provider("anthropic") or ""
+    assert manager.settings["llm_provider"] == "anthropic"
+    assert manager.settings["llm_model"] == expected_model
+    assert manager.report_state.last_provider == "anthropic"
+    assert manager.report_state.last_model == expected_model
+
+
 def test_file_tracker_counts_converted_documents(tmp_path: Path, qt_app: QApplication) -> None:
     assert qt_app is not None
     project_root = tmp_path / "projects"
@@ -324,6 +339,34 @@ def test_bulk_group_dialog_requires_selection(monkeypatch: pytest.MonkeyPatch, t
         assert group is None
         assert warnings
         assert "Select at least one converted file or directory" in warnings[-1]
+    finally:
+        dialog.deleteLater()
+
+
+def test_bulk_group_dialog_marks_legacy_group_without_provider_invalid(
+    tmp_path: Path,
+    qt_app: QApplication,
+) -> None:
+    assert qt_app is not None
+    projects_root = tmp_path / "projects"
+    projects_root.mkdir()
+    manager = ProjectManager()
+    manager.create_project(projects_root, ProjectMetadata(case_name="Legacy Group"))
+
+    converted_root = manager.project_dir / "converted_documents" / "folder"
+    converted_root.mkdir(parents=True)
+    (converted_root / "doc.md").write_text("content")
+
+    legacy_group = BulkAnalysisGroup.create("Legacy Group", files=["folder/doc.md"])
+    legacy_group.provider_id = ""
+    legacy_group.model = ""
+
+    dialog = BulkAnalysisGroupDialog(manager.project_dir, existing_group=legacy_group)
+    try:
+        settings, error = dialog.llm_settings_panel.current_settings()
+        assert settings is None
+        assert error is not None
+        assert "saved provider" in error.lower()
     finally:
         dialog.deleteLater()
 

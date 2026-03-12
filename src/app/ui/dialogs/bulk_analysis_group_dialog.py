@@ -23,7 +23,6 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
-    QSpinBox,
     QTableWidget,
     QTableWidgetItem,
     QTreeWidget,
@@ -37,14 +36,15 @@ from src.config.paths import app_resource_root
 from src.app.core.azure_artifacts import is_azure_raw_artifact
 from src.app.core.bulk_paths import iter_map_outputs, iter_map_outputs_under, resolve_map_output_path
 from src.app.core.bulk_analysis_groups import BulkAnalysisGroup
+from src.app.core.llm_catalog import default_model_for_provider
 from src.app.core.project_manager import ProjectMetadata
 from src.app.core.placeholders.analyzer import find_placeholders
 from src.app.core.prompt_placeholders import get_prompt_spec
 from src.app.core.prompt_preview import generate_prompt_preview, PromptPreviewError
 from src.app.core.prompt_placeholders import placeholder_summary
+from src.app.core.llm_operation_settings import LLMOperationSettings
+from src.app.ui.widgets import LLMSettingsPanel
 from .prompt_preview_dialog import PromptPreviewDialog
-from src.app.core.secure_settings import SecureSettings
-from src.common.llm.bedrock_catalog import DEFAULT_BEDROCK_MODELS, list_bedrock_models
 
 DEFAULT_SYSTEM_PROMPT = "prompts/document_analysis_system_prompt.md"
 DEFAULT_USER_PROMPT = "prompts/document_bulk_analysis_prompt.md"
@@ -191,21 +191,15 @@ class BulkAnalysisGroupDialog(QDialog):
         self.preview_prompt_button.clicked.connect(self._preview_prompt)
         form.addRow("", self.preview_prompt_button)
 
-        self.model_combo = self._build_model_combo()
-        self.model_combo.currentIndexChanged.connect(self._on_model_changed)
-        form.addRow("Model", self.model_combo)
-
-        self.custom_model_label = QLabel("Custom model")
-        self.custom_model_edit = QLineEdit()
-        self.custom_model_edit.setPlaceholderText("e.g., claude-sonnet-4-5-20250929")
-        form.addRow(self.custom_model_label, self.custom_model_edit)
-
-        self.custom_context_label = QLabel("Custom context window (tokens)")
-        self.custom_context_spin = QSpinBox()
-        self.custom_context_spin.setRange(10000, 4000000)
-        self.custom_context_spin.setSingleStep(1000)
-        self.custom_context_spin.setValue(200000)
-        form.addRow(self.custom_context_label, self.custom_context_spin)
+        self.llm_settings_panel = LLMSettingsPanel(parent=self)
+        self.provider_combo = self.llm_settings_panel.provider_combo
+        self.model_combo = self.llm_settings_panel.model_combo
+        self.custom_model_label = self.llm_settings_panel.custom_model_label
+        self.custom_model_edit = self.llm_settings_panel.custom_model_edit
+        self.custom_context_label = self.llm_settings_panel.custom_context_label
+        self.custom_context_spin = self.llm_settings_panel.custom_context_spin
+        self.reasoning_checkbox = self.llm_settings_panel.reasoning_checkbox
+        form.addRow("LLM Settings", self.llm_settings_panel)
 
         # Combined options
         self.order_combo = QComboBox()
@@ -218,9 +212,6 @@ class BulkAnalysisGroupDialog(QDialog):
         self.output_template_edit.setText("combined_{timestamp}.md")
         form.addRow("Output Template", self.output_template_edit)
 
-        self.reasoning_checkbox = QCheckBox("Use reasoning (thinking models)")
-        form.addRow("Reasoning", self.reasoning_checkbox)
-
         layout.addLayout(form)
         self._refresh_placeholder_requirements()
 
@@ -231,8 +222,6 @@ class BulkAnalysisGroupDialog(QDialog):
 
         # Initial visibility
         self._on_operation_changed()
-        self._on_model_changed()
-
     def _is_allowed_file(self, path: Path) -> bool:
         """Return True if the file should be selectable (only .md or .txt)."""
         try:
@@ -247,46 +236,6 @@ class BulkAnalysisGroupDialog(QDialog):
         h_layout.addWidget(line_edit)
         h_layout.addWidget(button)
         return widget
-
-    def _build_model_combo(self):
-        combo = QComboBox()
-        combo.setEditable(False)
-        # Limit to Anthropic with two supported models and a Custom option
-        combo.addItem("Custom…", ("custom", ""))
-        combo.addItem(
-            "Anthropic Claude (claude-sonnet-4-5-20250929)",
-            ("anthropic", "claude-sonnet-4-5-20250929"),
-        )
-        combo.addItem(
-            "Anthropic Claude (claude-opus-4-6)",
-            ("anthropic", "claude-opus-4-6"),
-        )
-
-        # Append AWS Bedrock Claude models discovered via AWS CLI credentials
-        bedrock_models = []
-        try:
-            settings = SecureSettings()
-            bedrock_settings = settings.get("aws_bedrock_settings", {}) or {}
-            bedrock_models = list_bedrock_models(
-                region=bedrock_settings.get("region"),
-                profile=bedrock_settings.get("profile"),
-            )
-        except Exception:
-            bedrock_models = list(DEFAULT_BEDROCK_MODELS)
-
-        for model in bedrock_models:
-            label = f"AWS Bedrock Claude ({model.name})"
-            combo.addItem(label, ("anthropic_bedrock", model.model_id))
-
-        return combo
-
-    def _on_model_changed(self) -> None:
-        data = self.model_combo.currentData()
-        is_custom = bool(data) and data[0] == "custom"
-        self.custom_model_label.setVisible(is_custom)
-        self.custom_model_edit.setVisible(is_custom)
-        self.custom_context_label.setVisible(is_custom)
-        self.custom_context_spin.setVisible(is_custom)
 
     def _choose_prompt_file(self, line_edit: QLineEdit) -> None:
         # Default browse folder to user prompt store (custom), with safe fallbacks
@@ -486,29 +435,21 @@ class BulkAnalysisGroupDialog(QDialog):
                 )
                 return None
 
-        combo_data = self.model_combo.currentData()
-        provider_id, model = combo_data if combo_data else ("", "")
-        is_custom_selection = combo_data and combo_data[0] == "custom"
-        if is_custom_selection:
-            provider_id = "anthropic"
-            model = self.custom_model_edit.text().strip()
-            if not model:
-                QMessageBox.warning(self, "Missing Model", "Please enter a model id for the custom option.")
-                return None
-            custom_window = int(self.custom_context_spin.value())
-        else:
-            custom_window = None
+        llm_settings, error = self.llm_settings_panel.current_settings()
+        if llm_settings is None:
+            QMessageBox.warning(self, "Missing Model", error or "Select a provider and model before continuing.")
+            return None
 
         group_kwargs = {
             "name": name,
             "description": description,
-            "provider_id": provider_id,
-            "model": model,
+            "provider_id": llm_settings.provider_id,
+            "model": llm_settings.model_id,
             "system_prompt_path": system_prompt,
             "user_prompt_path": user_prompt,
-            "model_context_window": custom_window,
+            "model_context_window": llm_settings.context_window,
             "placeholder_requirements": placeholder_settings,
-            "use_reasoning": self.reasoning_checkbox.isChecked(),
+            "use_reasoning": llm_settings.use_reasoning,
         }
 
         if op == "combined":
@@ -549,8 +490,8 @@ class BulkAnalysisGroupDialog(QDialog):
             description=description,
             files=group_kwargs.get("files", []),
             directories=group_kwargs.get("directories", []),
-            provider_id=provider_id,
-            model=model,
+            provider_id=llm_settings.provider_id,
+            model=llm_settings.model_id,
             system_prompt_path=system_prompt,
             user_prompt_path=user_prompt,
         )
@@ -682,7 +623,6 @@ class BulkAnalysisGroupDialog(QDialog):
         self.description_edit.setPlainText(group.description or "")
         self.system_prompt_edit.setText(self._normalise_text(group.system_prompt_path))
         self.user_prompt_edit.setText(self._normalise_text(group.user_prompt_path))
-        self.reasoning_checkbox.setChecked(group.use_reasoning)
         if group.combine_output_template:
             self.output_template_edit.setText(group.combine_output_template)
         current_order = group.combine_order or "path"
@@ -712,42 +652,19 @@ class BulkAnalysisGroupDialog(QDialog):
         else:
             self.manual_files_edit.clear()
 
-        if group.model_context_window:
-            self.custom_context_spin.setValue(int(group.model_context_window))
-
         self._refresh_placeholder_requirements()
         self._refresh_combined_input_summary()
 
     def _apply_model_selection(self, group: BulkAnalysisGroup) -> None:
-        provider = group.provider_id or ""
-        model_id = group.model or ""
-
-        target_index = -1
-        for idx in range(self.model_combo.count()):
-            data = self.model_combo.itemData(idx)
-            if data == (provider, model_id):
-                target_index = idx
-                break
-
-        if provider == "anthropic_bedrock" and target_index == -1 and model_id:
-            label = f"AWS Bedrock Claude ({model_id})"
-            self.model_combo.addItem(label, (provider, model_id))
-            target_index = self.model_combo.count() - 1
-
-        if target_index == -1:
-            # Fallback to custom configuration.
-            target_index = 0
-
-        self.model_combo.blockSignals(True)
-        self.model_combo.setCurrentIndex(target_index)
-        self.model_combo.blockSignals(False)
-        self._on_model_changed()
-
-        current_data = self.model_combo.currentData()
-        if current_data and current_data[0] == "custom":
-            self.custom_model_edit.setText(model_id)
-        else:
-            self.custom_model_edit.clear()
+        provider_id = str(group.provider_id or "").strip()
+        self.llm_settings_panel.set_settings(
+            LLMOperationSettings(
+                provider_id=provider_id,
+                model_id=group.model or (default_model_for_provider(provider_id) or "" if provider_id else ""),
+                context_window=group.model_context_window,
+                use_reasoning=group.use_reasoning,
+            )
+        )
 
     def _restore_file_tree_selection(self, group: BulkAnalysisGroup) -> List[str]:
         manual_entries: List[str] = []

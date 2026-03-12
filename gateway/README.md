@@ -7,7 +7,7 @@ The deployed shape is intentionally small:
 - one public runtime hostname: `gateway.<your-domain>`
 - one shared app API key for the desktop app
 - one separate `STATUS_AUTH_API_KEY` for script-driven health checks
-- Anthropic as the only upstream provider in v1
+- Anthropic, OpenAI, and Google Vertex as the enabled upstream providers
 - no public admin UI or status hostname
 
 The upstream gateway is headless. Configuration is rendered into an untracked working copy under `var/gateway/rendered/pydantic-ai-gateway/` and deployed to Cloudflare Workers from there.
@@ -34,7 +34,7 @@ Bootstrap also applies the upstream D1 schema automatically after provisioning o
 
 - Re-render upstream, provision missing resources, and refresh the working copy:
   `gateway/scripts/bootstrap.sh`
-- Push updated Anthropic or status secrets:
+- Push updated Anthropic, OpenAI, Google Vertex, or status secrets:
   `gateway/scripts/sync_secrets.sh`
 - Deploy:
   `gateway/scripts/deploy.sh`

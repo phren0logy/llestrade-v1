@@ -99,7 +99,7 @@ class AzureOpenAIProvider(BaseLLMProvider):
 
     @property
     def default_model(self) -> str:
-        return os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4.1")
+        return os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "")
 
     def _retryable_error_types(self) -> tuple[type[BaseException], ...]:
         candidates = [

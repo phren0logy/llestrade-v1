@@ -8,6 +8,8 @@ from pathlib import Path
 from textwrap import dedent
 
 import pytest
+from pydantic_ai.messages import ModelResponse, TextPart, ThinkingPart
+from pydantic_ai.usage import RequestUsage
 
 PySide6 = pytest.importorskip("PySide6")
 from PySide6.QtWidgets import QApplication
@@ -18,10 +20,18 @@ from src.app.core.project_manager import ProjectMetadata
 from src.app.core.report_inputs import REPORT_CATEGORY_CONVERTED
 from src.app.core.report_template_sections import TemplateSection
 from src.app.workers import report_worker
-from src.app.workers.llm_backend import LLMExecutionBackend, LLMInvocationRequest, LLMInvocationResult
+from src.app.workers.llm_backend import (
+    LLMExecutionBackend,
+    LLMInvocationRequest,
+    LLMProviderRequest,
+    ProviderMetadata,
+    build_model_settings,
+    normalize_model_name,
+    provider_capabilities,
+    resolve_model_name,
+)
 from src.app.workers.report_worker import DraftReportWorker, ReportRefinementWorker
 from src.app.workers import report_common
-from src.common.llm.base import BaseLLMProvider
 
 
 @pytest.fixture(scope="module")
@@ -32,84 +42,140 @@ def qt_app() -> QApplication:
     return app
 
 
-class _StubSettings:
-    def get_api_key(self, provider: str) -> str | None:  # noqa: ARG002
-        return None
+def _model_response(
+    content: str,
+    *,
+    reasoning: str | None = None,
+    model_name: str = "claude-sonnet-4-5",
+    output_tokens: int = 1,
+) -> ModelResponse:
+    parts: list[object] = []
+    if reasoning:
+        parts.append(ThinkingPart(reasoning))
+    parts.append(TextPart(content))
+    return ModelResponse(
+        parts=parts,
+        usage=RequestUsage(input_tokens=1, output_tokens=output_tokens),
+        model_name=model_name,
+    )
 
-    def get(self, key: str, default: object = None) -> object:  # noqa: ARG002
-        return default
 
-
-class _StubProvider(BaseLLMProvider):
+class _StubBackend(LLMExecutionBackend):
     def __init__(self) -> None:
-        super().__init__(timeout=0, max_retries=0, default_system_prompt="stub", debug=False)
-        self.set_initialized(True)
         self._call_index = 0
         self.system_prompts: list[str] = []
 
-    def generate(  # type: ignore[override]
-        self,
-        prompt: str,
-        model: str | None = None,
-        max_tokens: int = 32000,
-        temperature: float = 0.1,
-        system_prompt: str | None = None,
-    ) -> dict:
+    def normalize_model(self, provider_id: str, model: str | None) -> str | None:
+        return normalize_model_name(provider_id, model)
+
+    def resolve_model(self, provider_id: str, model: str | None) -> str | None:
+        return resolve_model_name(provider_id, model)
+
+    def capabilities(self, provider_id: str, model: str | None):
+        return provider_capabilities(provider_id, model)
+
+    def build_model_settings(self, provider_id: str, model: str | None, **kwargs):
+        return build_model_settings(provider_id, model, **kwargs)
+
+    def create_provider(self, request: LLMProviderRequest) -> object:
+        return ProviderMetadata(provider_name=request.provider_id, default_model=request.model or "default-model")
+
+    def invoke_response(self, provider, request: LLMInvocationRequest) -> ModelResponse:  # noqa: ANN001
+        _ = provider
         self._call_index += 1
-        if system_prompt:
-            self.system_prompts.append(system_prompt)
-        lower_prompt = (prompt or "").lower()
+        if request.system_prompt:
+            self.system_prompts.append(request.system_prompt)
+        lower_prompt = (request.prompt or "").lower()
         if "<draft>" in lower_prompt or "refine" in lower_prompt:
             content = "Refined content"
             reasoning = "Reasoning trace"
         else:
             content = f"Section output {self._call_index}"
-            reasoning = ""
-        return {
-            "success": True,
-            "content": content,
-            "usage": {"output_tokens": 100 + self._call_index},
-            "reasoning": reasoning,
-        }
-
-    def count_tokens(self, text: str | None = None, messages: list[dict] | None = None) -> dict:  # noqa: ARG002
-        length = len(text or "")
-        return {"success": True, "token_count": max(length // 4, 1)}
-
-    @property
-    def provider_name(self) -> str:  # type: ignore[override]
-        return "stub"
-
-    @property
-    def default_model(self) -> str:  # type: ignore[override]
-        return "stub-model"
+            reasoning = None
+        return _model_response(
+            content,
+            reasoning=reasoning,
+            model_name=request.model or "claude-sonnet-4-5",
+            output_tokens=100 + self._call_index,
+        )
 
 
 class _NoNativeBackend(LLMExecutionBackend):
-    def requires_native_provider(self) -> bool:
-        return False
+    def normalize_model(self, provider_id: str, model: str | None) -> str | None:
+        return normalize_model_name(provider_id, model)
 
-    def invoke(self, provider, request: LLMInvocationRequest) -> LLMInvocationResult:  # noqa: ANN001
-        return LLMInvocationResult(
-            success=True,
-            content="stub output",
-            error=None,
-            usage={"output_tokens": 1},
-            provider="gateway/anthropic",
-            model=request.model,
-            raw={},
+    def resolve_model(self, provider_id: str, model: str | None) -> str | None:
+        return resolve_model_name(provider_id, model)
+
+    def capabilities(self, provider_id: str, model: str | None):
+        return provider_capabilities(provider_id, model)
+
+    def build_model_settings(self, provider_id: str, model: str | None, **kwargs):
+        return build_model_settings(provider_id, model, **kwargs)
+
+    def create_provider(self, request: LLMProviderRequest) -> object:
+        return ProviderMetadata(provider_name=request.provider_id, default_model=request.model or "default-model")
+
+    def invoke_response(self, provider, request: LLMInvocationRequest) -> ModelResponse:  # noqa: ANN001
+        _ = provider
+        return _model_response(
+            "stub output",
+            model_name=request.model or "claude-sonnet-4-5",
+            output_tokens=1,
         )
 
 
 class _ResultBackend(LLMExecutionBackend):
-    def __init__(self, result: LLMInvocationResult) -> None:
+    def __init__(self, result: ModelResponse | Exception) -> None:
         self._result = result
 
-    def requires_native_provider(self) -> bool:
-        return False
+    def normalize_model(self, provider_id: str, model: str | None) -> str | None:
+        return normalize_model_name(provider_id, model)
 
-    def invoke(self, provider, request: LLMInvocationRequest) -> LLMInvocationResult:  # noqa: ANN001
+    def resolve_model(self, provider_id: str, model: str | None) -> str | None:
+        return resolve_model_name(provider_id, model)
+
+    def capabilities(self, provider_id: str, model: str | None):
+        return provider_capabilities(provider_id, model)
+
+    def build_model_settings(self, provider_id: str, model: str | None, **kwargs):
+        return build_model_settings(provider_id, model, **kwargs)
+
+    def create_provider(self, request: LLMProviderRequest) -> object:
+        return ProviderMetadata(provider_name=request.provider_id, default_model=request.model or "default-model")
+
+    def invoke_response(self, provider, request: LLMInvocationRequest) -> ModelResponse:  # noqa: ANN001
         _ = provider, request
+        if isinstance(self._result, Exception):
+            raise self._result
+        return self._result
+
+
+class _CapturingBackend(LLMExecutionBackend):
+    def __init__(self, result: ModelResponse | Exception) -> None:
+        self._result = result
+        self.requests: list[LLMInvocationRequest] = []
+
+    def normalize_model(self, provider_id: str, model: str | None) -> str | None:
+        return normalize_model_name(provider_id, model)
+
+    def resolve_model(self, provider_id: str, model: str | None) -> str | None:
+        return resolve_model_name(provider_id, model)
+
+    def capabilities(self, provider_id: str, model: str | None):
+        return provider_capabilities(provider_id, model)
+
+    def build_model_settings(self, provider_id: str, model: str | None, **kwargs):
+        return build_model_settings(provider_id, model, **kwargs)
+
+    def create_provider(self, request: LLMProviderRequest) -> object:
+        return ProviderMetadata(provider_name=request.provider_id, default_model=request.model or "default-model")
+
+    def invoke_response(self, provider, request: LLMInvocationRequest) -> ModelResponse:  # noqa: ANN001
+        _ = provider
+        self.requests.append(request)
+        if isinstance(self._result, Exception):
+            raise self._result
         return self._result
 
 
@@ -152,11 +218,6 @@ def _write_refinement_user_prompt(path: Path) -> None:
 
 def _write_system_prompt(path: Path, message: str) -> None:
     path.write_text(message, encoding="utf-8")
-
-
-def _patch_worker_dependencies(monkeypatch: pytest.MonkeyPatch, provider: _StubProvider) -> None:
-    monkeypatch.setattr(report_common, "create_provider", lambda **_: provider, raising=False)
-    monkeypatch.setattr(report_common, "SecureSettings", lambda: _StubSettings(), raising=False)
 
 
 def _prepare_common_files(project_dir: Path) -> tuple[Path, Path, Path, Path]:
@@ -220,8 +281,7 @@ def test_draft_worker_generates_outputs(
         generation_system_prompt_path,
     ) = common_paths
 
-    stub_provider = _StubProvider()
-    _patch_worker_dependencies(monkeypatch, stub_provider)
+    stub_provider = _StubBackend()
 
     placeholder_values = {"client_name": "ACME Inc"}
 
@@ -239,6 +299,7 @@ def test_draft_worker_generates_outputs(
         metadata=ProjectMetadata(case_name="Case"),
         placeholder_values=placeholder_values,
         project_name="Case",
+        llm_backend=stub_provider,
     )
 
     finished_results: list[dict] = []
@@ -295,8 +356,7 @@ def test_refinement_worker_generates_outputs(
         generation_system_prompt_path,
     ) = common_paths
 
-    stub_provider = _StubProvider()
-    _patch_worker_dependencies(monkeypatch, stub_provider)
+    stub_provider = _StubBackend()
 
     draft_worker = DraftReportWorker(
         project_dir=project_dir,
@@ -312,6 +372,7 @@ def test_refinement_worker_generates_outputs(
         metadata=ProjectMetadata(case_name="Case"),
         placeholder_values={"client_name": "ACME Inc"},
         project_name="Case",
+        llm_backend=stub_provider,
     )
     draft_results: list[dict] = []
     draft_failures: list[str] = []
@@ -337,6 +398,7 @@ def test_refinement_worker_generates_outputs(
         metadata=ProjectMetadata(case_name="Case"),
         placeholder_values={"client_name": "ACME Inc"},
         project_name="Case",
+        llm_backend=stub_provider,
     )
 
     finished_results: list[dict] = []
@@ -381,8 +443,7 @@ def test_draft_worker_requires_generation_placeholders(
     )
     generation_system_prompt_path = project_dir / "system_prompts" / "generation.md"
 
-    stub_provider = _StubProvider()
-    _patch_worker_dependencies(monkeypatch, stub_provider)
+    stub_provider = _StubBackend()
 
     worker = DraftReportWorker(
         project_dir=project_dir,
@@ -396,6 +457,7 @@ def test_draft_worker_requires_generation_placeholders(
         generation_user_prompt_path=generation_user_prompt_path,
         generation_system_prompt_path=generation_system_prompt_path,
         metadata=ProjectMetadata(case_name="Case"),
+        llm_backend=stub_provider,
     )
 
     failures: list[str] = []
@@ -426,8 +488,7 @@ def test_refinement_worker_requires_refinement_placeholders(
     ) = common_paths
 
     # Generate a draft first
-    stub_provider = _StubProvider()
-    _patch_worker_dependencies(monkeypatch, stub_provider)
+    stub_provider = _StubBackend()
     draft_worker = DraftReportWorker(
         project_dir=project_dir,
         inputs=[(REPORT_CATEGORY_CONVERTED, "converted_documents/doc.md")],
@@ -440,6 +501,7 @@ def test_refinement_worker_requires_refinement_placeholders(
         generation_user_prompt_path=generation_user_prompt_path,
         generation_system_prompt_path=generation_system_prompt_path,
         metadata=ProjectMetadata(case_name="Case"),
+        llm_backend=stub_provider,
     )
     draft_worker.run()
     draft_manifest = list(project_dir.glob("reports/*-draft.manifest.json"))[0]
@@ -498,8 +560,7 @@ def test_draft_worker_supports_transcript_without_inputs(
     generation_system_prompt_path = system_prompt_dir / "generation.md"
     _write_system_prompt(generation_system_prompt_path, "Gen")
 
-    stub_provider = _StubProvider()
-    _patch_worker_dependencies(monkeypatch, stub_provider)
+    stub_provider = _StubBackend()
 
     worker = DraftReportWorker(
         project_dir=project_dir,
@@ -513,6 +574,7 @@ def test_draft_worker_supports_transcript_without_inputs(
         generation_user_prompt_path=generation_user_prompt_path,
         generation_system_prompt_path=generation_system_prompt_path,
         metadata=ProjectMetadata(case_name="Case"),
+        llm_backend=stub_provider,
     )
 
     finished_results: list[dict] = []
@@ -531,7 +593,6 @@ def test_draft_worker_supports_transcript_without_inputs(
 def test_gateway_backend_path_skips_native_provider_initialization(
     tmp_path: Path,
     qt_app: QApplication,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     assert qt_app is not None
     (common_paths, _refinement_system_prompt_path) = _prepare_common_files(tmp_path)
@@ -541,11 +602,6 @@ def test_gateway_backend_path_skips_native_provider_initialization(
         _refinement_user_prompt_path,
         generation_system_prompt_path,
     ) = common_paths
-
-    def _fail_create_provider(**_kwargs):  # noqa: ANN001
-        raise AssertionError("create_provider should not be called for no-native backends")
-
-    monkeypatch.setattr(report_common, "create_provider", _fail_create_provider, raising=False)
 
     worker = DraftReportWorker(
         project_dir=tmp_path,
@@ -564,9 +620,36 @@ def test_gateway_backend_path_skips_native_provider_initialization(
         llm_backend=_NoNativeBackend(),
     )
 
-    provider = worker._create_provider("system prompt")
+    provider = worker._create_provider()
     assert provider.provider_name == "anthropic"
     assert provider.default_model == "claude-sonnet-4-5"
+
+
+def test_report_worker_normalizes_bedrock_model_names(tmp_path: Path, qt_app: QApplication) -> None:
+    assert qt_app is not None
+    (common_paths, _refinement_system_prompt_path) = _prepare_common_files(tmp_path)
+    (
+        template_path,
+        generation_user_prompt_path,
+        _refinement_user_prompt_path,
+        generation_system_prompt_path,
+    ) = common_paths
+    worker = DraftReportWorker(
+        project_dir=tmp_path,
+        inputs=[(REPORT_CATEGORY_CONVERTED, "converted_documents/doc.md")],
+        provider_id="anthropic_bedrock",
+        model="claude-sonnet-4-5",
+        custom_model=None,
+        context_window=None,
+        template_path=template_path,
+        transcript_path=None,
+        generation_user_prompt_path=generation_user_prompt_path,
+        generation_system_prompt_path=generation_system_prompt_path,
+        metadata=ProjectMetadata(case_name="Case"),
+        llm_backend=_NoNativeBackend(),
+    )
+
+    assert worker._model == "anthropic.claude-sonnet-4-5-v1"
 
 
 def test_report_draft_trace_attributes_match_between_legacy_and_gateway(
@@ -597,7 +680,7 @@ def test_report_draft_trace_attributes_match_between_legacy_and_gateway(
         generation_system_prompt_path=generation_system_prompt_path,
         metadata=ProjectMetadata(case_name="Case"),
     )
-    monkeypatch.setattr(legacy_worker, "_create_provider", lambda _system_prompt: _StubProvider())
+    legacy_worker._llm_backend = _StubBackend()
     legacy_traces = _capture_traces(monkeypatch)
     legacy_outputs = legacy_worker._generate_section_outputs(
         sections=[section],
@@ -622,18 +705,9 @@ def test_report_draft_trace_attributes_match_between_legacy_and_gateway(
         generation_system_prompt_path=generation_system_prompt_path,
         metadata=ProjectMetadata(case_name="Case"),
         llm_backend=_ResultBackend(
-            LLMInvocationResult(
-                success=True,
-                content="stub output",
-                error=None,
-                usage={"output_tokens": 1},
-                provider="gateway/anthropic",
-                model="claude-sonnet-4-5",
-                raw={},
-            )
+            _model_response("stub output")
         ),
     )
-    monkeypatch.setattr(gateway_worker, "_create_provider", lambda _system_prompt: object())
     gateway_traces = _capture_traces(monkeypatch)
     gateway_outputs = gateway_worker._generate_section_outputs(
         sections=[section],
@@ -663,6 +737,103 @@ def test_report_draft_trace_attributes_match_between_legacy_and_gateway(
             },
         )
     ]
+
+
+def test_report_draft_passes_computed_input_budget_to_backend(
+    tmp_path: Path,
+    qt_app: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert qt_app is not None
+    (common_paths, _refinement_system_prompt_path) = _prepare_common_files(tmp_path)
+    (
+        template_path,
+        generation_user_prompt_path,
+        _refinement_user_prompt_path,
+        generation_system_prompt_path,
+    ) = common_paths
+    section = TemplateSection(title="Section One", body="Describe the findings.")
+    backend = _CapturingBackend(
+        _model_response("stub output")
+    )
+    worker = DraftReportWorker(
+        project_dir=tmp_path,
+        inputs=[(REPORT_CATEGORY_CONVERTED, "converted_documents/doc.md")],
+        provider_id="anthropic",
+        model="claude-sonnet-4-5",
+        custom_model=None,
+        context_window=100_000,
+        template_path=template_path,
+        transcript_path=None,
+        generation_user_prompt_path=generation_user_prompt_path,
+        generation_system_prompt_path=generation_system_prompt_path,
+        metadata=ProjectMetadata(case_name="Case"),
+        max_report_tokens=20_000,
+        llm_backend=backend,
+    )
+    monkeypatch.setattr(worker, "_create_provider", lambda: object())
+
+    outputs = worker._generate_section_outputs(
+        sections=[section],
+        user_prompt_template="Write {template_section}\n\n{additional_documents}",
+        additional_documents="Documents",
+        transcript_text="",
+        system_prompt="System prompt",
+        placeholder_map={},
+        evidence_ledger="",
+    )
+
+    assert outputs[0]["title"] == "Section One"
+    assert len(backend.requests) == 1
+    assert backend.requests[0].input_tokens_limit == 79_000
+
+
+def test_report_draft_applies_reasoning_settings_to_backend_request(
+    tmp_path: Path,
+    qt_app: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert qt_app is not None
+    (common_paths, _refinement_system_prompt_path) = _prepare_common_files(tmp_path)
+    (
+        template_path,
+        generation_user_prompt_path,
+        _refinement_user_prompt_path,
+        generation_system_prompt_path,
+    ) = common_paths
+    section = TemplateSection(title="Section One", body="Describe the findings.")
+    backend = _CapturingBackend(_model_response("stub output"))
+    worker = DraftReportWorker(
+        project_dir=tmp_path,
+        inputs=[(REPORT_CATEGORY_CONVERTED, "converted_documents/doc.md")],
+        provider_id="anthropic",
+        model="claude-sonnet-4-5",
+        custom_model=None,
+        context_window=100_000,
+        template_path=template_path,
+        transcript_path=None,
+        generation_user_prompt_path=generation_user_prompt_path,
+        generation_system_prompt_path=generation_system_prompt_path,
+        metadata=ProjectMetadata(case_name="Case"),
+        use_reasoning=True,
+        llm_backend=backend,
+    )
+    monkeypatch.setattr(worker, "_create_provider", lambda: object())
+
+    worker._generate_section_outputs(
+        sections=[section],
+        user_prompt_template="Write {template_section}\n\n{additional_documents}",
+        additional_documents="Documents",
+        transcript_text="",
+        system_prompt="System prompt",
+        placeholder_map={},
+        evidence_ledger="",
+    )
+
+    assert backend.requests[0].model_settings["anthropic_thinking"] == {
+        "type": "enabled",
+        "budget_tokens": 7500,
+    }
 
 
 def test_report_refine_trace_attributes_match_between_legacy_and_gateway(
@@ -696,7 +867,7 @@ def test_report_refine_trace_attributes_match_between_legacy_and_gateway(
         refinement_system_prompt_path=refinement_system_prompt_path,
         metadata=ProjectMetadata(case_name="Case"),
     )
-    monkeypatch.setattr(legacy_worker, "_create_provider", lambda _system_prompt: _StubProvider())
+    legacy_worker._llm_backend = _StubBackend()
     legacy_traces = _capture_traces(monkeypatch)
     legacy_result = legacy_worker._run_refinement(
         prompt="Prompt",
@@ -717,18 +888,9 @@ def test_report_refine_trace_attributes_match_between_legacy_and_gateway(
         refinement_system_prompt_path=refinement_system_prompt_path,
         metadata=ProjectMetadata(case_name="Case"),
         llm_backend=_ResultBackend(
-            LLMInvocationResult(
-                success=True,
-                content="stub output",
-                error=None,
-                usage={"output_tokens": 1},
-                provider="gateway/anthropic",
-                model="claude-sonnet-4-5",
-                raw={},
-            )
+            _model_response("stub output")
         ),
     )
-    monkeypatch.setattr(gateway_worker, "_create_provider", lambda _system_prompt: object())
     gateway_traces = _capture_traces(monkeypatch)
     gateway_result = gateway_worker._run_refinement(
         prompt="Prompt",
@@ -750,6 +912,98 @@ def test_report_refine_trace_attributes_match_between_legacy_and_gateway(
             },
         )
     ]
+
+
+def test_report_refine_passes_computed_input_budget_to_backend(
+    tmp_path: Path,
+    qt_app: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert qt_app is not None
+    (common_paths, refinement_system_prompt_path) = _prepare_common_files(tmp_path)
+    (
+        template_path,
+        _generation_user_prompt_path,
+        refinement_user_prompt_path,
+        _generation_system_prompt_path,
+    ) = common_paths
+    draft_path = tmp_path / "reports" / "draft.md"
+    draft_path.parent.mkdir(parents=True, exist_ok=True)
+    draft_path.write_text("---\n---\nDraft content", encoding="utf-8")
+    backend = _CapturingBackend(
+        _model_response("stub output")
+    )
+    worker = ReportRefinementWorker(
+        project_dir=tmp_path,
+        draft_path=draft_path,
+        inputs=[(REPORT_CATEGORY_CONVERTED, "converted_documents/doc.md")],
+        provider_id="anthropic",
+        model="claude-sonnet-4-5",
+        custom_model=None,
+        context_window=100_000,
+        template_path=template_path,
+        transcript_path=None,
+        refinement_user_prompt_path=refinement_user_prompt_path,
+        refinement_system_prompt_path=refinement_system_prompt_path,
+        metadata=ProjectMetadata(case_name="Case"),
+        max_report_tokens=20_000,
+        llm_backend=backend,
+    )
+    monkeypatch.setattr(worker, "_create_provider", lambda: object())
+
+    content, reasoning = worker._run_refinement(
+        prompt="Prompt",
+        system_prompt="System prompt",
+    )
+
+    assert content.strip() == "stub output"
+    assert reasoning is None
+    assert len(backend.requests) == 1
+    assert backend.requests[0].input_tokens_limit == 79_000
+
+
+def test_report_refine_applies_openai_reasoning_settings(
+    tmp_path: Path,
+    qt_app: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert qt_app is not None
+    (common_paths, refinement_system_prompt_path) = _prepare_common_files(tmp_path)
+    (
+        template_path,
+        _generation_user_prompt_path,
+        refinement_user_prompt_path,
+        _generation_system_prompt_path,
+    ) = common_paths
+    draft_path = tmp_path / "reports" / "draft.md"
+    draft_path.parent.mkdir(parents=True, exist_ok=True)
+    draft_path.write_text("---\n---\nDraft content", encoding="utf-8")
+    backend = _CapturingBackend(_model_response("stub output"))
+    worker = ReportRefinementWorker(
+        project_dir=tmp_path,
+        draft_path=draft_path,
+        inputs=[(REPORT_CATEGORY_CONVERTED, "converted_documents/doc.md")],
+        provider_id="openai",
+        model="gpt-4.1",
+        custom_model=None,
+        context_window=100_000,
+        template_path=template_path,
+        transcript_path=None,
+        refinement_user_prompt_path=refinement_user_prompt_path,
+        refinement_system_prompt_path=refinement_system_prompt_path,
+        metadata=ProjectMetadata(case_name="Case"),
+        use_reasoning=True,
+        llm_backend=backend,
+    )
+    monkeypatch.setattr(worker, "_create_provider", lambda: object())
+
+    worker._run_refinement(
+        prompt="Prompt",
+        system_prompt="System prompt",
+    )
+
+    assert backend.requests[0].model_settings["openai_reasoning_effort"] == "medium"
+    assert backend.requests[0].model_settings["openai_reasoning_summary"] == "detailed"
 
 
 @pytest.mark.parametrize("message", ["Gateway timeout", "Gateway spend limit exceeded"])
@@ -779,17 +1033,7 @@ def test_draft_worker_emits_failure_when_backend_returns_error(
         generation_user_prompt_path=generation_user_prompt_path,
         generation_system_prompt_path=generation_system_prompt_path,
         metadata=ProjectMetadata(case_name="Case"),
-        llm_backend=_ResultBackend(
-            LLMInvocationResult(
-                success=False,
-                content="",
-                error=message,
-                usage={},
-                provider="gateway/anthropic",
-                model="claude-sonnet-4-5",
-                raw={},
-            )
-        ),
+        llm_backend=_ResultBackend(RuntimeError(message)),
     )
 
     failures: list[str] = []
@@ -851,15 +1095,7 @@ def test_refinement_worker_emits_failure_when_backend_returns_empty_output(
         refinement_system_prompt_path=refinement_system_prompt_path,
         metadata=ProjectMetadata(case_name="Case"),
         llm_backend=_ResultBackend(
-            LLMInvocationResult(
-                success=True,
-                content="   ",
-                error=None,
-                usage={},
-                provider="gateway/anthropic",
-                model="claude-sonnet-4-5",
-                raw={},
-            )
+            _model_response("   ")
         ),
     )
 

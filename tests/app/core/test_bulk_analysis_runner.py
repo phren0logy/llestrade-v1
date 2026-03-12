@@ -100,16 +100,23 @@ def test_combine_chunk_summaries_hierarchical_batches_large_docs() -> None:
         # Return a smaller summary for next level
         return "Batch summary " + str(len(invoke_calls))
 
-    result = runner.combine_chunk_summaries_hierarchical(
-        summaries,
-        document_name="LargeDoc",
-        metadata=None,
-        placeholder_values=None,
-        provider_id="anthropic",
-        model="claude-sonnet-4-5-20250929",
-        invoke_fn=mock_invoke,
-        is_cancelled_fn=None,
+    original = runner.TokenCounter.get_model_context_window
+    runner.TokenCounter.get_model_context_window = staticmethod(
+        lambda model, ratio=None, provider_id=None: 130_000 if ratio is None else 200_000
     )
+    try:
+        result = runner.combine_chunk_summaries_hierarchical(
+            summaries,
+            document_name="LargeDoc",
+            metadata=None,
+            placeholder_values=None,
+            provider_id="anthropic",
+            model="claude-sonnet-4-5-20250929",
+            invoke_fn=mock_invoke,
+            is_cancelled_fn=None,
+        )
+    finally:
+        runner.TokenCounter.get_model_context_window = original
 
     # Should use hierarchical reduction (multiple invoke calls)
     assert len(invoke_calls) > 1, f"Expected hierarchical batching for large document, but got {len(invoke_calls)} calls"
@@ -139,17 +146,24 @@ def test_combine_chunk_summaries_hierarchical_respects_cancellation() -> None:
         return "Should not reach here"
 
     # Should raise BulkAnalysisCancelled when cancellation is detected
-    with pytest.raises(runner.BulkAnalysisCancelled):
-        runner.combine_chunk_summaries_hierarchical(
-            summaries,
-            document_name="Doc",
-            metadata=None,
-            placeholder_values=None,
-            provider_id="anthropic",
-            model="claude-sonnet-4-5-20250929",
-            invoke_fn=mock_invoke,
-            is_cancelled_fn=is_cancelled,
-        )
+    original = runner.TokenCounter.get_model_context_window
+    runner.TokenCounter.get_model_context_window = staticmethod(
+        lambda model, ratio=None, provider_id=None: 130_000 if ratio is None else 200_000
+    )
+    try:
+        with pytest.raises(runner.BulkAnalysisCancelled):
+            runner.combine_chunk_summaries_hierarchical(
+                summaries,
+                document_name="Doc",
+                metadata=None,
+                placeholder_values=None,
+                provider_id="anthropic",
+                model="claude-sonnet-4-5-20250929",
+                invoke_fn=mock_invoke,
+                is_cancelled_fn=is_cancelled,
+            )
+    finally:
+        runner.TokenCounter.get_model_context_window = original
 
 
 def test_combine_chunk_summaries_hierarchical_wraps_errors_with_context() -> None:
@@ -162,17 +176,24 @@ def test_combine_chunk_summaries_hierarchical_wraps_errors_with_context() -> Non
         raise RuntimeError("Provider error")
 
     # Should wrap the error with context about which batch failed
-    with pytest.raises(Exception) as excinfo:
-        runner.combine_chunk_summaries_hierarchical(
-            summaries,
-            document_name="Doc",
-            metadata=None,
-            placeholder_values=None,
-            provider_id="anthropic",
-            model="claude-sonnet-4-5-20250929",
-            invoke_fn=mock_invoke,
-            is_cancelled_fn=None,
-        )
+    original = runner.TokenCounter.get_model_context_window
+    runner.TokenCounter.get_model_context_window = staticmethod(
+        lambda model, ratio=None, provider_id=None: 130_000 if ratio is None else 200_000
+    )
+    try:
+        with pytest.raises(Exception) as excinfo:
+            runner.combine_chunk_summaries_hierarchical(
+                summaries,
+                document_name="Doc",
+                metadata=None,
+                placeholder_values=None,
+                provider_id="anthropic",
+                model="claude-sonnet-4-5-20250929",
+                invoke_fn=mock_invoke,
+                is_cancelled_fn=None,
+            )
+    finally:
+        runner.TokenCounter.get_model_context_window = original
 
     # Error message should include context about hierarchical reduction
     error_msg = str(excinfo.value)

@@ -3,7 +3,7 @@ API key configuration dialog for the new UI.
 """
 
 import logging
-from typing import Dict, Optional
+from typing import Dict
 
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QFormLayout,
@@ -15,12 +15,15 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtCore import QUrl
 
-from src.common.llm.bedrock_catalog import DEFAULT_BEDROCK_MODELS, list_bedrock_models
-from src.common.llm.providers import AnthropicBedrockProvider
-
 
 class APIKeyDialog(QDialog):
     """Dialog for configuring API keys and service endpoints."""
+
+    _PHOENIX_CONTENT_POLICIES = (
+        ("Unredacted (Local Phoenix)", "unredacted"),
+        ("Redacted", "redacted"),
+    )
+    _MASKED_SECRET = "*" * 20
     
     def __init__(self, settings, parent=None):
         super().__init__(parent)
@@ -33,7 +36,6 @@ class APIKeyDialog(QDialog):
         
         self.api_fields: Dict[str, QLineEdit] = {}
         self.config_fields: Dict[str, QLineEdit] = {}
-        self._bedrock_models = list(DEFAULT_BEDROCK_MODELS)
         
         self.setup_ui()
         self.load_keys()
@@ -96,22 +98,12 @@ class APIKeyDialog(QDialog):
             
             # API key input
             key_layout = QHBoxLayout()
-            
-            field = QLineEdit()
-            field.setEchoMode(QLineEdit.Password)
-            field.setPlaceholderText(f"Enter {display_name} API key...")
-            self.api_fields[key] = field
-            key_layout.addWidget(field)
-            
-            # Show/hide button
-            show_btn = QPushButton("Show")
-            show_btn.setCheckable(True)
-            show_btn.setMaximumWidth(60)
-            show_btn.toggled.connect(
-                lambda checked, f=field: f.setEchoMode(
-                    QLineEdit.Normal if checked else QLineEdit.Password
-                )
+
+            field, show_btn = self._create_secret_field(
+                key,
+                f"Enter {display_name} API key...",
             )
+            key_layout.addWidget(field)
             key_layout.addWidget(show_btn)
             
             group_layout.addLayout(key_layout)
@@ -124,53 +116,7 @@ class APIKeyDialog(QDialog):
 
             scroll_layout.addWidget(group)
 
-        # AWS Bedrock configuration (no API key storage)
-        bedrock_group = QGroupBox("AWS Bedrock (Claude)")
-        bedrock_layout = QVBoxLayout(bedrock_group)
-
-        instructions = QLabel(
-            "Use the AWS CLI to configure credentials (e.g., run <code>aws configure</code> or "
-            "<code>aws configure sso</code>). The workspace will use those credentials to access "
-            "Anthropic Claude models via AWS Bedrock."
-        )
-        instructions.setWordWrap(True)
-        instructions.setTextFormat(Qt.RichText)
-        bedrock_layout.addWidget(instructions)
-
-        status_row = QHBoxLayout()
-        self.bedrock_status_label = QLabel("Status: Not checked")
-        status_row.addWidget(self.bedrock_status_label, stretch=1)
-        refresh_button = QPushButton("Refresh")
-        refresh_button.clicked.connect(self._on_refresh_bedrock_clicked)
-        status_row.addWidget(refresh_button)
-        bedrock_layout.addLayout(status_row)
-
-        bedrock_form = QFormLayout()
-        self.bedrock_profile = QLineEdit()
-        self.bedrock_profile.setPlaceholderText("Optional AWS profile (e.g., default)")
-        bedrock_form.addRow("Profile:", self.bedrock_profile)
-        self.config_fields["aws_bedrock_profile"] = self.bedrock_profile
-
-        self.bedrock_region = QLineEdit()
-        self.bedrock_region.setPlaceholderText("Optional region override (e.g., us-east-1)")
-        bedrock_form.addRow("Region:", self.bedrock_region)
-        self.config_fields["aws_bedrock_region"] = self.bedrock_region
-
-        self.bedrock_model_combo = QComboBox()
-        self.bedrock_model_combo.setEditable(False)
-        bedrock_form.addRow("Default model:", self.bedrock_model_combo)
-        bedrock_layout.addLayout(bedrock_form)
-
-        help_text = QLabel(
-            '<a href="https://docs.aws.amazon.com/bedrock/latest/userguide/models-features.html">View Bedrock model catalog →</a>'
-        )
-        help_text.setOpenExternalLinks(True)
-        help_text.setStyleSheet("color: #1976d2;")
-        bedrock_layout.addWidget(help_text)
-
-        scroll_layout.addWidget(bedrock_group)
-
-        gateway_group = QGroupBox("Pydantic AI Gateway")
+        gateway_group = QGroupBox("Pydantic AI Gateway App Key")
         gateway_layout = QFormLayout(gateway_group)
 
         gateway_info = QLabel(
@@ -181,31 +127,28 @@ class APIKeyDialog(QDialog):
         gateway_layout.addRow(gateway_info)
 
         gateway_key_row = QHBoxLayout()
-        self.gateway_api_key = QLineEdit()
-        self.gateway_api_key.setEchoMode(QLineEdit.Password)
-        self.gateway_api_key.setPlaceholderText("Enter Pydantic AI Gateway API key...")
-        self.api_fields["pydantic_ai_gateway"] = self.gateway_api_key
-        gateway_key_row.addWidget(self.gateway_api_key)
-
-        gateway_show_btn = QPushButton("Show")
-        gateway_show_btn.setCheckable(True)
-        gateway_show_btn.setMaximumWidth(60)
-        gateway_show_btn.toggled.connect(
-            lambda checked: self.gateway_api_key.setEchoMode(
-                QLineEdit.Normal if checked else QLineEdit.Password
-            )
+        self.gateway_api_key, gateway_show_btn = self._create_secret_field(
+            "pydantic_ai_gateway",
+            "Enter Pydantic AI Gateway App Key...",
         )
+        gateway_key_row.addWidget(self.gateway_api_key)
         gateway_key_row.addWidget(gateway_show_btn)
-        gateway_layout.addRow("API Key:", gateway_key_row)
+        gateway_layout.addRow("App Key:", gateway_key_row)
 
         self.gateway_base_url = QLineEdit()
         self.gateway_base_url.setPlaceholderText("https://gateway.example.com")
         gateway_layout.addRow("Base URL:", self.gateway_base_url)
         self.config_fields["gateway_base_url"] = self.gateway_base_url
 
+        self.gateway_route = QLineEdit()
+        self.gateway_route.setPlaceholderText("Optional routing group or route override")
+        gateway_layout.addRow("Route:", self.gateway_route)
+        self.config_fields["gateway_route"] = self.gateway_route
+
         gateway_help = QLabel(
             "Use the custom domain from your self-hosted gateway deployment, for example "
-            "<code>https://gateway.example.com</code>."
+            "<code>https://gateway.example.com</code>. Set a route only if your self-hosted "
+            "gateway uses named routing groups or a non-default route."
         )
         gateway_help.setWordWrap(True)
         gateway_help.setTextFormat(Qt.RichText)
@@ -219,71 +162,6 @@ class APIKeyDialog(QDialog):
         layout.addWidget(scroll)
 
         return widget
-
-    def _on_refresh_bedrock_clicked(self):
-        """Refresh the AWS Bedrock model list using current profile/region overrides."""
-        AnthropicBedrockProvider.reset_backoff()
-        self._refresh_bedrock_models(force=True)
-
-    def _refresh_bedrock_models(
-        self,
-        *,
-        force: bool = False,
-        preferred_model: Optional[str] = None,
-    ) -> None:
-        profile = self.bedrock_profile.text().strip() or None
-        region = self.bedrock_region.text().strip() or None
-        selected_model = preferred_model or self.bedrock_model_combo.currentData()
-
-        error_message: Optional[str] = None
-        try:
-            models = list_bedrock_models(
-                region=region,
-                profile=profile,
-                force_refresh=force,
-            )
-        except Exception as exc:  # pragma: no cover - defensive
-            error_message = str(exc)
-            self.logger.debug("Bedrock model refresh failed: %s", exc)
-            models = list(DEFAULT_BEDROCK_MODELS)
-
-        if not models:
-            models = list(DEFAULT_BEDROCK_MODELS)
-
-        self._bedrock_models = list(models)
-        self.bedrock_model_combo.blockSignals(True)
-        self.bedrock_model_combo.clear()
-        for model in models:
-            label = f"{model.name} ({model.model_id})"
-            self.bedrock_model_combo.addItem(label, model.model_id)
-        self.bedrock_model_combo.blockSignals(False)
-
-        if selected_model:
-            index = self.bedrock_model_combo.findData(selected_model)
-            if index >= 0:
-                self.bedrock_model_combo.setCurrentIndex(index)
-
-        if self.bedrock_model_combo.count() > 0 and self.bedrock_model_combo.currentIndex() < 0:
-            self.bedrock_model_combo.setCurrentIndex(0)
-
-        resolved_region = next((model.region for model in models if model.region), None)
-        profile_display = profile or "default profile"
-        region_display = resolved_region or region or "default region"
-
-        if error_message:
-            status = (
-                "Using cached model list. Configure AWS CLI credentials and refresh. "
-                f"Details: {error_message}"
-            )
-        elif resolved_region:
-            status = f"Found {len(models)} model(s) via {profile_display} in {region_display}."
-        else:
-            status = (
-                "Run `aws configure` to enable live model discovery. "
-                f"Showing {len(models)} default model(s)."
-            )
-
-        self.bedrock_status_label.setText(status)
     
     def _create_azure_tab(self) -> QWidget:
         """Create the Azure services tab."""
@@ -295,20 +173,11 @@ class APIKeyDialog(QDialog):
         openai_layout = QFormLayout(openai_group)
 
         ak_row = QHBoxLayout()
-        self.azure_openai_key = QLineEdit()
-        self.azure_openai_key.setEchoMode(QLineEdit.Password)
-        self.azure_openai_key.setPlaceholderText("Enter Azure OpenAI API key…")
-        self.api_fields["azure_openai"] = self.azure_openai_key
-        ak_row.addWidget(self.azure_openai_key)
-
-        ak_show_btn = QPushButton("Show")
-        ak_show_btn.setCheckable(True)
-        ak_show_btn.setMaximumWidth(60)
-        ak_show_btn.toggled.connect(
-            lambda checked: self.azure_openai_key.setEchoMode(
-                QLineEdit.Normal if checked else QLineEdit.Password
-            )
+        self.azure_openai_key, ak_show_btn = self._create_secret_field(
+            "azure_openai",
+            "Enter Azure OpenAI API key…",
         )
+        ak_row.addWidget(self.azure_openai_key)
         ak_row.addWidget(ak_show_btn)
         openai_layout.addRow("API Key:", ak_row)
 
@@ -341,21 +210,11 @@ class APIKeyDialog(QDialog):
         # API key input
         key_layout = QHBoxLayout()
         
-        self.azure_di_key = QLineEdit()
-        self.azure_di_key.setEchoMode(QLineEdit.Password)
-        self.azure_di_key.setPlaceholderText("Enter Azure Document Intelligence API key...")
-        self.api_fields["azure_di"] = self.azure_di_key
-        key_layout.addWidget(self.azure_di_key)
-        
-        # Show/hide button
-        show_btn = QPushButton("Show")
-        show_btn.setCheckable(True)
-        show_btn.setMaximumWidth(60)
-        show_btn.toggled.connect(
-            lambda checked: self.azure_di_key.setEchoMode(
-                QLineEdit.Normal if checked else QLineEdit.Password
-            )
+        self.azure_di_key, show_btn = self._create_secret_field(
+            "azure_di",
+            "Enter Azure Document Intelligence API key...",
         )
+        key_layout.addWidget(self.azure_di_key)
         key_layout.addWidget(show_btn)
         
         di_layout.addLayout(key_layout)
@@ -379,6 +238,56 @@ class APIKeyDialog(QDialog):
         
         layout.addStretch()
         return widget
+
+    def _create_secret_field(self, provider: str, placeholder: str) -> tuple[QLineEdit, QPushButton]:
+        field = QLineEdit()
+        field.setEchoMode(QLineEdit.Password)
+        field.setPlaceholderText(placeholder)
+        field.setProperty("has_saved_key", False)
+        field.setProperty("saved_key_value", "")
+        field.setProperty("key_dirty", False)
+        field.textEdited.connect(lambda _text, f=field: self._mark_secret_field_dirty(f))
+        self.api_fields[provider] = field
+
+        show_btn = QPushButton("Show")
+        show_btn.setCheckable(True)
+        show_btn.setMaximumWidth(60)
+        show_btn.toggled.connect(
+            lambda checked, f=field, b=show_btn: self._toggle_secret_visibility(f, b, checked)
+        )
+        return field, show_btn
+
+    def _mark_secret_field_dirty(self, field: QLineEdit) -> None:
+        field.setProperty("key_dirty", True)
+
+    def _set_secret_field_value(self, field: QLineEdit, value: str) -> None:
+        field.blockSignals(True)
+        field.setText(value)
+        field.blockSignals(False)
+
+    def _toggle_secret_visibility(self, field: QLineEdit, button: QPushButton, checked: bool) -> None:
+        saved_value = str(field.property("saved_key_value") or "")
+        current_text = field.text()
+
+        if checked:
+            if (
+                field.property("has_saved_key")
+                and not field.property("key_dirty")
+                and current_text == self._MASKED_SECRET
+            ):
+                self._set_secret_field_value(field, saved_value)
+            field.setEchoMode(QLineEdit.Normal)
+            button.setText("Hide")
+            return
+
+        if (
+            field.property("has_saved_key")
+            and not field.property("key_dirty")
+            and current_text == saved_value
+        ):
+            self._set_secret_field_value(field, self._MASKED_SECRET)
+        field.setEchoMode(QLineEdit.Password)
+        button.setText("Show")
     
     def _open_phoenix_ui(self):
         """Open Phoenix UI in browser."""
@@ -432,12 +341,36 @@ class APIKeyDialog(QDialog):
             "Automatically save LLM responses as test fixtures for mocking"
         )
         phoenix_layout.addWidget(self.phoenix_export_fixtures)
-        
+
+        policy_layout = QFormLayout()
+        self.phoenix_content_policy = QComboBox()
+        for label, value in self._PHOENIX_CONTENT_POLICIES:
+            self.phoenix_content_policy.addItem(label, value)
+        self.phoenix_content_policy.setToolTip(
+            "Choose whether model instrumentation includes full prompt/response text."
+        )
+        policy_layout.addRow("Content Policy:", self.phoenix_content_policy)
+        phoenix_layout.addLayout(policy_layout)
+
+        self.phoenix_include_binary_content = QCheckBox("Include binary/multimodal content")
+        self.phoenix_include_binary_content.setToolTip(
+            "Include binary or multimodal payload bodies in model instrumentation."
+        )
+        phoenix_layout.addWidget(self.phoenix_include_binary_content)
+
+        self.phoenix_policy_note = QLabel(
+            "Unredacted traces are appropriate for trusted local Phoenix deployments. "
+            "Use redacted traces if you later forward telemetry to a remote OTEL backend."
+        )
+        self.phoenix_policy_note.setWordWrap(True)
+        phoenix_layout.addWidget(self.phoenix_policy_note)
+
         # Store config fields
         self.config_fields["phoenix_enabled"] = self.phoenix_enabled
         self.config_fields["phoenix_port"] = self.phoenix_port
         self.config_fields["phoenix_project"] = self.phoenix_project
         self.config_fields["phoenix_export_fixtures"] = self.phoenix_export_fixtures
+        self.config_fields["phoenix_content_policy"] = self.phoenix_content_policy
         
         # Help text
         help_text = QLabel('<a href="https://phoenix.arize.com/">Learn more about Phoenix →</a>')
@@ -459,13 +392,17 @@ class APIKeyDialog(QDialog):
         """Load existing API keys and settings."""
         # Load API keys (masked)
         for provider, field in self.api_fields.items():
-            key = self.settings.get_api_key(provider)
+            key = str(self.settings.get_api_key(provider) or "")
             if key:
-                # Show masked version
-                field.setText("*" * 20)
+                self._set_secret_field_value(field, self._MASKED_SECRET)
                 field.setProperty("has_saved_key", True)
+                field.setProperty("saved_key_value", key)
+                field.setProperty("key_dirty", False)
             else:
+                self._set_secret_field_value(field, "")
                 field.setProperty("has_saved_key", False)
+                field.setProperty("saved_key_value", "")
+                field.setProperty("key_dirty", False)
         
         # Load Azure OpenAI settings
         azure_settings = self.settings.get("azure_openai_settings", {})
@@ -481,23 +418,13 @@ class APIKeyDialog(QDialog):
         if "endpoint" in azure_di_settings:
             self.azure_di_endpoint.setText(azure_di_settings["endpoint"])
 
-        # Load AWS Bedrock settings
-        bedrock_settings = self.settings.get("aws_bedrock_settings", {}) or {}
-        profile = bedrock_settings.get("profile")
-        region = bedrock_settings.get("region")
-        preferred_model = bedrock_settings.get("preferred_model")
-
-        if profile:
-            self.bedrock_profile.setText(str(profile))
-        if region:
-            self.bedrock_region.setText(str(region))
-
-        self._refresh_bedrock_models(force=False, preferred_model=preferred_model)
-
         gateway_settings = self.settings.get("pydantic_ai_gateway_settings", {}) or {}
         base_url = str(gateway_settings.get("base_url") or "").strip()
         if base_url:
             self.gateway_base_url.setText(base_url)
+        route = str(gateway_settings.get("route") or "").strip()
+        if route:
+            self.gateway_route.setText(route)
 
         # Load Phoenix settings
         phoenix_settings = self.settings.get("phoenix_settings", {})
@@ -509,6 +436,12 @@ class APIKeyDialog(QDialog):
         self.phoenix_export_fixtures.setChecked(
             phoenix_settings.get("export_fixtures", False)
         )
+        content_policy = str(phoenix_settings.get("content_policy") or "unredacted").strip().lower()
+        policy_index = self.phoenix_content_policy.findData(content_policy)
+        self.phoenix_content_policy.setCurrentIndex(policy_index if policy_index >= 0 else 0)
+        self.phoenix_include_binary_content.setChecked(
+            bool(phoenix_settings.get("include_binary_content", False))
+        )
     
     def save_keys(self):
         """Save API keys and settings to secure storage."""
@@ -518,21 +451,27 @@ class APIKeyDialog(QDialog):
         # Save API keys
         for provider, field in self.api_fields.items():
             text = field.text().strip()
+            saved_value = str(field.property("saved_key_value") or "")
+            has_saved_key = bool(field.property("has_saved_key"))
+            key_dirty = bool(field.property("key_dirty"))
             
-            # Skip if field shows masked placeholder
-            if text == "*" * 20 and field.property("has_saved_key"):
+            if has_saved_key and not key_dirty and text in {self._MASKED_SECRET, saved_value}:
                 continue
             
             # Save or remove key
             if text and not text.startswith("*"):
                 try:
                     if self.settings.set_api_key(provider, text):
-                        saved_count += 1
+                        stored_value = str(self.settings.get_api_key(provider) or "")
+                        if stored_value != text:
+                            errors.append(f"Saved {provider} key does not match the value entered")
+                        else:
+                            saved_count += 1
                     else:
                         errors.append(f"Failed to save {provider} key")
                 except Exception as e:
                     errors.append(f"Error saving {provider}: {str(e)}")
-            elif not text and field.property("has_saved_key"):
+            elif not text and has_saved_key:
                 # Remove key if field was cleared
                 self.settings.remove_api_key(provider)
         
@@ -557,31 +496,25 @@ class APIKeyDialog(QDialog):
             azure_di_settings = {"endpoint": azure_di_endpoint}
             self.settings.set("azure_di_settings", azure_di_settings)
 
-        # Save AWS Bedrock settings
-        bedrock_profile = self.bedrock_profile.text().strip() or None
-        bedrock_region = self.bedrock_region.text().strip() or None
-        bedrock_model = self.bedrock_model_combo.currentData()
-
-        bedrock_settings = {
-            "profile": bedrock_profile,
-            "region": bedrock_region,
-            "preferred_model": bedrock_model,
-        }
-        self.settings.set("aws_bedrock_settings", bedrock_settings)
-        AnthropicBedrockProvider.reset_backoff()
-
         gateway_base_url = self.gateway_base_url.text().strip()
+        gateway_route = self.gateway_route.text().strip()
         self.settings.set(
             "pydantic_ai_gateway_settings",
-            {"base_url": gateway_base_url or None},
+            {
+                "base_url": gateway_base_url or None,
+                "route": gateway_route or None,
+            },
         )
 
         # Save Phoenix settings
         phoenix_settings = {
             "enabled": self.phoenix_enabled.isChecked(),
+            "target": "local_phoenix",
             "port": int(self.phoenix_port.text() or 6006),
             "project": self.phoenix_project.text().strip() or "forensic-report-drafter",
-            "export_fixtures": self.phoenix_export_fixtures.isChecked()
+            "export_fixtures": self.phoenix_export_fixtures.isChecked(),
+            "content_policy": self.phoenix_content_policy.currentData() or "unredacted",
+            "include_binary_content": self.phoenix_include_binary_content.isChecked(),
         }
         self.settings.set("phoenix_settings", phoenix_settings)
         

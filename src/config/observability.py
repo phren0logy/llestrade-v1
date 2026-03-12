@@ -36,6 +36,10 @@ class PhoenixObservability:
         self.enabled = False
         self.client: Any = None
         self.tracer: Any = None
+        self._pydantic_ai_instrumentation: Any = None
+        self._target = "local_phoenix"
+        self._content_policy = "unredacted"
+        self._include_binary_content = False
         self.project_name = "forensic-report-drafter"
         self.export_fixtures = False
         self.fixtures_dir = Path("var/test_output/fixtures")
@@ -59,6 +63,10 @@ class PhoenixObservability:
                 os.getenv("PHOENIX_EXPORT_FIXTURES", "false").lower() == "true",
             )
         )
+        self._target = self._resolve_target(phoenix_settings)
+        self._content_policy = self._resolve_content_policy(phoenix_settings, target=self._target)
+        self._include_binary_content = self._resolve_include_binary_content(phoenix_settings)
+        self._pydantic_ai_instrumentation = None
 
         try:
             if not self._is_port_open(port):
@@ -81,6 +89,7 @@ class PhoenixObservability:
             self.enabled = False
             self.client = None
             self.tracer = None
+            self._pydantic_ai_instrumentation = None
             return None
 
     def _is_port_open(self, port: int) -> bool:
@@ -191,6 +200,54 @@ class PhoenixObservability:
     def shutdown(self) -> None:
         self.client = None
         self.tracer = None
+        self._pydantic_ai_instrumentation = None
+
+    def pydantic_ai_instrumentation(self) -> Any | None:
+        """Return redacted Pydantic AI instrumentation settings when Phoenix is enabled."""
+        if not self.enabled or not PHOENIX_AVAILABLE:
+            return None
+        if self._pydantic_ai_instrumentation is not None:
+            return self._pydantic_ai_instrumentation
+
+        try:
+            from pydantic_ai.models.instrumented import InstrumentationSettings
+
+            self._pydantic_ai_instrumentation = InstrumentationSettings(
+                include_content=self._content_policy == "unredacted",
+                include_binary_content=self._include_binary_content,
+            )
+        except Exception:
+            self.logger.debug("Failed to initialize Pydantic AI instrumentation", exc_info=True)
+            return None
+
+        return self._pydantic_ai_instrumentation
+
+    @staticmethod
+    def _resolve_target(phoenix_settings: Dict[str, Any]) -> str:
+        target = str(
+            os.getenv("PHOENIX_TARGET")
+            or phoenix_settings.get("target")
+            or "local_phoenix"
+        ).strip().lower()
+        return target or "local_phoenix"
+
+    @staticmethod
+    def _resolve_content_policy(phoenix_settings: Dict[str, Any], *, target: str) -> str:
+        policy = str(
+            os.getenv("PHOENIX_CONTENT_POLICY")
+            or phoenix_settings.get("content_policy")
+            or ""
+        ).strip().lower()
+        if policy in {"redacted", "unredacted"}:
+            return policy
+        return "unredacted" if target == "local_phoenix" else "redacted"
+
+    @staticmethod
+    def _resolve_include_binary_content(phoenix_settings: Dict[str, Any]) -> bool:
+        raw = os.getenv("PHOENIX_INCLUDE_BINARY_CONTENT")
+        if raw is not None:
+            return raw.strip().lower() in {"1", "true", "yes", "on"}
+        return bool(phoenix_settings.get("include_binary_content", False))
 
 
 phoenix = PhoenixObservability()
@@ -208,3 +265,7 @@ def trace_llm_call(model_name: Optional[str] = None):
 def trace_operation(name: str, attributes: Optional[Dict[str, Any]] = None):
     with phoenix.trace_operation(name, attributes) as span:
         yield span
+
+
+def get_pydantic_ai_instrumentation() -> Any | None:
+    return phoenix.pydantic_ai_instrumentation()

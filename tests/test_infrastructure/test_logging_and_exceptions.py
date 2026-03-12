@@ -15,7 +15,7 @@ from src.config.paths import app_logs_dir, app_crashes_dir
 from src.core.exception_handler import GlobalExceptionHandler
 
 
-class TestWindow(QWidget):
+class LoggingTestWindow(QWidget):
     """Test window for exception handling demonstration."""
     
     def __init__(self):
@@ -155,7 +155,7 @@ def main():
         print(f"\nCrash reports location: {crash_dir}")
         
         # Create and show test window
-        window = TestWindow()
+        window = LoggingTestWindow()
         window.show()
         
         # Run app

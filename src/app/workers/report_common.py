@@ -2,39 +2,29 @@
 
 from __future__ import annotations
 
-import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from src.app.core.citations import CitationRecordStats, CitationStore, parse_citation_tokens
+from src.app.core.llm_catalog import calculate_usage_cost
 from src.app.core.report_prompt_context import build_report_base_placeholders
 from src.app.core.project_manager import ProjectMetadata
 from src.app.core.report_inputs import category_display_name
-from src.app.core.secure_settings import SecureSettings
-from src.common.llm.factory import create_provider
+from src.common.llm.budgets import compute_input_token_budget
 from src.common.llm.tokens import TokenCounter
 from src.common.markdown import PromptReference, SourceReference, compute_file_checksum
 
 from .base import DashboardWorker
 from .llm_backend import (
-    LegacyProviderBackend,
+    PydanticAIDirectBackend,
     LLMExecutionBackend,
-    ProviderMetadata,
-    default_model_for_provider,
+    LLMProviderRequest,
+    backend_transport_name,
 )
-
-# Mapping of Anthropic cloud model slugs to their AWS Bedrock equivalents.
-# Reference: https://docs.claude.com/en/api/claude-on-amazon-bedrock
-_BEDROCK_MODEL_ALIASES: Dict[str, str] = {
-    "claude-sonnet-4-5": "anthropic.claude-sonnet-4-5-v1",
-    "claude-sonnet-4-5-20250929": "anthropic.claude-sonnet-4-5-v1",
-    "claude-opus-4-6": "anthropic.claude-opus-4-6-v1",
-    # Backward compatibility for existing saved selections.
-    "claude-opus-4-1-20250805": "anthropic.claude-opus-4-1-20250805-v1:0",
-}
 _CITATION_ID_RE = re.compile(r"^ev_[a-z0-9]{8,64}$")
+_MIN_REPORT_INPUT_BUDGET = 4_000
 
 
 class ReportWorkerBase(DashboardWorker):
@@ -50,6 +40,7 @@ class ReportWorkerBase(DashboardWorker):
         model: str,
         custom_model: Optional[str],
         context_window: Optional[int],
+        use_reasoning: bool,
         metadata: ProjectMetadata,
         placeholder_values: Mapping[str, str] | None,
         project_name: str,
@@ -60,21 +51,27 @@ class ReportWorkerBase(DashboardWorker):
         self._project_dir = project_dir
         self._inputs = list(inputs)
         self._provider_id = provider_id
-        self._model = self._resolve_model_alias(model)
+        self._llm_backend: LLMExecutionBackend = llm_backend or PydanticAIDirectBackend()
+        self._model = self._llm_backend.normalize_model(provider_id, model)
         raw_custom = custom_model.strip() if custom_model else None
-        self._custom_model = self._resolve_model_alias(raw_custom)
+        self._custom_model = self._llm_backend.normalize_model(provider_id, raw_custom)
         self._context_window = context_window
+        self._use_reasoning = use_reasoning
         self._metadata = metadata
         self._max_report_tokens = max_report_tokens
         self._base_placeholders = dict(placeholder_values or {})
         effective_name = project_name or metadata.case_name or project_dir.name
         self._project_name = effective_name
         self._run_timestamp = datetime.now(timezone.utc)
-        self._llm_backend: LLMExecutionBackend = llm_backend or LegacyProviderBackend()
         try:
             self._citation_store: CitationStore | None = CitationStore(project_dir)
         except Exception:
             self._citation_store = None
+        self._usage_totals = {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+        }
 
     # ------------------------------------------------------------------
     # Placeholder helpers
@@ -183,6 +180,38 @@ class ReportWorkerBase(DashboardWorker):
         except Exception:
             return path.name
 
+    def _input_token_limit(self, *, max_output_tokens: int) -> int | None:
+        return compute_input_token_budget(
+            raw_context_window=self._context_window,
+            max_output_tokens=max_output_tokens,
+            minimum_budget=_MIN_REPORT_INPUT_BUDGET,
+        )
+
+    def _record_response_usage(self, response: object) -> None:
+        usage = getattr(response, "usage", None)
+        if usage is None:
+            return
+
+        input_tokens = int(getattr(usage, "input_tokens", 0) or 0)
+        output_tokens = int(getattr(usage, "output_tokens", 0) or 0)
+        self._usage_totals["input_tokens"] += input_tokens
+        self._usage_totals["output_tokens"] += output_tokens
+        self._usage_totals["total_tokens"] += input_tokens + output_tokens
+
+    def _usage_summary(self) -> dict[str, int]:
+        return dict(self._usage_totals)
+
+    def _total_cost(self) -> float | None:
+        amount = calculate_usage_cost(
+            provider_id=self._provider_id,
+            model_id=self._custom_model or self._model,
+            input_tokens=self._usage_totals["input_tokens"],
+            output_tokens=self._usage_totals["output_tokens"],
+        )
+        if amount is None:
+            return None
+        return float(amount)
+
     # ------------------------------------------------------------------
     # Citation helpers
     # ------------------------------------------------------------------
@@ -280,47 +309,19 @@ class ReportWorkerBase(DashboardWorker):
     # ------------------------------------------------------------------
     # Provider helpers
     # ------------------------------------------------------------------
-    def _create_provider(self, system_prompt: str):
-        if not self._llm_backend.requires_native_provider():
-            return ProviderMetadata(
-                provider_name=self._provider_id,
-                default_model=(
-                    self._custom_model
-                    or self._model
-                    or default_model_for_provider(self._provider_id)
-                ),
+    def _create_provider(self):
+        return self._llm_backend.create_provider(
+            LLMProviderRequest(
+                provider_id=self._provider_id,
+                model=self._custom_model or self._model,
             )
+        )
 
-        settings = SecureSettings()
-        api_key = settings.get_api_key(self._provider_id)
-        kwargs = {
-            "provider": self._provider_id,
-            "default_system_prompt": system_prompt,
-            "api_key": api_key,
-        }
-        if self._provider_id == "azure_openai":
-            azure_settings = settings.get("azure_openai_settings", {}) or {}
-            kwargs["azure_endpoint"] = azure_settings.get("endpoint")
-            kwargs["api_version"] = azure_settings.get("api_version")
-        elif self._provider_id == "anthropic_bedrock":
-            bedrock_settings = settings.get("aws_bedrock_settings", {}) or {}
-            kwargs["aws_region"] = bedrock_settings.get("region") or os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION")
-            kwargs["aws_profile"] = bedrock_settings.get("profile")
-        provider = create_provider(**kwargs)
-        if provider is None or not getattr(provider, "initialized", False):
-            raise RuntimeError(
-                f"Unable to initialise provider '{self._provider_id}'. Check API keys and configuration."
-            )
-        return provider
-
-    def _resolve_model_alias(self, model: Optional[str]) -> Optional[str]:
-        """Translate known cloud model slugs into Bedrock IDs when needed."""
-        if not model:
-            return None
-        if self._provider_id != "anthropic_bedrock":
-            return model
-        normalized = model.strip()
-        return _BEDROCK_MODEL_ALIASES.get(normalized, normalized)
-
+    def _llm_execution_summary(self) -> str:
+        model_name = self._custom_model or self._model or "<default>"
+        return (
+            f"Using {backend_transport_name(self._llm_backend)} backend: "
+            f"{self._provider_id}/{model_name}"
+        )
 
 __all__ = ["ReportWorkerBase"]

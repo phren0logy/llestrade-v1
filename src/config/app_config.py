@@ -6,6 +6,7 @@ from typing import Any, Dict, Optional
 
 from dotenv import load_dotenv
 
+from src.app.core.llm_catalog import default_model_for_provider, runtime_default_model_for_provider
 # Load environment variables
 load_dotenv()
 
@@ -14,37 +15,44 @@ from src.common.llm.factory import create_provider
 from src.common.llm.base import BaseLLMProvider
 
 SETTINGS_FILE = Path("var/app_settings.json")
-DEFAULT_SETTINGS = {
-    "selected_llm_provider_id": "anthropic",
-    "llm_provider_configs": {
-        "anthropic": {
-            "enabled": True,
-            "label": "Anthropic Claude",
-            "default_model": "claude-sonnet-4-5-20250929"
+
+
+def _default_model(provider_id: str) -> str | None:
+    """Resolve a runtime default model without hardcoding repo-owned ids."""
+    if provider_id == "azure_openai":
+        return os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME")
+    if provider_id == "anthropic_bedrock":
+        return os.getenv("AWS_BEDROCK_DEFAULT_MODEL")
+    return runtime_default_model_for_provider(provider_id) or default_model_for_provider(provider_id)
+
+
+def _default_settings() -> dict[str, Any]:
+    return {
+        "selected_llm_provider_id": "anthropic",
+        "llm_provider_configs": {
+            "anthropic": {
+                "enabled": True,
+                "label": "Anthropic Claude",
+                "default_model": _default_model("anthropic"),
+            },
+            "gemini": {
+                "enabled": True,
+                "label": "Google Gemini",
+                "default_model": _default_model("gemini"),
+            },
+            "azure_openai": {
+                "enabled": True,
+                "label": "Azure OpenAI",
+                "default_deployment_name": _default_model("azure_openai"),
+                "azure_endpoint": None,
+                "api_version": None,
+            },
         },
-        "anthropic_bedrock": {
-            "enabled": True,
-            "label": "AWS Bedrock (Claude)",
-            "default_model": "anthropic.claude-sonnet-4-5-v1"
+        "general_settings": {
+            "debug_mode": False,
+            "default_system_prompt": "You are a helpful AI assistant.",
         },
-        "gemini": {
-            "enabled": True,
-            "label": "Google Gemini",
-            "default_model": "gemini-2.5-pro-preview-05-06"
-        },
-        "azure_openai": {
-            "enabled": True,
-            "label": "Azure OpenAI",
-            "default_deployment_name": os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME"),  # Read from environment
-            "azure_endpoint": None,
-            "api_version": None
-        }
-    },
-    "general_settings": {
-        "debug_mode": False,
-        "default_system_prompt": "You are a helpful AI assistant."
     }
-}
 
 def get_available_providers_and_models() -> list[dict[str, str]]:
     """
@@ -56,7 +64,7 @@ def get_available_providers_and_models() -> list[dict[str, str]]:
         'id': provider_id (e.g., "anthropic")
         'label': provider_label (e.g., "Anthropic Claude")
         'model': default_model_name or deployment_id
-        'display_name': A user-friendly string like "Anthropic Claude (claude-sonnet-4-5-20250929)"
+        'display_name': A user-friendly string like "Anthropic Claude (claude-sonnet-4-5)"
     """
     settings = load_app_settings()
     providers_and_models = []
@@ -69,7 +77,7 @@ def get_available_providers_and_models() -> list[dict[str, str]]:
             if provider_id == "azure_openai":
                 model = config.get("default_deployment_name")
             else:
-                model = config.get("default_model")
+                model = config.get("default_model") or _default_model(provider_id)
 
             if model: # Only add if a model/deployment is specified
                 display_name = f"{label} ({model})"
@@ -88,8 +96,9 @@ def load_app_settings() -> dict:
     SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
     if not SETTINGS_FILE.exists():
         logging.info(f"'{SETTINGS_FILE}' not found. Creating with default settings.")
-        save_app_settings(DEFAULT_SETTINGS)
-        return DEFAULT_SETTINGS.copy()
+        defaults = _default_settings()
+        save_app_settings(defaults)
+        return defaults
     try:
         with SETTINGS_FILE.open('r', encoding='utf-8') as f:
             settings = json.load(f)
@@ -103,7 +112,7 @@ def load_app_settings() -> dict:
         return settings
     except (IOError, json.JSONDecodeError) as e:
         logging.error(f"Error loading '{SETTINGS_FILE}': {e}. Returning default settings.")
-        return DEFAULT_SETTINGS.copy()
+        return _default_settings()
 
 def save_app_settings(settings: dict):
     """Saves the provided settings dictionary to SETTINGS_FILE."""
@@ -193,7 +202,11 @@ def get_configured_llm_provider(
             # Fall back to original behavior
             factory_args["azure_endpoint"] = specific_config.get("azure_endpoint")
             factory_args["api_version"] = specific_config.get("api_version")
-            effective_model_name = model_override if model_override else specific_config.get("default_deployment_name")
+            effective_model_name = (
+                model_override
+                or specific_config.get("default_deployment_name")
+                or _default_model("azure_openai")
+            )
         
         if not effective_model_name:
             logging.error(
@@ -217,9 +230,14 @@ def get_configured_llm_provider(
             model_override
             or bedrock_settings.get("preferred_model")
             or specific_config.get("default_model")
+            or _default_model("anthropic_bedrock")
         )
     else:  # For Anthropic, Gemini, etc.
-        effective_model_name = model_override if model_override else specific_config.get("default_model")
+        effective_model_name = (
+            model_override
+            or specific_config.get("default_model")
+            or _default_model(selected_provider_id)
+        )
         if not effective_model_name:
             logging.error(
                 f"Provider '{provider_label}' is selected, but its 'default_model' "
