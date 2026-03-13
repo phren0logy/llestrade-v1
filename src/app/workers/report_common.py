@@ -5,10 +5,11 @@ from __future__ import annotations
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from src.app.core.citations import CitationRecordStats, CitationStore, parse_citation_tokens
 from src.app.core.llm_catalog import calculate_usage_cost
+from src.app.core.llm_operation_settings import LLMReasoningSettings
 from src.app.core.report_prompt_context import build_report_base_placeholders
 from src.app.core.project_manager import ProjectMetadata
 from src.app.core.report_inputs import category_display_name
@@ -23,6 +24,7 @@ from .llm_backend import (
     LLMProviderRequest,
     backend_transport_name,
 )
+from .progress import WorkerProgressDetail
 _CITATION_ID_RE = re.compile(r"^ev_[a-z0-9]{8,64}$")
 _MIN_REPORT_INPUT_BUDGET = 4_000
 
@@ -41,6 +43,7 @@ class ReportWorkerBase(DashboardWorker):
         custom_model: Optional[str],
         context_window: Optional[int],
         use_reasoning: bool,
+        reasoning: Mapping[str, Any] | LLMReasoningSettings | None,
         metadata: ProjectMetadata,
         placeholder_values: Mapping[str, str] | None,
         project_name: str,
@@ -57,6 +60,7 @@ class ReportWorkerBase(DashboardWorker):
         self._custom_model = self._llm_backend.normalize_model(provider_id, raw_custom)
         self._context_window = context_window
         self._use_reasoning = use_reasoning
+        self._reasoning = LLMReasoningSettings.from_value(reasoning, legacy_use_reasoning=use_reasoning)
         self._metadata = metadata
         self._max_report_tokens = max_report_tokens
         self._base_placeholders = dict(placeholder_values or {})
@@ -72,6 +76,34 @@ class ReportWorkerBase(DashboardWorker):
             "output_tokens": 0,
             "total_tokens": 0,
         }
+
+    def _emit_progress_detail(
+        self,
+        *,
+        run_kind: str,
+        phase: str,
+        label: str,
+        percent: int | None = None,
+        detail: str | None = None,
+        section_index: int | None = None,
+        section_total: int | None = None,
+        section_title: str | None = None,
+    ) -> None:
+        signal = getattr(self, "progress_detail", None)
+        if signal is None:
+            return
+        signal.emit(
+            WorkerProgressDetail(
+                run_kind=run_kind,
+                phase=phase,
+                label=label,
+                percent=percent,
+                section_index=section_index,
+                section_total=section_total,
+                section_title=section_title,
+                detail=detail,
+            )
+        )
 
     # ------------------------------------------------------------------
     # Placeholder helpers

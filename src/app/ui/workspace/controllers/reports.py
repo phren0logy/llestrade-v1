@@ -52,6 +52,7 @@ from src.app.ui.workspace.services import (
     ReportRefinementJobConfig,
     ReportsService,
 )
+from src.app.workers.progress import WorkerProgressDetail
 from src.app.ui.dialogs.prompt_preview_dialog import PromptPreviewDialog
 from .reports_history import HistorySelection, current_history_selection, persist_report_history
 from .reports_io import (
@@ -91,6 +92,7 @@ class ReportsController:
         self._last_result: Optional[Dict[str, object]] = None
         self._report_running = False
         self._active_run_kind: Optional[str] = None
+        self._progress_detail: WorkerProgressDetail | None = None
         self._draft_forecast: CostForecast | None = None
         self._refinement_forecast: CostForecast | None = None
 
@@ -122,6 +124,7 @@ class ReportsController:
         self._selected_inputs.clear()
         self._last_result = None
         self._tab.progress_bar.setValue(0)
+        self._tab.progress_detail_label.clear()
         self._tab.log_text.clear()
         self._tab.history_list.clear()
         self._tab.open_reports_button.setEnabled(False)
@@ -268,6 +271,7 @@ class ReportsController:
             custom_model=state.last_custom_model,
             context_window=state.last_context_window,
             use_reasoning=state.last_use_reasoning,
+            reasoning=state.last_reasoning,
             transport=self._tab.llm_settings_panel.transport,
         )
         self._tab.llm_settings_panel.set_settings(llm_settings)
@@ -312,6 +316,7 @@ class ReportsController:
             custom_model=llm_settings.custom_model_id,
             context_window=llm_settings.context_window,
             use_reasoning=llm_settings.use_reasoning,
+            reasoning=llm_settings.reasoning.to_dict(),
             template_path=str(template_path) if template_path else None,
             transcript_path=str(transcript_path) if transcript_path else None,
             generation_user_prompt=str(generation_user_prompt) if generation_user_prompt else None,
@@ -772,6 +777,12 @@ class ReportsController:
                 "Select at least one input or provide a transcript before generating a draft.",
             )
             return
+        if not self._verify_gateway_before_run(
+            provider_id=llm_settings.provider_id,
+            model=llm_settings.custom_model_id or llm_settings.model_id,
+            title="Report Generator",
+        ):
+            return
 
         project_dir = Path(manager.project_dir)
         metadata = manager.metadata or ProjectMetadata(case_name=manager.project_name or "")
@@ -802,6 +813,7 @@ class ReportsController:
             custom_model=llm_settings.custom_model_id,
             context_window=llm_settings.context_window,
             use_reasoning=llm_settings.use_reasoning,
+            reasoning=llm_settings.reasoning.to_dict(),
             template_path=template_path,
             transcript_path=transcript_path,
             generation_user_prompt_path=gen_user_path,
@@ -816,6 +828,7 @@ class ReportsController:
             config,
             on_started=self._on_report_started,
             on_progress=self._on_report_progress,
+            on_progress_detail=self._on_report_progress_detail,
             on_log=self._append_report_log,
             on_finished=self._on_report_finished,
             on_failed=self._on_report_failed,
@@ -897,6 +910,12 @@ class ReportsController:
             return
 
         selected_pairs = self._resolve_selected_inputs()
+        if not self._verify_gateway_before_run(
+            provider_id=llm_settings.provider_id,
+            model=llm_settings.custom_model_id or llm_settings.model_id,
+            title="Report Generator",
+        ):
+            return
         project_dir = Path(manager.project_dir)
         metadata = manager.metadata or ProjectMetadata(case_name=manager.project_name or "")
         forecast = self._build_refinement_forecast()
@@ -927,6 +946,7 @@ class ReportsController:
             custom_model=llm_settings.custom_model_id,
             context_window=llm_settings.context_window,
             use_reasoning=llm_settings.use_reasoning,
+            reasoning=llm_settings.reasoning.to_dict(),
             template_path=template_path,
             transcript_path=transcript_path,
             refinement_user_prompt_path=ref_user_path,
@@ -941,6 +961,7 @@ class ReportsController:
             config,
             on_started=self._on_report_started,
             on_progress=self._on_report_progress,
+            on_progress_detail=self._on_report_progress_detail,
             on_log=self._append_report_log,
             on_finished=self._on_report_finished,
             on_failed=self._on_report_failed,
@@ -959,7 +980,9 @@ class ReportsController:
     def _on_report_started(self) -> None:
         self._report_running = True
         self._last_result = None
+        self._progress_detail = None
         self._tab.progress_bar.setValue(0)
+        self._tab.progress_detail_label.clear()
         self._tab.log_text.clear()
         self._update_report_controls()
         self._update_report_history_buttons()
@@ -968,16 +991,26 @@ class ReportsController:
         self._tab.progress_bar.setValue(percent)
         self._append_report_log(message)
 
+    def _on_report_progress_detail(self, detail: object) -> None:
+        if not isinstance(detail, WorkerProgressDetail):
+            return
+        self._progress_detail = detail
+        if detail.percent is not None:
+            self._tab.progress_bar.setValue(detail.percent)
+        self._tab.progress_detail_label.setText(self._format_progress_detail(detail))
+
     def _append_report_log(self, message: str) -> None:
         timestamp = datetime.now().strftime("%H:%M:%S")
         self._tab.log_text.append(f"[{timestamp}] {message}")
 
     def _on_report_finished(self, result: Dict[str, object]) -> None:
         self._report_running = False
+        self._progress_detail = None
         run_type = self._active_run_kind or str(result.get("run_type") or "draft")
         self._active_run_kind = None
         self._update_report_controls()
         self._tab.progress_bar.setValue(100)
+        self._tab.progress_detail_label.setText("Completed")
         self._append_report_log("Report run completed successfully.")
 
         self._last_result = result
@@ -987,11 +1020,21 @@ class ReportsController:
 
     def _on_report_failed(self, message: str) -> None:
         self._report_running = False
+        self._progress_detail = None
         self._active_run_kind = None
         self._update_report_controls()
         self._update_report_history_buttons()
+        self._tab.progress_detail_label.setText("Failed")
         QMessageBox.critical(self._workspace, "Report Generator", message)
         self._append_report_log(f"Error: {message}")
+
+    def _format_progress_detail(self, detail: WorkerProgressDetail) -> str:
+        if detail.section_total:
+            title = detail.section_title or "Untitled"
+            return f"{detail.label} | Section {detail.section_index or 0}/{detail.section_total}: {title}"
+        if detail.detail:
+            return f"{detail.label} | {detail.detail}"
+        return detail.label
 
     def _on_run_cost(self, amount: float, provider: str, stage: str) -> None:
         manager = self._project_manager
@@ -1203,6 +1246,7 @@ class ReportsController:
         self._tab.history_list.clear()
         self._tab.log_text.clear()
         self._tab.progress_bar.setValue(0)
+        self._tab.progress_detail_label.clear()
         self._tab.generate_draft_button.setEnabled(False)
         self._tab.run_refinement_button.setEnabled(False)
         self._tab.open_reports_button.setEnabled(False)
@@ -1242,6 +1286,62 @@ class ReportsController:
             error or "Select a provider and model before continuing.",
         )
         return None
+
+    def _verify_gateway_before_run(
+        self,
+        *,
+        provider_id: str,
+        model: str | None,
+        title: str,
+    ) -> bool:
+        result = self._service.verify_gateway_access(provider_id=provider_id, model=model)
+        if result.ok:
+            return True
+        QMessageBox.warning(
+            self._workspace,
+            title,
+            self._gateway_failure_message(result),
+        )
+        return False
+
+    @staticmethod
+    def _gateway_failure_message(result) -> str:  # noqa: ANN001
+        model_label = result.model or "<default>"
+        target = f"{result.provider_id}/{model_label}"
+        route = f"\nRoute: {result.route}" if result.route else ""
+        status = f"\nGateway response: HTTP {result.status_code}" if result.status_code else ""
+        if result.kind in {"auth_invalid", "auth_forbidden"}:
+            return (
+                "The saved Pydantic AI Gateway app key was rejected by the gateway.\n\n"
+                f"Requested selection: {target}{route}{status}\n"
+                f"Gateway message: {result.message}\n\n"
+                "Update Settings > API Keys > Pydantic AI Gateway App Key, then try again."
+            )
+        if result.kind == "route_missing":
+            return (
+                "The configured gateway route/provider mapping is not available for this report run.\n\n"
+                f"Requested selection: {target}{route}{status}\n"
+                f"Gateway message: {result.message}\n\n"
+                "Check the selected provider/model and the optional gateway route in Settings."
+            )
+        if result.kind == "missing_config":
+            return (
+                "Gateway mode is enabled, but the gateway configuration is incomplete.\n\n"
+                f"Requested selection: {target}\n"
+                f"Gateway message: {result.message}\n\n"
+                "Set the Pydantic AI Gateway App Key in Settings > API Keys before starting the run."
+            )
+        if result.kind in {"timeout", "unreachable", "server_error"}:
+            return (
+                "The gateway is currently unavailable, so the report run was not started.\n\n"
+                f"Requested selection: {target}{route}{status}\n"
+                f"Gateway message: {result.message}"
+            )
+        return (
+            "The gateway access check failed, so the report run was not started.\n\n"
+            f"Requested selection: {target}{route}{status}\n"
+            f"Gateway message: {result.message}"
+        )
 
     def _resolve_selected_inputs(self) -> List[tuple[str, str]]:
         return resolve_selected_inputs(self._selected_inputs)

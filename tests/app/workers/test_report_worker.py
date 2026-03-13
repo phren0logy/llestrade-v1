@@ -32,6 +32,7 @@ from src.app.workers.llm_backend import (
 )
 from src.app.workers.report_worker import DraftReportWorker, ReportRefinementWorker
 from src.app.workers import report_common
+from src.app.workers.progress import WorkerProgressDetail
 
 
 @pytest.fixture(scope="module")
@@ -723,6 +724,23 @@ def test_report_draft_trace_attributes_match_between_legacy_and_gateway(
     assert gateway_outputs[0]["title"] == "Section One"
     assert legacy_traces == gateway_traces == [
         (
+            "report_draft.section",
+            {
+                "llestrade.transport": "direct",
+                "llestrade.provider_id": "anthropic",
+                "llestrade.model": "claude-sonnet-4-5",
+                "llestrade.reasoning": False,
+                "llestrade.max_tokens": 60000,
+                "llestrade.temperature": 0.2,
+                "llestrade.worker": "report_draft",
+                "llestrade.stage": "report_draft",
+                "llestrade.section_index": 1,
+                "llestrade.section_total": 1,
+                "llestrade.section_title": "Section One",
+                "llestrade.phase_name": "section",
+            },
+        ),
+        (
             "report_draft.invoke_llm",
             {
                 "llestrade.transport": "direct",
@@ -903,6 +921,20 @@ def test_report_refine_trace_attributes_match_between_legacy_and_gateway(
     assert gateway_result[0].strip() == "stub output"
     assert legacy_traces == gateway_traces == [
         (
+            "report_refine.phase",
+            {
+                "llestrade.transport": "direct",
+                "llestrade.provider_id": "anthropic",
+                "llestrade.model": "claude-sonnet-4-5",
+                "llestrade.reasoning": False,
+                "llestrade.max_tokens": 60000,
+                "llestrade.temperature": 0.2,
+                "llestrade.worker": "report_refine",
+                "llestrade.stage": "report_refine",
+                "llestrade.phase_name": "refining",
+            },
+        ),
+        (
             "report_refine.invoke_llm",
             {
                 "llestrade.transport": "direct",
@@ -916,6 +948,52 @@ def test_report_refine_trace_attributes_match_between_legacy_and_gateway(
             },
         )
     ]
+
+
+def test_report_draft_emits_progress_detail_for_sections(
+    tmp_path: Path,
+    qt_app: QApplication,
+) -> None:
+    assert qt_app is not None
+    (common_paths, _refinement_system_prompt_path) = _prepare_common_files(tmp_path)
+    (
+        template_path,
+        generation_user_prompt_path,
+        _refinement_user_prompt_path,
+        generation_system_prompt_path,
+    ) = common_paths
+    section = TemplateSection(title="Section One", body="# Section One\n\nBody")
+
+    worker = DraftReportWorker(
+        project_dir=tmp_path,
+        inputs=[(REPORT_CATEGORY_CONVERTED, "converted_documents/doc.md")],
+        provider_id="anthropic",
+        model="claude-sonnet-4-5",
+        custom_model=None,
+        context_window=None,
+        template_path=template_path,
+        transcript_path=None,
+        generation_user_prompt_path=generation_user_prompt_path,
+        generation_system_prompt_path=generation_system_prompt_path,
+        metadata=ProjectMetadata(case_name="Case"),
+        llm_backend=_ResultBackend(_model_response("stub output")),
+    )
+    details: list[WorkerProgressDetail] = []
+    worker.progress_detail.connect(details.append)
+
+    worker._generate_section_outputs(
+        sections=[section],
+        user_prompt_template="Write {template_section}\n\n{additional_documents}",
+        additional_documents="Documents",
+        transcript_text="",
+        system_prompt="System prompt",
+        placeholder_map={},
+        evidence_ledger="",
+    )
+
+    assert [detail.phase for detail in details] == ["section_started", "section_completed"]
+    assert details[0].section_index == 1
+    assert details[0].section_total == 1
 
 
 def test_report_refine_passes_computed_input_budget_to_backend(
@@ -988,7 +1066,7 @@ def test_report_refine_applies_openai_reasoning_settings(
         draft_path=draft_path,
         inputs=[(REPORT_CATEGORY_CONVERTED, "converted_documents/doc.md")],
         provider_id="openai",
-        model="gpt-4.1",
+        model="gpt-5.1",
         custom_model=None,
         context_window=100_000,
         template_path=template_path,

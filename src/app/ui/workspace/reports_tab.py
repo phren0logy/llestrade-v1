@@ -89,7 +89,7 @@ class ReportsTab(QWidget):
         self.custom_model_edit = self.llm_settings_panel.custom_model_edit
         self.custom_context_label = self.llm_settings_panel.custom_context_label
         self.custom_context_spin = self.llm_settings_panel.custom_context_spin
-        self.reasoning_checkbox = self.llm_settings_panel.reasoning_checkbox
+        self.reasoning_state_combo = self.llm_settings_panel.reasoning_state_combo
         self.advanced_reasoning_toggle = self.llm_settings_panel.advanced_toggle
 
         self.template_edit = QLineEdit()
@@ -121,6 +121,8 @@ class ReportsTab(QWidget):
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
+        self.progress_detail_label = QLabel("")
+        self.progress_detail_label.setStyleSheet("color: #666;")
 
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
@@ -255,6 +257,7 @@ class ReportsTab(QWidget):
         layout.addLayout(open_row)
 
         layout.addWidget(self.progress_bar)
+        layout.addWidget(self.progress_detail_label)
         layout.addWidget(self.log_text)
 
         history_group = QGroupBox("Recent Reports")

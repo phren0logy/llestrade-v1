@@ -4,12 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Mapping, Optional, Sequence
+from typing import Any, Callable, Mapping, Optional, Sequence
 
 from shiboken6 import isValid
 
 from src.app.core.project_manager import ProjectMetadata
-from src.app.workers.llm_backend import LLMExecutionBackend
+from src.app.workers.llm_backend import GatewayAccessCheck, LLMExecutionBackend
 from src.app.workers import WorkerCoordinator
 from src.app.workers.report_worker import DraftReportWorker, ReportRefinementWorker
 
@@ -30,6 +30,7 @@ class ReportDraftJobConfig:
     generation_system_prompt_path: Path
     metadata: ProjectMetadata
     use_reasoning: bool = False
+    reasoning: Mapping[str, Any] | None = None
     max_report_tokens: int = 60_000
     placeholder_values: Mapping[str, str] | None = None
     project_name: str = ""
@@ -53,6 +54,7 @@ class ReportRefinementJobConfig:
     refinement_system_prompt_path: Path
     metadata: ProjectMetadata
     use_reasoning: bool = False
+    reasoning: Mapping[str, Any] | None = None
     max_report_tokens: int = 60_000
     placeholder_values: Mapping[str, str] | None = None
     project_name: str = ""
@@ -92,6 +94,7 @@ class ReportsService:
         *,
         on_started: Callable[[], None],
         on_progress: Callable[[int, str], None],
+        on_progress_detail: Callable[[object], None],
         on_log: Callable[[str], None],
         on_finished: Callable[[dict], None],
         on_failed: Callable[[str], None],
@@ -108,6 +111,7 @@ class ReportsService:
             custom_model=config.custom_model,
             context_window=config.context_window,
             use_reasoning=config.use_reasoning,
+            reasoning=config.reasoning,
             template_path=config.template_path,
             transcript_path=config.transcript_path,
             generation_user_prompt_path=config.generation_user_prompt_path,
@@ -125,6 +129,7 @@ class ReportsService:
             worker=worker,
             on_started=on_started,
             on_progress=on_progress,
+            on_progress_detail=on_progress_detail,
             on_log=on_log,
             on_finished=on_finished,
             on_failed=on_failed,
@@ -140,6 +145,7 @@ class ReportsService:
         *,
         on_started: Callable[[], None],
         on_progress: Callable[[int, str], None],
+        on_progress_detail: Callable[[object], None],
         on_log: Callable[[str], None],
         on_finished: Callable[[dict], None],
         on_failed: Callable[[str], None],
@@ -157,6 +163,7 @@ class ReportsService:
             custom_model=config.custom_model,
             context_window=config.context_window,
             use_reasoning=config.use_reasoning,
+            reasoning=config.reasoning,
             template_path=config.template_path,
             transcript_path=config.transcript_path,
             refinement_user_prompt_path=config.refinement_user_prompt_path,
@@ -174,6 +181,7 @@ class ReportsService:
             worker=worker,
             on_started=on_started,
             on_progress=on_progress,
+            on_progress_detail=on_progress_detail,
             on_log=on_log,
             on_finished=on_finished,
             on_failed=on_failed,
@@ -190,12 +198,15 @@ class ReportsService:
         worker,
         on_started: Callable[[], None],
         on_progress: Callable[[int, str], None],
+        on_progress_detail: Callable[[object], None],
         on_log: Callable[[str], None],
         on_finished: Callable[[dict], None],
         on_failed: Callable[[str], None],
         on_cost: Callable[[float, str, str], None],
     ) -> bool:
         worker.progress.connect(on_progress)
+        if hasattr(worker, "progress_detail"):
+            worker.progress_detail.connect(on_progress_detail)
         worker.log_message.connect(on_log)
         if hasattr(worker, "cost_calculated"):
             worker.cost_calculated.connect(on_cost)
@@ -233,6 +244,34 @@ class ReportsService:
         if stored and stored is not worker and isValid(stored):
             stored.deleteLater()
         callback(message)
+
+    def verify_gateway_access(
+        self,
+        *,
+        provider_id: str,
+        model: str | None,
+        timeout_seconds: float = 5.0,
+        force: bool = False,
+    ) -> GatewayAccessCheck:
+        backend = self._llm_backend
+        verifier = getattr(backend, "verify_gateway_access", None)
+        if callable(verifier):
+            return verifier(
+                provider_id,
+                model,
+                timeout_seconds=timeout_seconds,
+                force=force,
+            )
+        return GatewayAccessCheck(
+            ok=True,
+            kind="ok",
+            status_code=200,
+            message="Gateway verification not required for this backend.",
+            base_url=None,
+            route=None,
+            provider_id=provider_id,
+            model=model,
+        )
 
 
 __all__ = [

@@ -45,6 +45,8 @@ def persist_report_history(manager, run_type: str, result: Dict[str, object]) ->
     custom_model = result.get("custom_model")
     context_window = result.get("context_window")
     use_reasoning = bool(result.get("use_reasoning", False))
+    reasoning = result.get("reasoning")
+    reasoning = reasoning if isinstance(reasoning, dict) else {}
     try:
         context_window_int = int(context_window) if context_window is not None else None
     except (ValueError, TypeError):
@@ -75,6 +77,7 @@ def persist_report_history(manager, run_type: str, result: Dict[str, object]) ->
             context_window=context_window_int,
             inputs=inputs,
             use_reasoning=use_reasoning,
+            reasoning=reasoning,
             template_path=template_value,
             transcript_path=transcript_value,
             refinement_user_prompt=refinement_user_prompt,
@@ -100,6 +103,7 @@ def persist_report_history(manager, run_type: str, result: Dict[str, object]) ->
         context_window=context_window_int,
         inputs=inputs,
         use_reasoning=use_reasoning,
+        reasoning=reasoning,
         template_path=template_value,
         transcript_path=transcript_value,
         generation_user_prompt=generation_user_prompt,

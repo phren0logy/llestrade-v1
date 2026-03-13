@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Mapping, Optional, Sequence
+from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 import frontmatter
 from PySide6.QtCore import Signal
@@ -49,6 +49,7 @@ class DraftReportWorker(ReportWorkerBase):
     """Generate a draft report from selected project inputs."""
 
     progress = Signal(int, str)
+    progress_detail = Signal(object)
     log_message = Signal(str)
     finished = Signal(dict)
     failed = Signal(str)
@@ -69,6 +70,7 @@ class DraftReportWorker(ReportWorkerBase):
         generation_system_prompt_path: Path,
         metadata: ProjectMetadata,
         use_reasoning: bool = False,
+        reasoning: Mapping[str, Any] | None = None,
         max_report_tokens: int = 60_000,
         placeholder_values: Mapping[str, str] | None = None,
         project_name: str = "",
@@ -84,6 +86,7 @@ class DraftReportWorker(ReportWorkerBase):
             custom_model=custom_model,
             context_window=context_window,
             use_reasoning=use_reasoning,
+            reasoning=reasoning,
             metadata=metadata,
             placeholder_values=placeholder_values,
             project_name=project_name,
@@ -133,6 +136,13 @@ class DraftReportWorker(ReportWorkerBase):
                 f"Preparing draft run with {len(self._inputs)} input(s){transcript_note}."
             )
             self.progress.emit(5, "Reading inputs…")
+            self._emit_progress_detail(
+                run_kind="report_draft",
+                phase="preparing",
+                label="Reading inputs",
+                percent=5,
+                detail=f"{len(self._inputs)} selected input(s)",
+            )
             combined_content, inputs_metadata = self._combine_inputs()
             inputs_metadata = list(inputs_metadata)
             evidence_ledger = self._build_report_evidence_ledger(inputs_metadata)
@@ -180,6 +190,13 @@ class DraftReportWorker(ReportWorkerBase):
 
             self.log_message.emit(
                 f"Generating draft content across {len(sections)} template section(s)…"
+            )
+            self._emit_progress_detail(
+                run_kind="report_draft",
+                phase="generating_sections",
+                label="Generating draft sections",
+                percent=10,
+                detail=f"{len(sections)} section(s)",
             )
 
             section_outputs = self._generate_section_outputs(
@@ -258,6 +275,7 @@ class DraftReportWorker(ReportWorkerBase):
                 "custom_model": self._custom_model,
                 "context_window": self._context_window,
                 "use_reasoning": self._use_reasoning,
+                "reasoning": self._reasoning.to_dict(),
                 "inputs": [item[1] for item in self._inputs],
                 "template_path": str(self._template_path),
                 "transcript_path": str(self._transcript_path) if self._transcript_path else None,
@@ -271,6 +289,12 @@ class DraftReportWorker(ReportWorkerBase):
             if result["cost"] is not None:
                 self.cost_calculated.emit(float(result["cost"]), self._provider_id, "report_draft")
             self.progress.emit(100, "Draft generated")
+            self._emit_progress_detail(
+                run_kind="report_draft",
+                phase="completed",
+                label="Draft generated",
+                percent=100,
+            )
             self.finished.emit(result)
         except Exception as exc:  # pragma: no cover - defensive
             self.failed.emit(str(exc))
@@ -307,6 +331,15 @@ class DraftReportWorker(ReportWorkerBase):
 
             pct = 5 + int(60 * index / max(total, 1))
             self.progress.emit(pct, f"Generating section {index} of {total}: {section.title}")
+            self._emit_progress_detail(
+                run_kind="report_draft",
+                phase="section_started",
+                label=f"Generating section {index} of {total}",
+                percent=pct,
+                section_index=index,
+                section_total=total,
+                section_title=section.title,
+            )
             stage_input = ReportDraftStageInput(
                 section_index=index,
                 section_total=total,
@@ -320,24 +353,37 @@ class DraftReportWorker(ReportWorkerBase):
                 temperature=0.2,
             )
             trace_attributes = stage_trace_attributes(stage_input)
-            with trace_operation("report_draft.invoke_llm", trace_attributes):
-                response = self._llm_backend.invoke_response(
-                    provider,
-                    LLMInvocationRequest(
-                        prompt=prompt,
-                        system_prompt=system_prompt,
-                        model=self._custom_model or self._model,
-                        model_settings=self._llm_backend.build_model_settings(
-                            self._provider_id,
-                            self._custom_model or self._model,
-                            temperature=0.2,
-                            max_tokens=self._max_report_tokens,
-                            use_reasoning=self._use_reasoning,
+            section_trace_attributes = dict(trace_attributes)
+            section_trace_attributes["llestrade.phase_name"] = "section"
+            with trace_operation("report_draft.section", section_trace_attributes):
+                with trace_operation("report_draft.invoke_llm", trace_attributes):
+                    response = self._llm_backend.invoke_response(
+                        provider,
+                        LLMInvocationRequest(
+                            prompt=prompt,
+                            system_prompt=system_prompt,
+                            model=self._custom_model or self._model,
+                            model_settings=self._llm_backend.build_model_settings(
+                                self._provider_id,
+                                self._custom_model or self._model,
+                                temperature=0.2,
+                                max_tokens=self._max_report_tokens,
+                                use_reasoning=self._use_reasoning,
+                                reasoning=self._reasoning,
+                            ),
+                            input_tokens_limit=self._input_token_limit(
+                                max_output_tokens=self._max_report_tokens
+                            ),
                         ),
-                        input_tokens_limit=self._input_token_limit(
-                            max_output_tokens=self._max_report_tokens
-                        ),
-                    ),
+                    )
+                self._emit_progress_detail(
+                    run_kind="report_draft",
+                    phase="section_completed",
+                    label=f"Completed section {index} of {total}",
+                    percent=pct,
+                    section_index=index,
+                    section_total=total,
+                    section_title=section.title,
                 )
             self._record_response_usage(response)
             content = str(response.text or "").strip()
@@ -431,6 +477,7 @@ class ReportRefinementWorker(ReportWorkerBase):
     """Refine an existing draft report into a variant."""
 
     progress = Signal(int, str)
+    progress_detail = Signal(object)
     log_message = Signal(str)
     finished = Signal(dict)
     failed = Signal(str)
@@ -452,6 +499,7 @@ class ReportRefinementWorker(ReportWorkerBase):
         refinement_system_prompt_path: Path,
         metadata: ProjectMetadata,
         use_reasoning: bool = False,
+        reasoning: Mapping[str, Any] | None = None,
         max_report_tokens: int = 60_000,
         placeholder_values: Mapping[str, str] | None = None,
         project_name: str = "",
@@ -467,6 +515,7 @@ class ReportRefinementWorker(ReportWorkerBase):
             custom_model=custom_model,
             context_window=context_window,
             use_reasoning=use_reasoning,
+            reasoning=reasoning,
             metadata=metadata,
             placeholder_values=placeholder_values,
             project_name=project_name,
@@ -572,6 +621,12 @@ class ReportRefinementWorker(ReportWorkerBase):
 
             self.log_message.emit("Refining draft report…")
             self.progress.emit(30, "Refining draft…")
+            self._emit_progress_detail(
+                run_kind="report_refine",
+                phase="refining",
+                label="Refining draft",
+                percent=30,
+            )
             refinement_placeholders = build_report_refinement_placeholders(
                 base_placeholders=placeholder_map,
                 draft_report=draft_content,
@@ -585,6 +640,12 @@ class ReportRefinementWorker(ReportWorkerBase):
                 system_prompt=refinement_system_prompt,
             )
             self.progress.emit(85, "Writing refinement outputs…")
+            self._emit_progress_detail(
+                run_kind="report_refine",
+                phase="writing_outputs",
+                label="Writing refinement outputs",
+                percent=85,
+            )
 
             refinement_prompts = [
                 self._prompt_reference(self._refinement_user_prompt_path, role="refinement-user"),
@@ -682,6 +743,7 @@ class ReportRefinementWorker(ReportWorkerBase):
                 "custom_model": self._custom_model,
                 "context_window": self._context_window,
                 "use_reasoning": self._use_reasoning,
+                "reasoning": self._reasoning.to_dict(),
                 "inputs": [item[1] for item in self._inputs],
                 "template_path": str(self._template_path) if self._template_path else None,
                 "transcript_path": str(self._transcript_path) if self._transcript_path else None,
@@ -695,6 +757,12 @@ class ReportRefinementWorker(ReportWorkerBase):
             if result["cost"] is not None:
                 self.cost_calculated.emit(float(result["cost"]), self._provider_id, "report_refinement")
             self.progress.emit(100, "Refinement completed")
+            self._emit_progress_detail(
+                run_kind="report_refine",
+                phase="completed",
+                label="Refinement completed",
+                percent=100,
+            )
             self.finished.emit(result)
         except Exception as exc:  # pragma: no cover - defensive
             self.failed.emit(str(exc))
@@ -720,25 +788,29 @@ class ReportRefinementWorker(ReportWorkerBase):
             temperature=0.2,
         )
         trace_attributes = stage_trace_attributes(stage_input)
-        with trace_operation("report_refine.invoke_llm", trace_attributes):
-            response = self._llm_backend.invoke_response(
-                provider,
-                LLMInvocationRequest(
-                    prompt=prompt,
-                    system_prompt=system_prompt,
-                    model=self._custom_model or self._model,
-                    model_settings=self._llm_backend.build_model_settings(
-                        self._provider_id,
-                        self._custom_model or self._model,
-                        temperature=0.2,
-                        max_tokens=self._max_report_tokens,
-                        use_reasoning=self._use_reasoning,
+        phase_trace_attributes = dict(trace_attributes)
+        phase_trace_attributes["llestrade.phase_name"] = "refining"
+        with trace_operation("report_refine.phase", phase_trace_attributes):
+            with trace_operation("report_refine.invoke_llm", trace_attributes):
+                response = self._llm_backend.invoke_response(
+                    provider,
+                    LLMInvocationRequest(
+                        prompt=prompt,
+                        system_prompt=system_prompt,
+                        model=self._custom_model or self._model,
+                        model_settings=self._llm_backend.build_model_settings(
+                            self._provider_id,
+                            self._custom_model or self._model,
+                            temperature=0.2,
+                            max_tokens=self._max_report_tokens,
+                            use_reasoning=self._use_reasoning,
+                            reasoning=self._reasoning,
+                        ),
+                        input_tokens_limit=self._input_token_limit(
+                            max_output_tokens=self._max_report_tokens
+                        ),
                     ),
-                    input_tokens_limit=self._input_token_limit(
-                        max_output_tokens=self._max_report_tokens
-                    ),
-                ),
-            )
+                )
         self._record_response_usage(response)
         content = str(response.text or "").strip()
         if not content:
