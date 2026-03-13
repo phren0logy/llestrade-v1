@@ -23,6 +23,27 @@ def qt_app() -> QApplication:
 
 @pytest.fixture(autouse=True)
 def stub_catalog(monkeypatch: pytest.MonkeyPatch) -> None:
+    anthropic_reasoning = llm_catalog.LLMReasoningCapabilities(
+        supports_reasoning_controls=True,
+        can_disable_reasoning=True,
+        controls=("toggle", "budget"),
+        budget_step=1024,
+        default_state="off",
+    )
+    openai_reasoning = llm_catalog.LLMReasoningCapabilities(
+        supports_reasoning_controls=True,
+        can_disable_reasoning=True,
+        controls=("toggle", "effort"),
+        allowed_efforts=("low", "medium", "high"),
+        default_state="off",
+    )
+    gemini_reasoning = llm_catalog.LLMReasoningCapabilities(
+        supports_reasoning_controls=True,
+        can_disable_reasoning=True,
+        controls=("toggle", "budget"),
+        budget_step=1024,
+        default_state="off",
+    )
     providers = (
         llm_catalog.LLMProviderOption(
             provider_id="anthropic",
@@ -34,6 +55,7 @@ def stub_catalog(monkeypatch: pytest.MonkeyPatch) -> None:
                     context_window=200_000,
                     input_price_label="$3/1M",
                     output_price_label="$15/1M",
+                    reasoning_capabilities=anthropic_reasoning,
                 ),
             ),
         ),
@@ -47,6 +69,7 @@ def stub_catalog(monkeypatch: pytest.MonkeyPatch) -> None:
                     context_window=1_047_576,
                     input_price_label="$2/1M",
                     output_price_label="$8/1M",
+                    reasoning_capabilities=openai_reasoning,
                 ),
             ),
         ),
@@ -60,6 +83,7 @@ def stub_catalog(monkeypatch: pytest.MonkeyPatch) -> None:
                     context_window=1_048_576,
                     input_price_label="$1.25/1M",
                     output_price_label="$10/1M",
+                    reasoning_capabilities=gemini_reasoning,
                 ),
                 llm_catalog.LLMModelOption(
                     model_id="gemini-2.5-flash",
@@ -67,6 +91,7 @@ def stub_catalog(monkeypatch: pytest.MonkeyPatch) -> None:
                     context_window=1_048_576,
                     input_price_label="$0.3/1M",
                     output_price_label="$2.5/1M",
+                    reasoning_capabilities=gemini_reasoning,
                 ),
             ),
         ),
@@ -124,6 +149,22 @@ def test_panel_returns_provider_bound_custom_model_settings(qt_app: QApplication
         assert settings.model_id == "gemini-2.5-flash"
         assert settings.context_window == 1_000_000
         assert settings.use_reasoning is True
+    finally:
+        panel.deleteLater()
+
+
+def test_panel_exposes_provider_native_reasoning_controls(qt_app: QApplication) -> None:
+    assert qt_app is not None
+    panel = LLMSettingsPanel()
+    try:
+        provider_index = panel.provider_combo.findData("openai")
+        panel.provider_combo.setCurrentIndex(provider_index)
+
+        state_options = [panel.reasoning_state_combo.itemText(i) for i in range(panel.reasoning_state_combo.count())]
+        effort_options = [panel.reasoning_effort_combo.itemData(i) for i in range(panel.reasoning_effort_combo.count())]
+
+        assert state_options == ["Off", "On"]
+        assert effort_options == ["low", "medium", "high"]
     finally:
         panel.deleteLater()
 

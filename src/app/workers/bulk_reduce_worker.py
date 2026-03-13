@@ -1110,6 +1110,7 @@ class BulkReduceWorker(DashboardWorker):
                         temperature=provider_cfg.temperature,
                         max_tokens=max_tokens,
                         use_reasoning=getattr(self._group, "use_reasoning", False),
+                        reasoning=getattr(self._group, "reasoning", {}),
                     ),
                     input_tokens_limit=input_budget,
                 ),

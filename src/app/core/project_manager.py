@@ -240,6 +240,7 @@ class ReportHistoryEntry:
     custom_model: Optional[str] = None
     context_window: Optional[int] = None
     use_reasoning: bool = False
+    reasoning: Dict[str, Any] = field(default_factory=dict)
     inputs: List[str] = field(default_factory=list)
     template_path: Optional[str] = None
     transcript_path: Optional[str] = None
@@ -281,6 +282,7 @@ class ReportHistoryEntry:
             custom_model=data.get("custom_model"),
             context_window=_optional_int(data.get("context_window")),
             use_reasoning=bool(data.get("use_reasoning", False)),
+            reasoning=dict(data.get("reasoning", {}) or {}),
             inputs=list(data.get("inputs", [])),
             template_path=data.get("template_path"),
             transcript_path=data.get("transcript_path"),
@@ -313,6 +315,7 @@ class ReportState:
     last_custom_model: Optional[str] = None
     last_context_window: Optional[int] = None
     last_use_reasoning: bool = False
+    last_reasoning: Dict[str, Any] = field(default_factory=dict)
     last_template: Optional[str] = None
     last_transcript: Optional[str] = None
     last_generation_user_prompt: Optional[str] = None
@@ -330,6 +333,7 @@ class ReportState:
             "last_custom_model": self.last_custom_model,
             "last_context_window": self.last_context_window,
             "last_use_reasoning": self.last_use_reasoning,
+            "last_reasoning": self.last_reasoning,
             "last_template": self.last_template,
             "last_transcript": self.last_transcript,
             "last_generation_user_prompt": self.last_generation_user_prompt,
@@ -374,12 +378,14 @@ class ReportState:
                 else None
             ),
             use_reasoning=bool(data.get("last_use_reasoning", False)),
+            reasoning=dict(data.get("last_reasoning", {}) or {}),
         )
         state.last_provider = llm_settings.provider_id
         state.last_model = llm_settings.model_id
         state.last_custom_model = llm_settings.custom_model_id
         state.last_context_window = llm_settings.context_window
         state.last_use_reasoning = llm_settings.use_reasoning
+        state.last_reasoning = llm_settings.reasoning.to_dict()
         return state
 
 
@@ -1157,6 +1163,7 @@ class ProjectManager(QObject):
         custom_model: Optional[str],
         context_window: Optional[int],
         use_reasoning: bool,
+        reasoning: Optional[Dict[str, Any]],
         template_path: Optional[str],
         transcript_path: Optional[str],
         generation_user_prompt: Optional[str],
@@ -1172,6 +1179,7 @@ class ProjectManager(QObject):
         state.last_custom_model = custom_model
         state.last_context_window = context_window
         state.last_use_reasoning = use_reasoning
+        state.last_reasoning = dict(reasoning or {})
         state.last_template = template_path
         state.last_transcript = transcript_path
         state.last_generation_user_prompt = generation_user_prompt
@@ -1199,6 +1207,7 @@ class ProjectManager(QObject):
         generation_user_prompt: Optional[str],
         generation_system_prompt: Optional[str],
         use_reasoning: bool = False,
+        reasoning: Optional[Dict[str, Any]] = None,
         draft_tokens: Optional[int] = None,
         estimated_best_cost: Optional[float] = None,
         estimated_ceiling_cost: Optional[float] = None,
@@ -1216,6 +1225,7 @@ class ProjectManager(QObject):
             custom_model=custom_model,
             context_window=context_window,
             use_reasoning=use_reasoning,
+            reasoning=dict(reasoning or {}),
             inputs=list(inputs),
             template_path=str(template_path) if template_path else None,
             transcript_path=str(transcript_path) if transcript_path else None,
@@ -1250,6 +1260,7 @@ class ProjectManager(QObject):
         refinement_user_prompt: Optional[str],
         refinement_system_prompt: Optional[str],
         use_reasoning: bool = False,
+        reasoning: Optional[Dict[str, Any]] = None,
         refined_tokens: Optional[int] = None,
         estimated_best_cost: Optional[float] = None,
         estimated_ceiling_cost: Optional[float] = None,
@@ -1267,6 +1278,7 @@ class ProjectManager(QObject):
             custom_model=custom_model,
             context_window=context_window,
             use_reasoning=use_reasoning,
+            reasoning=dict(reasoning or {}),
             inputs=list(inputs),
             template_path=str(template_path) if template_path else None,
             transcript_path=str(transcript_path) if transcript_path else None,

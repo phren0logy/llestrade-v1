@@ -2,29 +2,32 @@
 
 from __future__ import annotations
 
-from typing import Optional
-
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QCheckBox,
     QComboBox,
     QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QPushButton,
     QSpinBox,
     QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
+from src.app.core.llm_catalog import (
+    LLMReasoningCapabilities,
+    reset_gemini_model_cache,
+    resolve_catalog_model,
+)
 from src.app.core.llm_operation_settings import (
     CatalogTransport,
     LLMOperationSettings,
+    LLMReasoningSettings,
     default_provider_catalog_for_transport,
     provider_option_map,
 )
-from src.app.core.llm_catalog import resolve_catalog_model
 
 _CUSTOM_MODEL_SENTINEL = "__custom_model__"
 
@@ -43,16 +46,15 @@ class LLMSettingsPanel(QWidget):
     ) -> None:
         super().__init__(parent)
         self._transport = transport
-        self._provider_options = default_provider_catalog_for_transport(
-            include_azure=include_azure,
-            transport=transport,
-        )
-        self._provider_map = provider_option_map(self._provider_options)
+        self._include_azure = include_azure
+        self._provider_options = ()
+        self._provider_map = {}
         self._invalid_selection_message: str | None = None
         self._build_ui()
-        self._populate_provider_options()
+        self._reload_catalog()
         self._refresh_model_options()
         self._update_custom_state()
+        self._update_reasoning_controls()
         self._update_model_details()
 
     @property
@@ -84,7 +86,7 @@ class LLMSettingsPanel(QWidget):
                     provider_id=str(provider_id),
                     model_id=custom_model,
                     context_window=context_window,
-                    use_reasoning=self.reasoning_checkbox.isChecked(),
+                    reasoning=self._current_reasoning_settings(),
                 ),
                 None,
             )
@@ -106,7 +108,7 @@ class LLMSettingsPanel(QWidget):
                 provider_id=str(provider_id),
                 model_id=model_id,
                 context_window=context_window,
-                use_reasoning=self.reasoning_checkbox.isChecked(),
+                reasoning=self._current_reasoning_settings(),
             ),
             None,
         )
@@ -147,8 +149,9 @@ class LLMSettingsPanel(QWidget):
             self.custom_model_edit.clear()
             self.custom_context_spin.setValue(int(settings.context_window or 0))
 
-        self.reasoning_checkbox.setChecked(bool(settings.use_reasoning))
         self._update_custom_state()
+        self._update_reasoning_controls()
+        self._set_reasoning_settings(settings.reasoning)
         self._update_model_details()
 
     def _build_ui(self) -> None:
@@ -170,6 +173,9 @@ class LLMSettingsPanel(QWidget):
         self.model_combo = QComboBox()
         self.model_combo.setEditable(False)
         model_row.addWidget(self.model_combo)
+        self.refresh_models_button = QPushButton("Refresh")
+        self.refresh_models_button.setAutoDefault(False)
+        model_row.addWidget(self.refresh_models_button)
         layout.addLayout(model_row)
 
         custom_row = QHBoxLayout()
@@ -206,8 +212,46 @@ class LLMSettingsPanel(QWidget):
         self.validation_label.setVisible(False)
         layout.addWidget(self.validation_label)
 
-        self.reasoning_checkbox = QCheckBox("Reasoning")
-        layout.addWidget(self.reasoning_checkbox)
+        reasoning_row = QHBoxLayout()
+        reasoning_row.setContentsMargins(0, 0, 0, 0)
+        reasoning_row.addWidget(QLabel("Reasoning:"))
+        self.reasoning_state_combo = QComboBox()
+        reasoning_row.addWidget(self.reasoning_state_combo)
+        layout.addLayout(reasoning_row)
+
+        effort_row = QHBoxLayout()
+        effort_row.setContentsMargins(0, 0, 0, 0)
+        self.reasoning_effort_label = QLabel("Effort:")
+        self.reasoning_effort_combo = QComboBox()
+        effort_row.addWidget(self.reasoning_effort_label)
+        effort_row.addWidget(self.reasoning_effort_combo)
+        layout.addLayout(effort_row)
+
+        level_row = QHBoxLayout()
+        level_row.setContentsMargins(0, 0, 0, 0)
+        self.reasoning_level_label = QLabel("Level:")
+        self.reasoning_level_combo = QComboBox()
+        level_row.addWidget(self.reasoning_level_label)
+        level_row.addWidget(self.reasoning_level_combo)
+        layout.addLayout(level_row)
+
+        budget_row = QHBoxLayout()
+        budget_row.setContentsMargins(0, 0, 0, 0)
+        self.reasoning_budget_label = QLabel("Budget:")
+        self.reasoning_budget_spin = QSpinBox()
+        self.reasoning_budget_spin.setRange(0, 256_000)
+        self.reasoning_budget_spin.setSingleStep(1_024)
+        self.reasoning_budget_spin.setSpecialValueText("Provider default")
+        budget_row.addWidget(self.reasoning_budget_label)
+        budget_row.addWidget(self.reasoning_budget_spin)
+        budget_row.addWidget(QLabel("tokens"))
+        budget_row.addStretch(1)
+        layout.addLayout(budget_row)
+
+        self.reasoning_note_label = QLabel("")
+        self.reasoning_note_label.setWordWrap(True)
+        self.reasoning_note_label.setStyleSheet("color: #666;")
+        layout.addWidget(self.reasoning_note_label)
 
         self.advanced_toggle = QToolButton(self)
         self.advanced_toggle.setText("Advanced reasoning settings")
@@ -225,8 +269,8 @@ class LLMSettingsPanel(QWidget):
         advanced_layout.setContentsMargins(12, 8, 12, 12)
         advanced_layout.setSpacing(4)
         note = QLabel(
-            "Reasoning uses safe provider defaults when enabled. "
-            "Provider-specific advanced controls are not exposed yet."
+            "Reasoning controls come from the selected provider/model when available. "
+            "Unavailable controls are hidden automatically."
         )
         note.setWordWrap(True)
         note.setStyleSheet("color: #666;")
@@ -237,8 +281,20 @@ class LLMSettingsPanel(QWidget):
         self.model_combo.currentIndexChanged.connect(self._on_model_changed)
         self.custom_model_edit.textChanged.connect(self._on_custom_model_changed)
         self.custom_context_spin.valueChanged.connect(self._on_custom_context_changed)
-        self.reasoning_checkbox.toggled.connect(self.settings_changed)
+        self.refresh_models_button.clicked.connect(self._refresh_models_clicked)
+        self.reasoning_state_combo.currentIndexChanged.connect(self._on_reasoning_changed)
+        self.reasoning_effort_combo.currentIndexChanged.connect(self._on_reasoning_changed)
+        self.reasoning_level_combo.currentIndexChanged.connect(self._on_reasoning_changed)
+        self.reasoning_budget_spin.valueChanged.connect(self._on_reasoning_changed)
         self.advanced_toggle.toggled.connect(self._on_advanced_toggled)
+
+    def _reload_catalog(self) -> None:
+        self._provider_options = default_provider_catalog_for_transport(
+            include_azure=self._include_azure,
+            transport=self._transport,
+        )
+        self._provider_map = provider_option_map(self._provider_options)
+        self._populate_provider_options()
 
     def _populate_provider_options(self) -> None:
         self.provider_combo.clear()
@@ -262,17 +318,20 @@ class LLMSettingsPanel(QWidget):
         self._invalid_selection_message = None
         self._refresh_model_options()
         self._update_custom_state()
+        self._update_reasoning_controls()
         self._update_model_details()
         self.settings_changed.emit()
 
     def _on_model_changed(self) -> None:
         self._invalid_selection_message = None
         self._update_custom_state()
+        self._update_reasoning_controls()
         self._update_model_details()
         self.settings_changed.emit()
 
     def _on_custom_model_changed(self) -> None:
         self._invalid_selection_message = None
+        self._update_reasoning_controls()
         self._update_model_details()
         self.settings_changed.emit()
 
@@ -295,9 +354,137 @@ class LLMSettingsPanel(QWidget):
         self.validation_label.setVisible(bool(self._invalid_selection_message))
         self.validation_label.setText(self._invalid_selection_message or "")
 
+    def _refresh_models_clicked(self) -> None:
+        current_provider = self.provider_combo.currentData()
+        current_model = self.model_combo.currentData()
+        reset_gemini_model_cache()
+        self._reload_catalog()
+        provider_index = self.provider_combo.findData(current_provider)
+        if provider_index != -1:
+            self.provider_combo.setCurrentIndex(provider_index)
+        self._refresh_model_options()
+        model_index = self.model_combo.findData(current_model)
+        if model_index != -1:
+            self.model_combo.setCurrentIndex(model_index)
+        self._update_reasoning_controls()
+        self._update_model_details()
+        self.settings_changed.emit()
+
+    def _on_reasoning_changed(self) -> None:
+        self._update_reasoning_controls()
+        self.settings_changed.emit()
+
     def _on_advanced_toggled(self, checked: bool) -> None:
         self.advanced_toggle.setArrowType(Qt.DownArrow if checked else Qt.RightArrow)
         self.advanced_frame.setVisible(checked)
+
+    def _current_reasoning_capabilities(self) -> LLMReasoningCapabilities:
+        provider_id = str(self.provider_combo.currentData() or "").strip()
+        model_data = self.model_combo.currentData()
+        custom_mode = model_data == _CUSTOM_MODEL_SENTINEL
+        model_id = self.custom_model_edit.text().strip() if custom_mode else str(model_data or "").strip()
+        option = resolve_catalog_model(provider_id, model_id, transport=self._transport) if provider_id and model_id else None
+        if option is None:
+            return LLMReasoningCapabilities()
+        return option.reasoning_capabilities
+
+    def _current_reasoning_settings(self) -> LLMReasoningSettings:
+        capabilities = self._current_reasoning_capabilities()
+        enabled = capabilities.supports_reasoning_controls and (
+            capabilities.can_disable_reasoning is False
+            or str(self.reasoning_state_combo.currentData() or "off") == "on"
+        )
+        effort = str(self.reasoning_effort_combo.currentData() or "").strip() or None
+        level = str(self.reasoning_level_combo.currentData() or "").strip() or None
+        budget_tokens = int(self.reasoning_budget_spin.value()) or None
+        return LLMReasoningSettings(
+            state="on" if enabled else "off",
+            effort=effort,
+            level=level,
+            budget_tokens=budget_tokens,
+        )
+
+    def _set_reasoning_settings(self, settings: LLMReasoningSettings) -> None:
+        self._update_reasoning_controls()
+        desired_state = settings.state or ("on" if settings.enabled else "off")
+        state_index = self.reasoning_state_combo.findData(desired_state)
+        if state_index != -1:
+            self.reasoning_state_combo.blockSignals(True)
+            self.reasoning_state_combo.setCurrentIndex(state_index)
+            self.reasoning_state_combo.blockSignals(False)
+        effort_index = self.reasoning_effort_combo.findData(settings.effort)
+        if effort_index != -1:
+            self.reasoning_effort_combo.blockSignals(True)
+            self.reasoning_effort_combo.setCurrentIndex(effort_index)
+            self.reasoning_effort_combo.blockSignals(False)
+        level_index = self.reasoning_level_combo.findData(settings.level)
+        if level_index != -1:
+            self.reasoning_level_combo.blockSignals(True)
+            self.reasoning_level_combo.setCurrentIndex(level_index)
+            self.reasoning_level_combo.blockSignals(False)
+        self.reasoning_budget_spin.blockSignals(True)
+        self.reasoning_budget_spin.setValue(int(settings.budget_tokens or 0))
+        self.reasoning_budget_spin.blockSignals(False)
+
+    def _update_reasoning_controls(self) -> None:
+        capabilities = self._current_reasoning_capabilities()
+
+        self.reasoning_state_combo.blockSignals(True)
+        self.reasoning_state_combo.clear()
+        if not capabilities.supports_reasoning_controls:
+            self.reasoning_state_combo.addItem("Not supported", "off")
+            self.reasoning_state_combo.setEnabled(False)
+        else:
+            self.reasoning_state_combo.addItem("Off", "off")
+            self.reasoning_state_combo.addItem("On", "on")
+            self.reasoning_state_combo.setEnabled(capabilities.can_disable_reasoning)
+            if not capabilities.can_disable_reasoning:
+                index = self.reasoning_state_combo.findData("on")
+                self.reasoning_state_combo.setCurrentIndex(index)
+        self.reasoning_state_combo.blockSignals(False)
+
+        enabled = bool(capabilities.supports_reasoning_controls) and (
+            not capabilities.can_disable_reasoning
+            or str(self.reasoning_state_combo.currentData() or "off") == "on"
+        )
+
+        self.reasoning_effort_combo.blockSignals(True)
+        self.reasoning_effort_combo.clear()
+        for effort in capabilities.allowed_efforts:
+            self.reasoning_effort_combo.addItem(effort.title(), effort)
+        if self.reasoning_effort_combo.count() > 0 and self.reasoning_effort_combo.currentIndex() < 0:
+            self.reasoning_effort_combo.setCurrentIndex(0)
+        self.reasoning_effort_combo.blockSignals(False)
+        show_effort = enabled and bool(capabilities.allowed_efforts)
+        self.reasoning_effort_label.setVisible(show_effort)
+        self.reasoning_effort_combo.setVisible(show_effort)
+
+        self.reasoning_level_combo.blockSignals(True)
+        self.reasoning_level_combo.clear()
+        for level in capabilities.allowed_levels:
+            self.reasoning_level_combo.addItem(level.title(), level)
+        if self.reasoning_level_combo.count() > 0 and self.reasoning_level_combo.currentIndex() < 0:
+            self.reasoning_level_combo.setCurrentIndex(0)
+        self.reasoning_level_combo.blockSignals(False)
+        show_level = enabled and bool(capabilities.allowed_levels)
+        self.reasoning_level_label.setVisible(show_level)
+        self.reasoning_level_combo.setVisible(show_level)
+
+        if capabilities.budget_min is not None or capabilities.budget_max is not None:
+            self.reasoning_budget_spin.setRange(
+                int(capabilities.budget_min or 0),
+                int(capabilities.budget_max or 256_000),
+            )
+            self.reasoning_budget_spin.setSingleStep(int(capabilities.budget_step or 1_024))
+        show_budget = enabled and "budget" in capabilities.controls
+        self.reasoning_budget_label.setVisible(show_budget)
+        self.reasoning_budget_spin.setVisible(show_budget)
+
+        note = capabilities.notes or ""
+        if not capabilities.supports_reasoning_controls:
+            note = "This model does not expose provider-native reasoning controls."
+        self.reasoning_note_label.setVisible(bool(note))
+        self.reasoning_note_label.setText(note)
 
     def _update_model_details(self) -> None:
         provider_id = str(self.provider_combo.currentData() or "").strip()
@@ -315,14 +502,20 @@ class LLMSettingsPanel(QWidget):
             return
 
         details: list[str] = []
+        if option.lifecycle_status != "stable":
+            details.append(f"Status: {option.lifecycle_status.title()}")
         if option.context_window:
             details.append(f"Context: {option.context_window:,} tokens")
         else:
             details.append("Context: enter manually")
+        if option.max_output_tokens:
+            details.append(f"Max output: {option.max_output_tokens:,}")
         if option.input_price_label:
             details.append(f"Input: {option.input_price_label}")
         if option.output_price_label:
             details.append(f"Output: {option.output_price_label}")
+        if option.provenance.availability:
+            details.append(f"Source: {option.provenance.availability}")
         if self.custom_context_spin.isVisible() and self.custom_context_spin.value() <= 0 and option.context_window is None:
             self.model_details_label.setText("Enter a context window to use this model.")
             return

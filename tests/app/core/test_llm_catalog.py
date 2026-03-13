@@ -64,24 +64,24 @@ def test_runtime_default_model_for_gemini_prefers_stable_pro(
         llm_catalog,
         "_discover_gemini_models_live",
         lambda: (
-            llm_catalog._GeminiDiscoveredModel(
+            llm_catalog._DiscoveredModel(
                 model_id="gemini-2.5-flash",
                 label="Gemini 2.5 Flash",
                 context_window=1_048_576,
             ),
-            llm_catalog._GeminiDiscoveredModel(
+            llm_catalog._DiscoveredModel(
                 model_id="gemini-2.5-pro-preview-03-25",
                 label="Gemini 2.5 Pro Preview",
                 context_window=1_048_576,
             ),
-            llm_catalog._GeminiDiscoveredModel(
+            llm_catalog._DiscoveredModel(
                 model_id="gemini-2.5-pro",
                 label="Gemini 2.5 Pro",
                 context_window=1_048_576,
             ),
         ),
     )
-    monkeypatch.setattr(llm_catalog, "_write_gemini_models_cache", lambda _models: None)
+    monkeypatch.setattr(llm_catalog, "_write_cached_discovered_models", lambda *args, **kwargs: None)
 
     assert llm_catalog.runtime_default_model_for_provider("gemini") == "gemini-2.5-pro"
 
@@ -113,7 +113,7 @@ def test_runtime_default_model_for_gateway_gemini_ignores_direct_preview_discove
         llm_catalog,
         "_discover_gemini_models_live",
         lambda: (
-            llm_catalog._GeminiDiscoveredModel(
+            llm_catalog._DiscoveredModel(
                 model_id="gemini-3-flash-preview",
                 label="Gemini 3 Flash Preview",
                 context_window=1_048_576,
@@ -182,14 +182,14 @@ def test_resolve_catalog_model_for_gemini_uses_live_context_and_catalog_prices(
         llm_catalog,
         "_discover_gemini_models_live",
         lambda: (
-            llm_catalog._GeminiDiscoveredModel(
+            llm_catalog._DiscoveredModel(
                 model_id="gemini-2.5-pro",
                 label="Gemini 2.5 Pro",
                 context_window=2_097_152,
             ),
         ),
     )
-    monkeypatch.setattr(llm_catalog, "_write_gemini_models_cache", lambda _models: None)
+    monkeypatch.setattr(llm_catalog, "_write_cached_discovered_models", lambda *args, **kwargs: None)
 
     resolved = llm_catalog.resolve_catalog_model("gemini", "gemini-2.5-pro")
 
@@ -243,26 +243,20 @@ def test_runtime_default_model_for_gemini_uses_cache_when_live_discovery_fails(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    cache_dir = tmp_path / "config"
-    cache_dir.mkdir(parents=True)
-    cache_path = cache_dir / "gemini_models_cache.json"
-    cache_path.write_text(
-        """
-        {
-          "models": [
-            {
-              "context_window": 1048576,
-              "label": "Gemini 2.5 Pro",
-              "model_id": "gemini-2.5-pro"
-            }
-          ]
-        }
-        """.strip(),
-        encoding="utf-8",
-    )
-
-    monkeypatch.setattr(llm_catalog, "app_config_dir", lambda: cache_dir)
     monkeypatch.setattr(llm_catalog, "_discover_gemini_models_live", lambda: ())
+    monkeypatch.setattr(
+        llm_catalog,
+        "_load_cached_discovered_models",
+        lambda provider_id, transport="direct": (
+            llm_catalog._DiscoveredModel(
+                model_id="gemini-2.5-pro",
+                label="Gemini 2.5 Pro",
+                context_window=1_048_576,
+            ),
+        )
+        if provider_id == "gemini" and transport == "direct"
+        else (),
+    )
 
     assert llm_catalog.runtime_default_model_for_provider("gemini") == "gemini-2.5-pro"
 

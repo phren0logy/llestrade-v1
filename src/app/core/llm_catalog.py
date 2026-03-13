@@ -1,18 +1,21 @@
-"""Catalog and pricing helpers backed by ``genai-prices``."""
+"""Catalog and pricing helpers using provider-native data first."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from decimal import Decimal
+from hashlib import sha256
 import json
 import logging
 import os
 import re
+import time
 from threading import Lock
-from typing import Literal, Optional, Sequence
+from typing import Any, Literal, Optional, Sequence
 
 from genai_prices import UpdatePrices
 from genai_prices.data_snapshot import DataSnapshot, get_snapshot
+import httpx
 from pydantic_ai.usage import RequestUsage
 
 from src.config.paths import app_config_dir
@@ -48,6 +51,7 @@ _DEFAULT_MODEL_ENV_VARS: dict[str, str] = {
 
 _MODEL_FAMILY_MATCHERS: dict[str, tuple[str, ...]] = {
     "anthropic": ("claude",),
+    "anthropic_bedrock": ("anthropic.claude", "claude"),
     "openai": ("gpt-", "o1", "o3", "o4", "chatgpt-"),
     "gemini": ("gemini",),
     "azure_openai": ("gpt-", "o1", "o3", "o4", "chatgpt-"),
@@ -62,19 +66,18 @@ _RUNTIME_CONTEXT_WINDOW_CAPS: dict[str, int] = {
 
 _catalog_updater: UpdatePrices | None = None
 _catalog_updater_lock = Lock()
-_gemini_selector_models: tuple["LLMModelOption", ...] | None = None
-_gemini_selector_models_lock = Lock()
 _provider_selector_models: dict[tuple[str, str], tuple["LLMModelOption", ...]] = {}
 _provider_selector_models_lock = Lock()
+_PROVIDER_CACHE_TTL_SECONDS = 6 * 60 * 60
+_PROVIDER_CACHE_MAX_STALE_SECONDS = 7 * 24 * 60 * 60
+_BEDROCK_ANTHROPIC_ALIASES: dict[str, str] = {
+    "anthropic.claude-sonnet-4-5-v1": "claude-sonnet-4-5",
+    "anthropic.claude-sonnet-4-5-v1:0": "claude-sonnet-4-5",
+    "anthropic.claude-opus-4-6-v1": "claude-opus-4-6",
+    "anthropic.claude-opus-4-1-20250805-v1:0": "claude-opus-4-1-20250805",
+}
 
 CatalogTransport = Literal["direct", "gateway"]
-
-
-@dataclass(frozen=True, slots=True)
-class _GeminiDiscoveredModel:
-    model_id: str
-    label: str
-    context_window: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,6 +85,32 @@ class _DiscoveredModel:
     model_id: str
     label: str
     context_window: int | None = None
+    max_output_tokens: int | None = None
+    lifecycle_status: str = "stable"
+
+
+@dataclass(frozen=True, slots=True)
+class LLMReasoningCapabilities:
+    """Normalized reasoning capabilities for a model."""
+
+    supports_reasoning_controls: bool = False
+    can_disable_reasoning: bool = False
+    controls: tuple[str, ...] = ()
+    allowed_efforts: tuple[str, ...] = ()
+    allowed_levels: tuple[str, ...] = ()
+    budget_min: int | None = None
+    budget_max: int | None = None
+    budget_step: int | None = None
+    default_state: str = "off"
+    notes: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class LLMModelProvenance:
+    availability: str = "unknown"
+    context: str | None = None
+    pricing: str | None = None
+    reasoning: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,8 +120,12 @@ class LLMModelOption:
     model_id: str
     label: str
     context_window: int | None = None
+    max_output_tokens: int | None = None
     input_price_label: str | None = None
     output_price_label: str | None = None
+    lifecycle_status: str = "stable"
+    reasoning_capabilities: LLMReasoningCapabilities = LLMReasoningCapabilities()
+    provenance: LLMModelProvenance = LLMModelProvenance()
 
 
 @dataclass(frozen=True, slots=True)
@@ -304,6 +337,213 @@ def _runtime_context_window(
     return min(int(context_window), cap)
 
 
+def _fingerprint(value: str | None) -> str:
+    normalized = str(value or "").strip()
+    if not normalized:
+        return "default"
+    return sha256(normalized.encode("utf-8")).hexdigest()[:16]
+
+
+def _cache_scope(provider_id: str, *, transport: CatalogTransport) -> str:
+    if transport == "gateway":
+        gateway_settings = _read_gateway_settings()
+        base_url = str(gateway_settings.get("base_url", "") or "").strip()
+        route = str(gateway_settings.get("route", "") or "").strip()
+        api_key = _resolve_api_key("pydantic_ai_gateway", env_vars=("PYDANTIC_AI_GATEWAY_API_KEY",))
+        return _fingerprint(f"{provider_id}|{base_url}|{route}|{api_key}")
+
+    if provider_id == "gemini":
+        key = _resolve_gemini_api_key()
+    elif provider_id == "azure_openai":
+        azure = _read_azure_settings()
+        key = f"{azure.get('endpoint','')}|{azure.get('deployment_name','')}|{_resolve_api_key('azure_openai', env_vars=('AZURE_OPENAI_API_KEY',))}"
+    else:
+        env_var_map = {
+            "openai": ("OPENAI_API_KEY",),
+            "anthropic": ("ANTHROPIC_API_KEY",),
+            "anthropic_bedrock": (),
+        }
+        key = _resolve_api_key(provider_id, env_vars=env_var_map.get(provider_id, ()))
+    return _fingerprint(f"{provider_id}|{key}")
+
+
+def _provider_cache_path(provider_id: str, *, transport: CatalogTransport) -> Any:
+    cache_dir = app_config_dir() / "model_catalog_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    scope = _cache_scope(provider_id, transport=transport)
+    return cache_dir / f"{transport}_{provider_id}_{scope}.json"
+
+
+def _load_cached_discovered_models(
+    provider_id: str,
+    *,
+    transport: CatalogTransport,
+) -> tuple[_DiscoveredModel, ...]:
+    cache_path = _provider_cache_path(provider_id, transport=transport)
+    if not cache_path.exists():
+        return ()
+    try:
+        payload = json.loads(cache_path.read_text(encoding="utf-8"))
+    except Exception:
+        logger.debug("Unable to read cached model metadata for %s/%s", transport, provider_id, exc_info=True)
+        return ()
+
+    cached_at = float(payload.get("cached_at") or 0)
+    age_seconds = max(time.time() - cached_at, 0.0)
+    if age_seconds > _PROVIDER_CACHE_MAX_STALE_SECONDS:
+        return ()
+
+    items = payload.get("models")
+    if not isinstance(items, list):
+        return ()
+
+    models: list[_DiscoveredModel] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        model_id = str(item.get("model_id", "") or "").strip()
+        if not model_id:
+            continue
+        context_window = item.get("context_window")
+        max_output_tokens = item.get("max_output_tokens")
+        models.append(
+            _DiscoveredModel(
+                model_id=model_id,
+                label=str(item.get("label", "") or model_id).strip() or model_id,
+                context_window=int(context_window) if _valid_context_window(context_window) else None,
+                max_output_tokens=int(max_output_tokens) if _valid_context_window(max_output_tokens) else None,
+                lifecycle_status=str(item.get("lifecycle_status", "stable") or "stable"),
+            )
+        )
+    return tuple(models)
+
+
+def _write_cached_discovered_models(
+    provider_id: str,
+    *,
+    transport: CatalogTransport,
+    discovered: Sequence[_DiscoveredModel],
+) -> None:
+    if not discovered:
+        return
+    payload = {
+        "cached_at": time.time(),
+        "models": [asdict(model) for model in discovered],
+    }
+    try:
+        _provider_cache_path(provider_id, transport=transport).write_text(
+            json.dumps(payload, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+    except Exception:
+        logger.debug("Unable to write cached model metadata for %s/%s", transport, provider_id, exc_info=True)
+
+
+def _read_settings_payload() -> dict[str, Any]:
+    settings_path = app_config_dir() / "app_settings.json"
+    if not settings_path.exists():
+        return {}
+    try:
+        payload = json.loads(settings_path.read_text(encoding="utf-8"))
+        return payload if isinstance(payload, dict) else {}
+    except Exception:
+        logger.debug("Unable to read app settings payload", exc_info=True)
+        return {}
+
+
+def _read_gateway_settings() -> dict[str, Any]:
+    payload = _read_settings_payload()
+    gateway_settings = payload.get("pydantic_ai_gateway_settings")
+    return gateway_settings if isinstance(gateway_settings, dict) else {}
+
+
+def _read_azure_settings() -> dict[str, Any]:
+    payload = _read_settings_payload()
+    azure_settings = payload.get("azure_openai_settings")
+    return azure_settings if isinstance(azure_settings, dict) else {}
+
+
+def _read_bedrock_settings() -> dict[str, Any]:
+    payload = _read_settings_payload()
+    bedrock_settings = payload.get("aws_bedrock_settings")
+    return bedrock_settings if isinstance(bedrock_settings, dict) else {}
+
+
+def _reasoning_capabilities_for_model(
+    provider_id: str,
+    model_id: str,
+) -> LLMReasoningCapabilities:
+    normalized = model_id.lower()
+    if provider_id in {"openai", "azure_openai"}:
+        try:
+            from pydantic_ai.profiles.openai import openai_model_profile
+
+            profile = openai_model_profile(model_id)
+            if not profile.openai_supports_reasoning:
+                return LLMReasoningCapabilities()
+            return LLMReasoningCapabilities(
+                supports_reasoning_controls=True,
+                can_disable_reasoning=bool(profile.openai_supports_reasoning_effort_none),
+                controls=("toggle", "effort"),
+                allowed_efforts=("low", "medium", "high"),
+                default_state="on",
+                notes=(
+                    "This model always reasons; Off is unavailable."
+                    if not profile.openai_supports_reasoning_effort_none
+                    else None
+                ),
+            )
+        except Exception:
+            logger.debug("Unable to derive OpenAI reasoning capabilities for %s", model_id, exc_info=True)
+            return LLMReasoningCapabilities()
+
+    if provider_id in {"anthropic", "anthropic_bedrock"}:
+        return LLMReasoningCapabilities(
+            supports_reasoning_controls=True,
+            can_disable_reasoning=True,
+            controls=("toggle", "budget"),
+            budget_step=1024,
+            default_state="off",
+        )
+
+    if provider_id == "gemini":
+        if normalized.startswith("gemini-3"):
+            return LLMReasoningCapabilities(
+                supports_reasoning_controls=True,
+                can_disable_reasoning=False,
+                controls=("level",),
+                allowed_levels=("MINIMAL", "LOW", "MEDIUM", "HIGH"),
+                default_state="on",
+                notes="Gemini 3 model families use thinking levels and may not fully disable thinking.",
+            )
+        return LLMReasoningCapabilities(
+            supports_reasoning_controls=True,
+            can_disable_reasoning=True,
+            controls=("toggle", "budget"),
+            default_state="off",
+        )
+
+    return LLMReasoningCapabilities()
+
+
+def resolve_reasoning_capabilities(
+    provider_id: str,
+    model_id: str | None,
+    *,
+    transport: CatalogTransport = "direct",
+) -> LLMReasoningCapabilities:
+    normalized = str(model_id or "").strip()
+    if not normalized:
+        normalized = default_model_for_provider(provider_id, transport=transport) or ""
+    if not normalized:
+        return LLMReasoningCapabilities()
+
+    model = resolve_catalog_model(provider_id, normalized, transport=transport)
+    if model is not None and model.reasoning_capabilities.supports_reasoning_controls:
+        return model.reasoning_capabilities
+    return _reasoning_capabilities_for_model(provider_id, normalized)
+
+
 def calculate_usage_cost(
     *,
     provider_id: str,
@@ -370,12 +610,18 @@ def _iter_selector_models(
     if cached is not None:
         return cached
 
-    if provider_id == "gemini":
-        models = _gemini_runtime_models() if transport == "direct" else _gemini_gateway_models()
+    if transport == "gateway":
+        models = _gateway_runtime_models(provider_id)
+    elif provider_id == "gemini":
+        models = _gemini_runtime_models()
     elif provider_id == "openai":
         models = _openai_runtime_models(transport=transport)
     elif provider_id == "anthropic":
         models = _anthropic_runtime_models(transport=transport)
+    elif provider_id == "azure_openai":
+        models = _azure_runtime_models()
+    elif provider_id == "anthropic_bedrock":
+        models = _bedrock_runtime_models()
     else:
         models = tuple(_iter_snapshot_selector_models(provider_id))
 
@@ -385,11 +631,8 @@ def _iter_selector_models(
 
 
 def reset_gemini_model_cache() -> None:
-    """Clear the in-memory Gemini model cache."""
+    """Clear the in-memory provider model cache."""
 
-    global _gemini_selector_models
-    with _gemini_selector_models_lock:
-        _gemini_selector_models = None
     with _provider_selector_models_lock:
         _provider_selector_models.clear()
 
@@ -427,8 +670,17 @@ def _iter_snapshot_selector_models(
                     model.id,
                     int(model.context_window) if _valid_context_window(model.context_window) else None,
                 ),
+                max_output_tokens=None,
                 input_price_label=_price_label(getattr(model.prices, "input_mtok", None)),
                 output_price_label=_price_label(getattr(model.prices, "output_mtok", None)),
+                lifecycle_status="preview" if _is_preview_model_id(model.id) else "stable",
+                reasoning_capabilities=_reasoning_capabilities_for_model(provider_id, model.id),
+                provenance=LLMModelProvenance(
+                    availability="genai-prices",
+                    context="genai-prices" if _valid_context_window(model.context_window) else None,
+                    pricing="genai-prices",
+                    reasoning="provider-rules",
+                ),
             )
         )
     models.sort(
@@ -458,8 +710,19 @@ def _build_discovered_model_options(
                 model_id=item.model_id,
                 label=item.label,
                 context_window=_runtime_context_window(provider_id, item.model_id, context_window),
+                max_output_tokens=item.max_output_tokens,
                 input_price_label=catalog_model.input_price_label if catalog_model else None,
                 output_price_label=catalog_model.output_price_label if catalog_model else None,
+                lifecycle_status=item.lifecycle_status,
+                reasoning_capabilities=_reasoning_capabilities_for_model(provider_id, item.model_id),
+                provenance=LLMModelProvenance(
+                    availability="provider-native",
+                    context="provider-native" if item.context_window is not None else (
+                        catalog_model.provenance.context if catalog_model else None
+                    ),
+                    pricing=catalog_model.provenance.pricing if catalog_model else None,
+                    reasoning="provider-rules",
+                ),
             )
         )
     models.sort(
@@ -475,45 +738,73 @@ def _build_discovered_model_options(
 
 
 def _openai_runtime_models(*, transport: CatalogTransport) -> tuple[LLMModelOption, ...]:
-    discovered = _discover_openai_models_live()
+    discovered = _discover_models_with_cache("openai", transport=transport, fetcher=_discover_openai_models_live)
     if discovered:
         return _build_discovered_model_options("openai", discovered)
     return _iter_snapshot_selector_models("openai")
 
 
 def _anthropic_runtime_models(*, transport: CatalogTransport) -> tuple[LLMModelOption, ...]:
-    discovered = _discover_anthropic_models_live()
+    discovered = _discover_models_with_cache("anthropic", transport=transport, fetcher=_discover_anthropic_models_live)
     if discovered:
         return _build_discovered_model_options("anthropic", discovered)
     return _iter_snapshot_selector_models("anthropic")
 
 
-def _gemini_gateway_models() -> tuple[LLMModelOption, ...]:
-    return _iter_snapshot_selector_models("gemini", exclude_preview=True)
+def _azure_runtime_models() -> tuple[LLMModelOption, ...]:
+    azure_settings = _read_azure_settings()
+    deployment = str(
+        azure_settings.get("deployment")
+        or azure_settings.get("deployment_name")
+        or ""
+    ).strip()
+    if deployment:
+        return _build_discovered_model_options(
+            "azure_openai",
+            (
+                _DiscoveredModel(
+                    model_id=deployment,
+                    label=deployment,
+                    lifecycle_status="stable",
+                ),
+            ),
+        )
+    return _iter_snapshot_selector_models("azure_openai")
+
+
+def _bedrock_runtime_models() -> tuple[LLMModelOption, ...]:
+    discovered = _discover_models_with_cache(
+        "anthropic_bedrock",
+        transport="direct",
+        fetcher=_discover_bedrock_models_live,
+    )
+    if discovered:
+        return _build_discovered_model_options("anthropic_bedrock", discovered)
+    return ()
+
+
+def _gateway_runtime_models(provider_id: str) -> tuple[LLMModelOption, ...]:
+    discovered = _discover_models_with_cache(
+        provider_id,
+        transport="gateway",
+        fetcher=lambda: _discover_gateway_models(provider_id),
+    )
+    if discovered:
+        return _build_discovered_model_options(provider_id, discovered)
+    if provider_id == "gemini":
+        return _iter_snapshot_selector_models("gemini", exclude_preview=True)
+    return _iter_snapshot_selector_models(provider_id)
 
 
 def _gemini_runtime_models() -> tuple[LLMModelOption, ...]:
-    global _gemini_selector_models
-
-    with _gemini_selector_models_lock:
-        if _gemini_selector_models is not None:
-            return _gemini_selector_models
-
-        discovered = _discover_gemini_models_live()
-        if discovered:
-            models = _build_gemini_model_options(discovered)
-            _write_gemini_models_cache(discovered)
-            _gemini_selector_models = models
-            return models
-
-        cached = _load_gemini_models_from_cache()
-        models = _build_gemini_model_options(cached)
-        _gemini_selector_models = models
-        return models
+    discovered = _discover_models_with_cache("gemini", transport="direct", fetcher=_discover_gemini_models_live)
+    if discovered:
+        return _build_gemini_model_options(discovered)
+    return _iter_snapshot_selector_models("gemini")
 
 
 def _build_gemini_model_options(
-    discovered: Sequence[_GeminiDiscoveredModel],
+    discovered: Sequence[_DiscoveredModel],
 ) -> tuple[LLMModelOption, ...]:
     models: list[LLMModelOption] = []
     for discovered_model in discovered:
@@ -523,8 +814,17 @@ def _build_gemini_model_options(
                 model_id=discovered_model.model_id,
                 label=discovered_model.label,
                 context_window=discovered_model.context_window,
+                max_output_tokens=discovered_model.max_output_tokens,
                 input_price_label=catalog_model.input_price_label if catalog_model else None,
                 output_price_label=catalog_model.output_price_label if catalog_model else None,
+                lifecycle_status=discovered_model.lifecycle_status,
+                reasoning_capabilities=_reasoning_capabilities_for_model("gemini", discovered_model.model_id),
+                provenance=LLMModelProvenance(
+                    availability="provider-native",
+                    context="provider-native",
+                    pricing=catalog_model.provenance.pricing if catalog_model else None,
+                    reasoning="provider-rules",
+                ),
             )
         )
     models.sort(
@@ -539,7 +839,26 @@ def _build_gemini_model_options(
     return tuple(models)
 
 
-def _discover_gemini_models_live() -> tuple[_GeminiDiscoveredModel, ...]:
+def _discover_models_with_cache(
+    provider_id: str,
+    *,
+    transport: CatalogTransport,
+    fetcher: Any,
+) -> tuple[_DiscoveredModel, ...]:
+    try:
+        discovered = tuple(fetcher() or ())
+    except Exception:
+        logger.debug("Unable to discover models for %s/%s", transport, provider_id, exc_info=True)
+        discovered = ()
+
+    if discovered:
+        _write_cached_discovered_models(provider_id, transport=transport, discovered=discovered)
+        return discovered
+
+    return _load_cached_discovered_models(provider_id, transport=transport)
+
+
+def _discover_gemini_models_live() -> tuple[_DiscoveredModel, ...]:
     api_key = _resolve_gemini_api_key()
     if not api_key:
         return ()
@@ -552,7 +871,7 @@ def _discover_gemini_models_live() -> tuple[_GeminiDiscoveredModel, ...]:
 
     try:
         client = genai.Client(api_key=api_key)
-        models: list[_GeminiDiscoveredModel] = []
+        models: list[_DiscoveredModel] = []
         for model in client.models.list(config={"page_size": 100}):
             discovered = _parse_gemini_discovered_model(model)
             if discovered is not None:
@@ -625,7 +944,49 @@ def _discover_anthropic_models_live() -> tuple[_DiscoveredModel, ...]:
         return ()
 
 
-def _parse_gemini_discovered_model(model: object) -> _GeminiDiscoveredModel | None:
+def _discover_bedrock_models_live() -> tuple[_DiscoveredModel, ...]:
+    try:
+        import boto3
+    except Exception:
+        logger.debug("boto3 is unavailable; skipping Bedrock model discovery", exc_info=True)
+        return ()
+
+    settings = _read_bedrock_settings()
+    profile = str(settings.get("profile") or "").strip() or None
+    region = (
+        str(settings.get("region") or "").strip()
+        or os.getenv("AWS_REGION")
+        or os.getenv("AWS_DEFAULT_REGION")
+        or None
+    )
+    try:
+        session = boto3.session.Session(profile_name=profile, region_name=region)
+        client = session.client("bedrock", region_name=region)
+        response = client.list_foundation_models(byProvider="Anthropic")
+    except Exception:
+        logger.debug("Unable to discover Bedrock Anthropic models live", exc_info=True)
+        return ()
+
+    models: list[_DiscoveredModel] = []
+    for item in response.get("modelSummaries", []) or ():
+        raw_model_id = str(item.get("modelId") or "").strip()
+        if not raw_model_id:
+            continue
+        model_id = _BEDROCK_ANTHROPIC_ALIASES.get(raw_model_id, raw_model_id)
+        if not _is_supported_model_family("anthropic_bedrock", model_id):
+            continue
+        label = str(item.get("modelName") or model_id).strip() or model_id
+        models.append(
+            _DiscoveredModel(
+                model_id=model_id,
+                label=label,
+                lifecycle_status="preview" if _is_preview_model_id(model_id) else "stable",
+            )
+        )
+    return tuple(models)
+
+
+def _parse_gemini_discovered_model(model: object) -> _DiscoveredModel | None:
     model_name = str(getattr(model, "name", "") or "")
     if not model_name.startswith("models/gemini"):
         return None
@@ -641,10 +1002,13 @@ def _parse_gemini_discovered_model(model: object) -> _GeminiDiscoveredModel | No
         return None
 
     label = str(getattr(model, "display_name", "") or normalized_model_id).strip() or normalized_model_id
-    return _GeminiDiscoveredModel(
+    output_token_limit = getattr(model, "output_token_limit", None)
+    return _DiscoveredModel(
         model_id=normalized_model_id,
         label=label,
         context_window=int(context_window),
+        max_output_tokens=int(output_token_limit) if _valid_context_window(output_token_limit) else None,
+        lifecycle_status="preview" if _is_preview_model_id(normalized_model_id) else "stable",
     )
 
 
@@ -685,12 +1049,18 @@ def _resolve_api_key(provider_id: str, *, env_vars: Sequence[str]) -> str | None
 
     try:
         import keyring
+        from src.app.core.secure_settings import keyring_service_name
 
         provider_aliases = (provider_id,)
         if provider_id == "gemini":
             provider_aliases = ("gemini", "google")
+        elif provider_id == "azure_openai":
+            provider_aliases = ("azure_openai", "azure")
+        elif provider_id == "pydantic_ai_gateway":
+            provider_aliases = ("pydantic_ai_gateway",)
+        service_name = keyring_service_name()
         for alias in provider_aliases:
-            key = keyring.get_password("Llestrade", f"api_key_{alias}")
+            key = keyring.get_password(service_name, f"api_key_{alias}")
             if key:
                 return key
     except Exception:
@@ -713,6 +1083,10 @@ def _resolve_api_key(provider_id: str, *, env_vars: Sequence[str]) -> str | None
     provider_aliases = (provider_id,)
     if provider_id == "gemini":
         provider_aliases = ("gemini", "google")
+    elif provider_id == "azure_openai":
+        provider_aliases = ("azure_openai", "azure")
+    elif provider_id == "pydantic_ai_gateway":
+        provider_aliases = ("pydantic_ai_gateway",)
     for alias in provider_aliases:
         key = api_keys.get(alias)
         if isinstance(key, str) and key.strip():
@@ -724,75 +1098,54 @@ def _resolve_gemini_api_key() -> str | None:
     return _resolve_api_key("gemini", env_vars=("GEMINI_API_KEY", "GOOGLE_API_KEY"))
 
 
-def _gemini_cache_path():
-    return app_config_dir() / "gemini_models_cache.json"
-
-
-def _load_gemini_models_from_cache() -> tuple[_GeminiDiscoveredModel, ...]:
-    cache_path = _gemini_cache_path()
-    if not cache_path.exists():
+def _discover_gateway_models(provider_id: str) -> tuple[_DiscoveredModel, ...]:
+    gateway_settings = _read_gateway_settings()
+    base_url = str(gateway_settings.get("base_url") or "").strip().rstrip("/")
+    if not base_url:
         return ()
+    api_key = _resolve_api_key("pydantic_ai_gateway", env_vars=("PYDANTIC_AI_GATEWAY_API_KEY",))
+    if not api_key:
+        return ()
+
+    route = str(gateway_settings.get("route") or "").strip()
+    params = {"provider": provider_id}
+    if route:
+        params["route"] = route
     try:
-        payload = json.loads(cache_path.read_text(encoding="utf-8"))
+        response = httpx.get(
+            f"{base_url}/metadata/models",
+            params=params,
+            headers={"Authorization": api_key},
+            timeout=15.0,
+        )
+        response.raise_for_status()
+        payload = response.json()
     except Exception:
-        logger.debug("Unable to read Gemini model cache", exc_info=True)
+        logger.debug("Unable to discover gateway models for %s", provider_id, exc_info=True)
         return ()
 
-    items = payload.get("models")
-    if not isinstance(items, list):
+    models_payload = payload.get("models")
+    if not isinstance(models_payload, list):
         return ()
-
-    models: list[_GeminiDiscoveredModel] = []
-    for item in items:
+    models: list[_DiscoveredModel] = []
+    for item in models_payload:
         if not isinstance(item, dict):
             continue
-        model_id = str(item.get("model_id", "")).strip()
-        label = str(item.get("label", "")).strip() or model_id
+        model_id = str(item.get("model_id", "") or "").strip()
+        if not model_id:
+            continue
         context_window = item.get("context_window")
-        if not model_id or not _valid_context_window(context_window):
-            continue
-        if _is_excluded_gemini_model(model_id):
-            continue
+        max_output_tokens = item.get("max_output_tokens")
         models.append(
-            _GeminiDiscoveredModel(
+            _DiscoveredModel(
                 model_id=model_id,
-                label=label,
-                context_window=int(context_window),
+                label=str(item.get("display_name", "") or model_id).strip() or model_id,
+                context_window=int(context_window) if _valid_context_window(context_window) else None,
+                max_output_tokens=int(max_output_tokens) if _valid_context_window(max_output_tokens) else None,
+                lifecycle_status=str(item.get("lifecycle_status", "stable") or "stable"),
             )
         )
-    models.sort(
-        key=lambda model: _model_sort_key(
-            "gemini",
-            model_id=model.model_id,
-            label=model.label,
-            context_window=model.context_window,
-        ),
-        reverse=True,
-    )
     return tuple(models)
-
-
-def _write_gemini_models_cache(discovered: Sequence[_GeminiDiscoveredModel]) -> None:
-    if not discovered:
-        return
-
-    payload = {
-        "models": [
-            {
-                "model_id": model.model_id,
-                "label": model.label,
-                "context_window": model.context_window,
-            }
-            for model in discovered
-        ],
-    }
-    try:
-        _gemini_cache_path().write_text(
-            json.dumps(payload, indent=2, sort_keys=True),
-            encoding="utf-8",
-        )
-    except Exception:
-        logger.debug("Unable to write Gemini model cache", exc_info=True)
 
 
 def _resolve_snapshot_catalog_model(provider_id: str, model_id: str) -> LLMModelOption | None:
@@ -819,8 +1172,17 @@ def _resolve_snapshot_catalog_model(provider_id: str, model_id: str) -> LLMModel
             model.id,
             model.context_window if _valid_context_window(model.context_window) else None,
         ),
+        max_output_tokens=None,
         input_price_label=_price_label(getattr(model.prices, "input_mtok", None)),
         output_price_label=_price_label(getattr(model.prices, "output_mtok", None)),
+        lifecycle_status="preview" if _is_preview_model_id(model.id) else "stable",
+        reasoning_capabilities=_reasoning_capabilities_for_model(provider_id, model.id),
+        provenance=LLMModelProvenance(
+            availability="genai-prices",
+            context="genai-prices" if _valid_context_window(model.context_window) else None,
+            pricing="genai-prices",
+            reasoning="provider-rules",
+        ),
     )
 
 
@@ -957,6 +1319,9 @@ __all__ = [
     "reset_gemini_model_cache",
     "resolve_catalog_model",
     "resolve_model_context_window",
+    "resolve_reasoning_capabilities",
+    "LLMReasoningCapabilities",
+    "LLMModelProvenance",
     "runtime_default_model_for_provider",
     "start_background_catalog_refresh",
     "stop_background_catalog_refresh",

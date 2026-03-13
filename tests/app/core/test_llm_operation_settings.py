@@ -1,5 +1,6 @@
 from src.app.core import llm_catalog
 from src.app.core.llm_operation_settings import (
+    LLMReasoningSettings,
     default_provider_catalog,
     infer_provider_id_from_model,
     settings_from_report_preferences,
@@ -18,6 +19,22 @@ def test_settings_from_report_preferences_normalizes_legacy_custom_provider() ->
     assert settings.provider_id == "openai"
     assert settings.model_id == "gpt-4.1"
     assert settings.context_window is None
+    assert settings.use_reasoning is True
+
+
+def test_settings_from_report_preferences_preserves_rich_reasoning_settings() -> None:
+    settings = settings_from_report_preferences(
+        provider_id="openai",
+        model="gpt-5.1",
+        custom_model="",
+        context_window=None,
+        reasoning={
+            "state": "on",
+            "effort": "high",
+        },
+    )
+
+    assert settings.reasoning == LLMReasoningSettings(state="on", effort="high")
     assert settings.use_reasoning is True
 
 

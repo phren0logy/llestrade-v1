@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 
-from src.app.core.llm_operation_settings import normalize_context_window_override
+from src.app.core.llm_operation_settings import LLMReasoningSettings, normalize_context_window_override
 
 LOGGER = logging.getLogger(__name__)
 
@@ -88,6 +88,7 @@ class BulkAnalysisGroup:
     combine_order: str = "path"  # or "mtime"
     combine_output_template: str = "combined_{timestamp}.md"
     use_reasoning: bool = False
+    reasoning: Dict[str, object] = field(default_factory=dict)
 
     @classmethod
     def create(
@@ -149,6 +150,7 @@ class BulkAnalysisGroup:
             "combine_order": self.combine_order,
             "combine_output_template": self.combine_output_template,
             "use_reasoning": self.use_reasoning,
+            "reasoning": self.reasoning,
         }
 
     @classmethod
@@ -193,6 +195,10 @@ class BulkAnalysisGroup:
             combine_order=str(payload.get("combine_order", "path")),
             combine_output_template=str(payload.get("combine_output_template", "combined_{timestamp}.md")),
             use_reasoning=bool(payload.get("use_reasoning", False)),
+            reasoning=LLMReasoningSettings.from_value(
+                payload.get("reasoning"),
+                legacy_use_reasoning=bool(payload.get("use_reasoning", False)),
+            ).to_dict(),
         )
 
     # Convenience properties

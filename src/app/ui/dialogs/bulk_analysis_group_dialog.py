@@ -200,7 +200,7 @@ class BulkAnalysisGroupDialog(QDialog):
         self.custom_model_edit = self.llm_settings_panel.custom_model_edit
         self.custom_context_label = self.llm_settings_panel.custom_context_label
         self.custom_context_spin = self.llm_settings_panel.custom_context_spin
-        self.reasoning_checkbox = self.llm_settings_panel.reasoning_checkbox
+        self.reasoning_state_combo = self.llm_settings_panel.reasoning_state_combo
         form.addRow("LLM Settings", self.llm_settings_panel)
 
         # Combined options
@@ -350,7 +350,7 @@ class BulkAnalysisGroupDialog(QDialog):
         # Combined options are still useful to adjust ahead of time
         self.order_combo.setEnabled(combined)
         self.output_template_edit.setEnabled(combined)
-        self.reasoning_checkbox.setEnabled(True)
+        self.reasoning_state_combo.setEnabled(True)
         # Show Extra Files only for Combined
         self.manual_files_label.setVisible(combined)
         self.manual_files_edit.setVisible(combined)
@@ -452,6 +452,7 @@ class BulkAnalysisGroupDialog(QDialog):
             "model_context_window": llm_settings.context_window,
             "placeholder_requirements": placeholder_settings,
             "use_reasoning": llm_settings.use_reasoning,
+            "reasoning": llm_settings.reasoning.to_dict(),
         }
 
         if op == "combined":
@@ -670,6 +671,7 @@ class BulkAnalysisGroupDialog(QDialog):
                 ),
                 context_window=group.model_context_window,
                 use_reasoning=group.use_reasoning,
+                reasoning=group.reasoning,
             )
         )
 
