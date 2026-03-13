@@ -19,8 +19,9 @@ from PySide6.QtWidgets import (
 )
 
 from src.app.core.llm_operation_settings import (
+    CatalogTransport,
     LLMOperationSettings,
-    default_provider_catalog,
+    default_provider_catalog_for_transport,
     provider_option_map,
 )
 from src.app.core.llm_catalog import resolve_catalog_model
@@ -33,9 +34,19 @@ class LLMSettingsPanel(QWidget):
 
     settings_changed = Signal()
 
-    def __init__(self, *, parent: QWidget | None = None, include_azure: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        parent: QWidget | None = None,
+        include_azure: bool = False,
+        transport: CatalogTransport = "direct",
+    ) -> None:
         super().__init__(parent)
-        self._provider_options = default_provider_catalog(include_azure=include_azure)
+        self._transport = transport
+        self._provider_options = default_provider_catalog_for_transport(
+            include_azure=include_azure,
+            transport=transport,
+        )
         self._provider_map = provider_option_map(self._provider_options)
         self._invalid_selection_message: str | None = None
         self._build_ui()
@@ -43,6 +54,10 @@ class LLMSettingsPanel(QWidget):
         self._refresh_model_options()
         self._update_custom_state()
         self._update_model_details()
+
+    @property
+    def transport(self) -> CatalogTransport:
+        return self._transport
 
     def current_settings(self) -> tuple[LLMOperationSettings | None, str | None]:
         if self._invalid_selection_message:
@@ -57,7 +72,7 @@ class LLMSettingsPanel(QWidget):
             custom_model = self.custom_model_edit.text().strip()
             if not custom_model:
                 return None, "Enter a custom model id before continuing."
-            resolved = resolve_catalog_model(str(provider_id), custom_model)
+            resolved = resolve_catalog_model(str(provider_id), custom_model, transport=self._transport)
             context_window = int(self.custom_context_spin.value())
             if context_window <= 0:
                 if resolved and resolved.context_window:
@@ -78,11 +93,19 @@ class LLMSettingsPanel(QWidget):
         if not model_id:
             return None, "Select a model before continuing."
 
+        resolved = resolve_catalog_model(str(provider_id), model_id, transport=self._transport)
+        if resolved is not None and resolved.context_window is None:
+            context_window = int(self.custom_context_spin.value())
+            if context_window <= 0:
+                return None, "Enter a context window before continuing."
+        else:
+            context_window = None
+
         return (
             LLMOperationSettings(
                 provider_id=str(provider_id),
                 model_id=model_id,
-                context_window=None,
+                context_window=context_window,
                 use_reasoning=self.reasoning_checkbox.isChecked(),
             ),
             None,
@@ -98,7 +121,9 @@ class LLMSettingsPanel(QWidget):
 
         self._invalid_selection_message = None
         model_index = self.model_combo.findData(settings.model_id)
-        custom_mode = settings.context_window is not None or model_index == -1
+        resolved = resolve_catalog_model(settings.provider_id, settings.model_id, transport=self._transport)
+        needs_context_override = resolved is not None and resolved.context_window is None and settings.context_window is not None
+        custom_mode = (settings.context_window is not None and not needs_context_override) or model_index == -1
         if provider_index == -1:
             self.provider_combo.setCurrentIndex(-1)
             custom_mode = True
@@ -120,7 +145,7 @@ class LLMSettingsPanel(QWidget):
         elif model_index != -1:
             self.model_combo.setCurrentIndex(model_index)
             self.custom_model_edit.clear()
-            self.custom_context_spin.setValue(0)
+            self.custom_context_spin.setValue(int(settings.context_window or 0))
 
         self.reasoning_checkbox.setChecked(bool(settings.use_reasoning))
         self._update_custom_state()
@@ -258,13 +283,15 @@ class LLMSettingsPanel(QWidget):
 
     def _update_custom_state(self) -> None:
         is_custom = self.model_combo.currentData() == _CUSTOM_MODEL_SENTINEL
-        for widget in (
-            self.custom_model_label,
-            self.custom_model_edit,
-            self.custom_context_label,
-            self.custom_context_spin,
-        ):
-            widget.setVisible(is_custom)
+        provider_id = str(self.provider_combo.currentData() or "").strip()
+        model_id = self.custom_model_edit.text().strip() if is_custom else str(self.model_combo.currentData() or "").strip()
+        resolved = resolve_catalog_model(provider_id, model_id, transport=self._transport) if provider_id and model_id else None
+        needs_context = bool(is_custom or (resolved is not None and resolved.context_window is None))
+
+        self.custom_model_label.setVisible(is_custom)
+        self.custom_model_edit.setVisible(is_custom)
+        self.custom_context_label.setVisible(needs_context)
+        self.custom_context_spin.setVisible(needs_context)
         self.validation_label.setVisible(bool(self._invalid_selection_message))
         self.validation_label.setText(self._invalid_selection_message or "")
 
@@ -282,7 +309,7 @@ class LLMSettingsPanel(QWidget):
             self.model_details_label.clear()
             return
 
-        option = resolve_catalog_model(provider_id, model_id)
+        option = resolve_catalog_model(provider_id, model_id, transport=self._transport)
         if option is None:
             self.model_details_label.setText("Catalog details unavailable for this model.")
             return
@@ -290,12 +317,14 @@ class LLMSettingsPanel(QWidget):
         details: list[str] = []
         if option.context_window:
             details.append(f"Context: {option.context_window:,} tokens")
+        else:
+            details.append("Context: enter manually")
         if option.input_price_label:
             details.append(f"Input: {option.input_price_label}")
         if option.output_price_label:
             details.append(f"Output: {option.output_price_label}")
-        if custom_mode and self.custom_context_spin.value() <= 0 and option.context_window is None:
-            self.model_details_label.setText("Enter a context window to use this custom model.")
+        if self.custom_context_spin.isVisible() and self.custom_context_spin.value() <= 0 and option.context_window is None:
+            self.model_details_label.setText("Enter a context window to use this model.")
             return
         self.model_details_label.setText(" | ".join(details) if details else "Catalog details unavailable for this model.")
 

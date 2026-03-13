@@ -79,13 +79,13 @@ def stub_catalog(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(
         llm_settings_panel_module,
-        "default_provider_catalog",
-        lambda include_azure=False: providers,
+        "default_provider_catalog_for_transport",
+        lambda include_azure=False, transport="direct": providers,
     )
     monkeypatch.setattr(
         llm_settings_panel_module,
         "resolve_catalog_model",
-        lambda provider_id, model_id: model_lookup.get((provider_id, str(model_id or "").strip())),
+        lambda provider_id, model_id, transport="direct": model_lookup.get((provider_id, str(model_id or "").strip())),
     )
 
 

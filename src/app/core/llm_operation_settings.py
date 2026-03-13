@@ -6,11 +6,13 @@ from dataclasses import dataclass
 from typing import Optional
 
 from src.app.core.llm_catalog import (
+    CatalogTransport,
     LLMModelOption,
     LLMProviderOption,
     SUPPORTED_SELECTOR_PROVIDER_IDS,
     default_model_for_provider,
     default_provider_catalog,
+    default_provider_catalog_for_transport,
     provider_option_map,
     resolve_catalog_model,
 )
@@ -35,6 +37,7 @@ def normalize_context_window_override(
     provider_id: str | None,
     model_id: str | None,
     context_window: int | None,
+    transport: CatalogTransport = "direct",
 ) -> int | None:
     """Keep explicit context overrides only for unknown custom models."""
 
@@ -43,7 +46,8 @@ def normalize_context_window_override(
 
     provider = str(provider_id or "").strip()
     model = str(model_id or "").strip()
-    if provider and model and resolve_catalog_model(provider, model) is not None:
+    resolved = resolve_catalog_model(provider, model, transport=transport) if provider and model else None
+    if resolved is not None and resolved.context_window is not None:
         return None
 
     return int(context_window)
@@ -72,6 +76,7 @@ def settings_from_report_preferences(
     custom_model: str | None,
     context_window: int | None,
     use_reasoning: bool = False,
+    transport: CatalogTransport = "direct",
 ) -> LLMOperationSettings:
     """Normalize persisted report prefs into shared operation settings."""
     provider = str(provider_id or "").strip()
@@ -85,7 +90,7 @@ def settings_from_report_preferences(
     if not provider:
         provider = "anthropic"
 
-    model_id = custom or stored_model or default_model_for_provider(provider) or ""
+    model_id = custom or stored_model or default_model_for_provider(provider, transport=transport) or ""
     return LLMOperationSettings(
         provider_id=provider,
         model_id=model_id,
@@ -93,6 +98,7 @@ def settings_from_report_preferences(
             provider_id=provider,
             model_id=model_id,
             context_window=context_window if custom else None,
+            transport=transport,
         ),
         use_reasoning=bool(use_reasoning),
     )
@@ -103,7 +109,9 @@ __all__ = [
     "LLMOperationSettings",
     "LLMProviderOption",
     "SUPPORTED_SELECTOR_PROVIDER_IDS",
+    "CatalogTransport",
     "default_provider_catalog",
+    "default_provider_catalog_for_transport",
     "infer_provider_id_from_model",
     "normalize_context_window_override",
     "provider_option_map",

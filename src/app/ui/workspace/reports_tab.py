@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from src.app.core.llm_operation_settings import CatalogTransport
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QFrame,
@@ -67,7 +68,12 @@ class CollapsibleGroupBox(QWidget):
 class ReportsTab(QWidget):
     """Encapsulate the UI elements used by the reports workflow."""
 
-    def __init__(self, *, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        parent: QWidget | None = None,
+        llm_transport: CatalogTransport = "direct",
+    ) -> None:
         super().__init__(parent)
 
         self.inputs_tree = QTreeWidget()
@@ -76,7 +82,7 @@ class ReportsTab(QWidget):
         self.inputs_tree.setUniformRowHeights(True)
         self.inputs_tree.setSelectionMode(QTreeWidget.NoSelection)
 
-        self.llm_settings_panel = LLMSettingsPanel(parent=self)
+        self.llm_settings_panel = LLMSettingsPanel(parent=self, transport=llm_transport)
         self.provider_combo = self.llm_settings_panel.provider_combo
         self.model_combo = self.llm_settings_panel.model_combo
         self.custom_model_label = self.llm_settings_panel.custom_model_label

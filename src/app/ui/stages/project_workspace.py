@@ -56,6 +56,7 @@ from src.app.ui.workspace.services import (
 from src.app.workers import ConversionWorker, WorkerCoordinator, get_worker_pool
 from src.app.workers.highlight_worker import HighlightExtractionSummary
 from src.app.workers.llm_backend import PydanticAIDirectBackend, PydanticAIGatewayBackend
+from src.app.workers.llm_backend import backend_transport_name
 from src.app.core.prompt_preview import generate_prompt_preview, PromptPreviewError
 from src.app.ui.widgets import BannerAction, SmartBanner
 
@@ -102,6 +103,7 @@ class ProjectWorkspace(QWidget):
             llm_backend = PydanticAIGatewayBackend()
         else:
             llm_backend = PydanticAIDirectBackend()
+        self._llm_transport = backend_transport_name(llm_backend)
         self._bulk_service = BulkAnalysisService(self._workers, llm_backend=llm_backend)
         self._reports_service = ReportsService(self._workers, llm_backend=llm_backend)
         self._build_ui()
@@ -180,7 +182,7 @@ class ProjectWorkspace(QWidget):
         return tab
 
     def _build_reports_tab(self) -> ReportsTab:
-        tab = ReportsTab(parent=self)
+        tab = ReportsTab(parent=self, llm_transport=self._llm_transport)
         self._reports_controller = ReportsController(self, tab, service=self._reports_service)
         return tab
 
@@ -838,6 +840,7 @@ class ProjectWorkspace(QWidget):
             placeholder_values=manager.placeholder_mapping(),
             existing_group=group,
             existing_names=existing_names,
+            llm_transport=self._llm_transport,
         )
         if dialog.exec() == QDialog.Accepted:
             try:
@@ -860,6 +863,7 @@ class ProjectWorkspace(QWidget):
             metadata=self._project_manager.metadata,
             placeholder_values=self._project_manager.placeholder_mapping(),
             existing_names=existing_names,
+            llm_transport=self._llm_transport,
         )
         if dialog.exec() == QDialog.Accepted:
             group = dialog.build_group()

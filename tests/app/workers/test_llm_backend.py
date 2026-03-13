@@ -91,7 +91,7 @@ def test_resolve_model_name_uses_provider_defaults(monkeypatch: pytest.MonkeyPat
     }
     monkeypatch.setattr(
         "src.app.workers.llm_backend.default_model_for_provider",
-        lambda provider_id: defaults.get(provider_id),
+        lambda provider_id, transport="direct": defaults.get(provider_id),
     )
     assert str(resolve_model_name("anthropic", None)).startswith("claude")
     assert str(resolve_model_name("openai", None)).startswith(("gpt-", "o"))

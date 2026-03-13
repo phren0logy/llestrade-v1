@@ -86,6 +86,76 @@ def test_runtime_default_model_for_gemini_prefers_stable_pro(
     assert llm_catalog.runtime_default_model_for_provider("gemini") == "gemini-2.5-pro"
 
 
+def test_runtime_default_model_for_gateway_gemini_ignores_direct_preview_discovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = _FakeSnapshot(
+        providers=[
+            _FakeProvider(
+                id="google",
+                models=[
+                    _FakeModel(
+                        id="gemini-2.5-pro",
+                        name="Gemini 2.5 Pro",
+                        context_window=1_048_576,
+                    ),
+                    _FakeModel(
+                        id="gemini-3-flash-preview",
+                        name="Gemini 3 Flash Preview",
+                        context_window=1_048_576,
+                    ),
+                ],
+            )
+        ]
+    )
+    monkeypatch.setattr(llm_catalog, "_snapshot", lambda: snapshot)
+    monkeypatch.setattr(
+        llm_catalog,
+        "_discover_gemini_models_live",
+        lambda: (
+            llm_catalog._GeminiDiscoveredModel(
+                model_id="gemini-3-flash-preview",
+                label="Gemini 3 Flash Preview",
+                context_window=1_048_576,
+            ),
+        ),
+    )
+
+    assert llm_catalog.runtime_default_model_for_provider("gemini", transport="gateway") == "gemini-2.5-pro"
+
+
+def test_gateway_gemini_catalog_uses_snapshot_and_excludes_image_variants(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = _FakeSnapshot(
+        providers=[
+            _FakeProvider(
+                id="google",
+                models=[
+                    _FakeModel(
+                        id="gemini-2.5-pro",
+                        name="Gemini 2.5 Pro",
+                        context_window=None,
+                    ),
+                    _FakeModel(
+                        id="gemini-2.5-flash-image",
+                        name="Gemini 2.5 Flash Image",
+                        context_window=1_000_000,
+                    ),
+                ],
+            )
+        ]
+    )
+    monkeypatch.setattr(llm_catalog, "_snapshot", lambda: snapshot)
+
+    catalog = llm_catalog.default_provider_catalog_for_transport(transport="gateway")
+    gemini = next(provider for provider in catalog if provider.provider_id == "gemini")
+    model_ids = {model.model_id for model in gemini.models}
+
+    assert "gemini-2.5-pro" in model_ids
+    assert "gemini-2.5-flash-image" not in model_ids
+
+
 def test_resolve_catalog_model_for_gemini_uses_live_context_and_catalog_prices(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -127,6 +197,46 @@ def test_resolve_catalog_model_for_gemini_uses_live_context_and_catalog_prices(
     assert resolved.context_window == 2_097_152
     assert resolved.input_price_label == "$1.25/1M"
     assert resolved.output_price_label == "$10/1M"
+
+
+def test_default_provider_catalog_for_transport_uses_live_openai_discovery_with_snapshot_enrichment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = _FakeSnapshot(
+        providers=[
+            _FakeProvider(
+                id="openai",
+                models=[
+                    _FakeModel(
+                        id="gpt-5.4",
+                        name="GPT-5.4",
+                        context_window=400_000,
+                        prices=_FakePrices(input_mtok=Decimal("2.5"), output_mtok=Decimal("12.5")),
+                    )
+                ],
+            )
+        ]
+    )
+    monkeypatch.setattr(llm_catalog, "_snapshot", lambda: snapshot)
+    monkeypatch.setattr(
+        llm_catalog,
+        "_discover_openai_models_live",
+        lambda: (
+            llm_catalog._DiscoveredModel(
+                model_id="gpt-5.4",
+                label="gpt-5.4",
+                context_window=None,
+            ),
+        ),
+    )
+
+    catalog = llm_catalog.default_provider_catalog_for_transport(transport="direct")
+    openai = next(provider for provider in catalog if provider.provider_id == "openai")
+    resolved = next(model for model in openai.models if model.model_id == "gpt-5.4")
+
+    assert resolved.context_window == 400_000
+    assert resolved.input_price_label == "$2.5/1M"
+    assert resolved.output_price_label == "$12.5/1M"
 
 
 def test_runtime_default_model_for_gemini_uses_cache_when_live_discovery_fails(

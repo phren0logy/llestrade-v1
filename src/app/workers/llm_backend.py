@@ -125,13 +125,18 @@ def normalize_model_name(provider_id: str, model: Optional[str]) -> str | None:
     return normalized
 
 
-def resolve_model_name(provider_id: str, model: Optional[str]) -> str | None:
+def resolve_model_name(
+    provider_id: str,
+    model: Optional[str],
+    *,
+    transport: str = "direct",
+) -> str | None:
     """Normalize a model name and fall back to the provider default when needed."""
     normalized = normalize_model_name(provider_id, model)
     if normalized:
         return normalized
 
-    fallback = default_model_for_provider(provider_id)
+    fallback = default_model_for_provider(provider_id, transport=transport)
     return normalize_model_name(provider_id, fallback)
 
 
@@ -438,7 +443,7 @@ class PydanticAIDirectBackend:
         return normalize_model_name(provider_id, model)
 
     def resolve_model(self, provider_id: str, model: Optional[str]) -> str | None:
-        return resolve_model_name(provider_id, model)
+        return resolve_model_name(provider_id, model, transport="direct")
 
     def capabilities(self, provider_id: str, model: Optional[str]) -> LLMProviderCapabilities:
         return provider_capabilities(provider_id, model)
@@ -670,7 +675,7 @@ class PydanticAIGatewayBackend:
         return normalize_model_name(provider_id, model)
 
     def resolve_model(self, provider_id: str, model: Optional[str]) -> str | None:
-        return resolve_model_name(provider_id, model)
+        return resolve_model_name(provider_id, model, transport="gateway")
 
     def capabilities(self, provider_id: str, model: Optional[str]) -> LLMProviderCapabilities:
         return provider_capabilities(provider_id, model)

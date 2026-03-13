@@ -9,7 +9,7 @@ import logging
 import os
 import re
 from threading import Lock
-from typing import Optional, Sequence
+from typing import Literal, Optional, Sequence
 
 from genai_prices import UpdatePrices
 from genai_prices.data_snapshot import DataSnapshot, get_snapshot
@@ -64,6 +64,10 @@ _catalog_updater: UpdatePrices | None = None
 _catalog_updater_lock = Lock()
 _gemini_selector_models: tuple["LLMModelOption", ...] | None = None
 _gemini_selector_models_lock = Lock()
+_provider_selector_models: dict[tuple[str, str], tuple["LLMModelOption", ...]] = {}
+_provider_selector_models_lock = Lock()
+
+CatalogTransport = Literal["direct", "gateway"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,6 +75,13 @@ class _GeminiDiscoveredModel:
     model_id: str
     label: str
     context_window: int
+
+
+@dataclass(frozen=True, slots=True)
+class _DiscoveredModel:
+    model_id: str
+    label: str
+    context_window: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,6 +153,16 @@ def provider_option_map(
 
 def default_provider_catalog(*, include_azure: bool = False) -> tuple[LLMProviderOption, ...]:
     """Return selector-ready provider/model metadata."""
+    
+    return default_provider_catalog_for_transport(include_azure=include_azure, transport="direct")
+
+
+def default_provider_catalog_for_transport(
+    *,
+    include_azure: bool = False,
+    transport: CatalogTransport = "direct",
+) -> tuple[LLMProviderOption, ...]:
+    """Return selector-ready provider/model metadata for a transport."""
 
     provider_ids = list(SUPPORTED_SELECTOR_PROVIDER_IDS)
     if include_azure:
@@ -149,7 +170,7 @@ def default_provider_catalog(*, include_azure: bool = False) -> tuple[LLMProvide
 
     options: list[LLMProviderOption] = []
     for provider_id in provider_ids:
-        models = tuple(_iter_selector_models(provider_id))
+        models = tuple(_iter_selector_models(provider_id, transport=transport))
         if not models:
             continue
         options.append(
@@ -162,25 +183,36 @@ def default_provider_catalog(*, include_azure: bool = False) -> tuple[LLMProvide
     return tuple(options)
 
 
-def default_model_for_provider(provider_id: str) -> str | None:
+def default_model_for_provider(
+    provider_id: str,
+    *,
+    transport: CatalogTransport = "direct",
+) -> str | None:
     """Return the current default preset model for ``provider_id``."""
 
     env_var = _DEFAULT_MODEL_ENV_VARS.get(provider_id)
     env_model = os.getenv(env_var, "").strip() if env_var else ""
     if env_model:
-        matched = resolve_catalog_model(provider_id, env_model)
+        matched = resolve_catalog_model(provider_id, env_model, transport=transport)
         if matched and matched.context_window:
             return matched.model_id
 
-    provider = _find_provider(provider_id)
+    provider = _find_provider(provider_id, transport=transport)
     if provider is None:
         return None
+    for model in provider.models:
+        if model.context_window:
+            return model.model_id
     if provider.models:
         return provider.models[0].model_id
     return None
 
 
-def runtime_default_model_for_provider(provider_id: str) -> str | None:
+def runtime_default_model_for_provider(
+    provider_id: str,
+    *,
+    transport: CatalogTransport = "direct",
+) -> str | None:
     """Return the best current runtime model, even if selector metadata is incomplete."""
 
     env_var = _DEFAULT_MODEL_ENV_VARS.get(provider_id)
@@ -188,10 +220,13 @@ def runtime_default_model_for_provider(provider_id: str) -> str | None:
     if env_model:
         return env_model
 
-    if provider_id == "gemini":
-        models = _gemini_runtime_models()
-        if models:
-            return models[0].model_id
+    provider = _find_provider(provider_id, transport=transport)
+    if provider is not None:
+        for model in provider.models:
+            if model.context_window:
+                return model.model_id
+        if provider.models:
+            return provider.models[0].model_id
 
     snapshot = _snapshot()
     upstream_provider_id = _CATALOG_PROVIDER_IDS.get(provider_id)
@@ -223,25 +258,34 @@ def runtime_default_model_for_provider(provider_id: str) -> str | None:
     return candidates[0].id
 
 
-def resolve_catalog_model(provider_id: str, model_id: str | None) -> LLMModelOption | None:
+def resolve_catalog_model(
+    provider_id: str,
+    model_id: str | None,
+    *,
+    transport: CatalogTransport = "direct",
+) -> LLMModelOption | None:
     """Resolve ``model_id`` to catalog metadata when possible."""
 
     normalized = str(model_id or "").strip()
     if not normalized:
         return None
 
-    if provider_id == "gemini":
-        for model in _gemini_runtime_models():
-            if model.model_id == normalized:
-                return model
+    for model in _iter_selector_models(provider_id, transport=transport):
+        if model.model_id == normalized:
+            return model
 
     return _resolve_snapshot_catalog_model(provider_id, normalized)
 
 
-def resolve_model_context_window(provider_id: str, model_id: str | None) -> int | None:
+def resolve_model_context_window(
+    provider_id: str,
+    model_id: str | None,
+    *,
+    transport: CatalogTransport = "direct",
+) -> int | None:
     """Return the raw context window for ``model_id`` when the catalog knows it."""
 
-    model = resolve_catalog_model(provider_id, model_id)
+    model = resolve_catalog_model(provider_id, model_id, transport=transport)
     if model is None:
         return None
     return model.context_window
@@ -304,17 +348,57 @@ def _snapshot() -> DataSnapshot:
     return get_snapshot()
 
 
-def _find_provider(provider_id: str) -> LLMProviderOption | None:
-    for provider in default_provider_catalog(include_azure=True):
+def _find_provider(
+    provider_id: str,
+    *,
+    transport: CatalogTransport = "direct",
+) -> LLMProviderOption | None:
+    for provider in default_provider_catalog_for_transport(include_azure=True, transport=transport):
         if provider.provider_id == provider_id:
             return provider
     return None
 
 
-def _iter_selector_models(provider_id: str) -> Sequence[LLMModelOption]:
-    if provider_id == "gemini":
-        return _gemini_runtime_models()
+def _iter_selector_models(
+    provider_id: str,
+    *,
+    transport: CatalogTransport = "direct",
+) -> Sequence[LLMModelOption]:
+    cache_key = (transport, provider_id)
+    with _provider_selector_models_lock:
+        cached = _provider_selector_models.get(cache_key)
+    if cached is not None:
+        return cached
 
+    if provider_id == "gemini":
+        models = _gemini_runtime_models() if transport == "direct" else _gemini_gateway_models()
+    elif provider_id == "openai":
+        models = _openai_runtime_models(transport=transport)
+    elif provider_id == "anthropic":
+        models = _anthropic_runtime_models(transport=transport)
+    else:
+        models = tuple(_iter_snapshot_selector_models(provider_id))
+
+    with _provider_selector_models_lock:
+        _provider_selector_models[cache_key] = tuple(models)
+        return _provider_selector_models[cache_key]
+
+
+def reset_gemini_model_cache() -> None:
+    """Clear the in-memory Gemini model cache."""
+
+    global _gemini_selector_models
+    with _gemini_selector_models_lock:
+        _gemini_selector_models = None
+    with _provider_selector_models_lock:
+        _provider_selector_models.clear()
+
+
+def _iter_snapshot_selector_models(
+    provider_id: str,
+    *,
+    exclude_preview: bool = False,
+) -> tuple[LLMModelOption, ...]:
     snapshot = _snapshot()
     upstream_provider_id = _CATALOG_PROVIDER_IDS.get(provider_id)
     if not upstream_provider_id:
@@ -330,7 +414,9 @@ def _iter_selector_models(provider_id: str) -> Sequence[LLMModelOption]:
             continue
         if not _is_supported_model_family(provider_id, model.id):
             continue
-        if not _valid_context_window(model.context_window):
+        if provider_id == "gemini" and _is_excluded_gemini_model(model.id):
+            continue
+        if exclude_preview and _is_preview_model_id(model.id):
             continue
         models.append(
             LLMModelOption(
@@ -339,7 +425,7 @@ def _iter_selector_models(provider_id: str) -> Sequence[LLMModelOption]:
                 context_window=_runtime_context_window(
                     provider_id,
                     model.id,
-                    int(model.context_window),
+                    int(model.context_window) if _valid_context_window(model.context_window) else None,
                 ),
                 input_price_label=_price_label(getattr(model.prices, "input_mtok", None)),
                 output_price_label=_price_label(getattr(model.prices, "output_mtok", None)),
@@ -354,15 +440,56 @@ def _iter_selector_models(provider_id: str) -> Sequence[LLMModelOption]:
         ),
         reverse=True,
     )
-    return models
+    return tuple(models)
 
 
-def reset_gemini_model_cache() -> None:
-    """Clear the in-memory Gemini model cache."""
+def _build_discovered_model_options(
+    provider_id: str,
+    discovered: Sequence[_DiscoveredModel],
+) -> tuple[LLMModelOption, ...]:
+    models: list[LLMModelOption] = []
+    for item in discovered:
+        catalog_model = _resolve_snapshot_catalog_model(provider_id, item.model_id)
+        context_window = item.context_window
+        if context_window is None and catalog_model is not None:
+            context_window = catalog_model.context_window
+        models.append(
+            LLMModelOption(
+                model_id=item.model_id,
+                label=item.label,
+                context_window=_runtime_context_window(provider_id, item.model_id, context_window),
+                input_price_label=catalog_model.input_price_label if catalog_model else None,
+                output_price_label=catalog_model.output_price_label if catalog_model else None,
+            )
+        )
+    models.sort(
+        key=lambda model: _model_sort_key(
+            provider_id,
+            model_id=model.model_id,
+            label=model.label,
+            context_window=model.context_window,
+        ),
+        reverse=True,
+    )
+    return tuple(models)
 
-    global _gemini_selector_models
-    with _gemini_selector_models_lock:
-        _gemini_selector_models = None
+
+def _openai_runtime_models(*, transport: CatalogTransport) -> tuple[LLMModelOption, ...]:
+    discovered = _discover_openai_models_live()
+    if discovered:
+        return _build_discovered_model_options("openai", discovered)
+    return _iter_snapshot_selector_models("openai")
+
+
+def _anthropic_runtime_models(*, transport: CatalogTransport) -> tuple[LLMModelOption, ...]:
+    discovered = _discover_anthropic_models_live()
+    if discovered:
+        return _build_discovered_model_options("anthropic", discovered)
+    return _iter_snapshot_selector_models("anthropic")
+
+
+def _gemini_gateway_models() -> tuple[LLMModelOption, ...]:
+    return _iter_snapshot_selector_models("gemini", exclude_preview=True)
 
 
 def _gemini_runtime_models() -> tuple[LLMModelOption, ...]:
@@ -447,6 +574,57 @@ def _discover_gemini_models_live() -> tuple[_GeminiDiscoveredModel, ...]:
         return ()
 
 
+def _discover_openai_models_live() -> tuple[_DiscoveredModel, ...]:
+    api_key = _resolve_api_key("openai", env_vars=("OPENAI_API_KEY",))
+    if not api_key:
+        return ()
+
+    try:
+        from openai import OpenAI
+    except Exception:
+        logger.debug("openai package is unavailable; skipping OpenAI model discovery", exc_info=True)
+        return ()
+
+    try:
+        client = OpenAI(api_key=api_key)
+        models: list[_DiscoveredModel] = []
+        for model in client.models.list():
+            model_id = str(getattr(model, "id", "") or "").strip()
+            if not model_id or not _is_supported_model_family("openai", model_id):
+                continue
+            models.append(_DiscoveredModel(model_id=model_id, label=model_id))
+        return tuple(models)
+    except Exception:
+        logger.debug("Unable to discover OpenAI models live", exc_info=True)
+        return ()
+
+
+def _discover_anthropic_models_live() -> tuple[_DiscoveredModel, ...]:
+    api_key = _resolve_api_key("anthropic", env_vars=("ANTHROPIC_API_KEY",))
+    if not api_key:
+        return ()
+
+    try:
+        import anthropic
+    except Exception:
+        logger.debug("anthropic package is unavailable; skipping Anthropic model discovery", exc_info=True)
+        return ()
+
+    try:
+        client = anthropic.Anthropic(api_key=api_key)
+        models: list[_DiscoveredModel] = []
+        for model in client.models.list():
+            model_id = str(getattr(model, "id", "") or "").strip()
+            if not model_id or not _is_supported_model_family("anthropic", model_id):
+                continue
+            label = str(getattr(model, "display_name", "") or model_id).strip() or model_id
+            models.append(_DiscoveredModel(model_id=model_id, label=label))
+        return tuple(models)
+    except Exception:
+        logger.debug("Unable to discover Anthropic models live", exc_info=True)
+        return ()
+
+
 def _parse_gemini_discovered_model(model: object) -> _GeminiDiscoveredModel | None:
     model_name = str(getattr(model, "name", "") or "")
     if not model_name.startswith("models/gemini"):
@@ -499,20 +677,24 @@ def _is_excluded_gemini_model(model_id: str) -> bool:
     return any(token in normalized for token in excluded_tokens)
 
 
-def _resolve_gemini_api_key() -> str | None:
-    env_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-    if env_key:
-        return env_key.strip()
+def _resolve_api_key(provider_id: str, *, env_vars: Sequence[str]) -> str | None:
+    for env_var in env_vars:
+        env_key = os.getenv(env_var)
+        if env_key and env_key.strip():
+            return env_key.strip()
 
     try:
         import keyring
 
-        for provider_id in ("gemini", "google"):
-            key = keyring.get_password("Llestrade", f"api_key_{provider_id}")
+        provider_aliases = (provider_id,)
+        if provider_id == "gemini":
+            provider_aliases = ("gemini", "google")
+        for alias in provider_aliases:
+            key = keyring.get_password("Llestrade", f"api_key_{alias}")
             if key:
                 return key
     except Exception:
-        logger.debug("Unable to load Gemini API key from keyring", exc_info=True)
+        logger.debug("Unable to load %s API key from keyring", provider_id, exc_info=True)
 
     settings_path = app_config_dir() / "app_settings.json"
     if not settings_path.exists():
@@ -521,18 +703,25 @@ def _resolve_gemini_api_key() -> str | None:
     try:
         payload = json.loads(settings_path.read_text(encoding="utf-8"))
     except Exception:
-        logger.debug("Unable to read Gemini API key from settings file", exc_info=True)
+        logger.debug("Unable to read %s API key from settings file", provider_id, exc_info=True)
         return None
 
     api_keys = payload.get("api_keys")
     if not isinstance(api_keys, dict):
         return None
 
-    for provider_id in ("gemini", "google"):
-        key = api_keys.get(provider_id)
+    provider_aliases = (provider_id,)
+    if provider_id == "gemini":
+        provider_aliases = ("gemini", "google")
+    for alias in provider_aliases:
+        key = api_keys.get(alias)
         if isinstance(key, str) and key.strip():
             return key.strip()
     return None
+
+
+def _resolve_gemini_api_key() -> str | None:
+    return _resolve_api_key("gemini", env_vars=("GEMINI_API_KEY", "GOOGLE_API_KEY"))
 
 
 def _gemini_cache_path():
@@ -647,6 +836,11 @@ def _valid_context_window(value: object) -> bool:
     return isinstance(value, int) and value > 0
 
 
+def _is_preview_model_id(model_id: str) -> bool:
+    normalized = model_id.lower()
+    return any(token in normalized for token in ("preview", "beta", "experimental", "-exp"))
+
+
 def _model_sort_key(
     provider_id: str,
     *,
@@ -655,7 +849,7 @@ def _model_sort_key(
     context_window: int | None,
 ) -> tuple[int, int, int, tuple[int, ...], str]:
     normalized = f"{model_id} {label}".lower()
-    preview_penalty = -20 if any(token in normalized for token in ("preview", "beta", "experimental")) else 0
+    preview_penalty = -20 if _is_preview_model_id(normalized) else 0
     modality_penalty = -30 if any(token in normalized for token in ("vision", "image", "audio")) else 0
     context_bonus = 5 if _valid_context_window(context_window) else 0
     return (
@@ -678,13 +872,26 @@ def _provider_family_rank(provider_id: str, normalized: str) -> int:
             return 100
         return 0
     if provider_id == "gemini":
+        version_rank = 0
+        if "gemini-3" in normalized:
+            version_rank = 500
+        elif "gemini-2.5" in normalized:
+            version_rank = 450
+        elif "gemini-2.0" in normalized:
+            version_rank = 400
+        elif "1.5" in normalized:
+            version_rank = 300
+        elif "gemini-pro" in normalized:
+            version_rank = 200
+
+        family_rank = 0
         if " pro" in normalized or normalized.startswith("gemini-pro") or "-pro" in normalized:
-            return 300
-        if "flash" in normalized:
-            return 200
-        if "lite" in normalized:
-            return 100
-        return 0
+            family_rank = 30
+        elif "flash" in normalized:
+            family_rank = 20
+        elif "lite" in normalized:
+            family_rank = 10
+        return version_rank + family_rank
     if provider_id in {"openai", "azure_openai"}:
         if "gpt-5" in normalized:
             return 400
@@ -738,12 +945,14 @@ def _format_decimal(value: Decimal) -> str:
 
 
 __all__ = [
+    "CatalogTransport",
     "LLMModelOption",
     "LLMProviderOption",
     "SUPPORTED_SELECTOR_PROVIDER_IDS",
     "calculate_usage_cost",
     "default_model_for_provider",
     "default_provider_catalog",
+    "default_provider_catalog_for_transport",
     "provider_option_map",
     "reset_gemini_model_cache",
     "resolve_catalog_model",

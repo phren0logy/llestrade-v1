@@ -42,7 +42,7 @@ from src.app.core.placeholders.analyzer import find_placeholders
 from src.app.core.prompt_placeholders import get_prompt_spec
 from src.app.core.prompt_preview import generate_prompt_preview, PromptPreviewError
 from src.app.core.prompt_placeholders import placeholder_summary
-from src.app.core.llm_operation_settings import LLMOperationSettings
+from src.app.core.llm_operation_settings import CatalogTransport, LLMOperationSettings
 from src.app.ui.widgets import LLMSettingsPanel
 from .prompt_preview_dialog import PromptPreviewDialog
 
@@ -62,6 +62,7 @@ class BulkAnalysisGroupDialog(QDialog):
         placeholder_values: Optional[Mapping[str, str]] = None,
         existing_group: Optional[BulkAnalysisGroup] = None,
         existing_names: Optional[Sequence[str]] = None,
+        llm_transport: CatalogTransport = "direct",
     ) -> None:
         super().__init__(parent)
         self._project_dir = project_dir
@@ -77,6 +78,7 @@ class BulkAnalysisGroupDialog(QDialog):
         }
         self._tree_nodes: Dict[Tuple[str, bool], QTreeWidgetItem] = {}
         self._map_tree_nodes: Dict[Tuple[str, str], QTreeWidgetItem] = {}
+        self._llm_transport = llm_transport
         self.setWindowTitle("Edit Bulk Analysis" if existing_group else "New Bulk Analysis")
         self.setModal(True)
         self._build_ui()
@@ -191,7 +193,7 @@ class BulkAnalysisGroupDialog(QDialog):
         self.preview_prompt_button.clicked.connect(self._preview_prompt)
         form.addRow("", self.preview_prompt_button)
 
-        self.llm_settings_panel = LLMSettingsPanel(parent=self)
+        self.llm_settings_panel = LLMSettingsPanel(parent=self, transport=self._llm_transport)
         self.provider_combo = self.llm_settings_panel.provider_combo
         self.model_combo = self.llm_settings_panel.model_combo
         self.custom_model_label = self.llm_settings_panel.custom_model_label
@@ -660,7 +662,12 @@ class BulkAnalysisGroupDialog(QDialog):
         self.llm_settings_panel.set_settings(
             LLMOperationSettings(
                 provider_id=provider_id,
-                model_id=group.model or (default_model_for_provider(provider_id) or "" if provider_id else ""),
+                model_id=group.model
+                or (
+                    default_model_for_provider(provider_id, transport=self._llm_transport) or ""
+                    if provider_id
+                    else ""
+                ),
                 context_window=group.model_context_window,
                 use_reasoning=group.use_reasoning,
             )

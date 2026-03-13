@@ -268,6 +268,7 @@ class ReportsController:
             custom_model=state.last_custom_model,
             context_window=state.last_context_window,
             use_reasoning=state.last_use_reasoning,
+            transport=self._tab.llm_settings_panel.transport,
         )
         self._tab.llm_settings_panel.set_settings(llm_settings)
 
