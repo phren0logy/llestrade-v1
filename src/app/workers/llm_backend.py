@@ -348,11 +348,12 @@ def _invoke_model_response_sync(
     provider_id: str,
     model_name: str | None,
     count_input_tokens_fn: Any,
+    enable_pre_request_counting: bool = True,
 ) -> Any:
     from pydantic_ai.direct import model_request_sync
 
     usage_limits = _usage_limits_for_request(provider_id=provider_id, request=request)
-    if usage_limits is not None:
+    if usage_limits is not None and enable_pre_request_counting:
         _check_before_request(
             usage_limits=usage_limits,
             count_input_tokens_fn=count_input_tokens_fn,
@@ -743,6 +744,9 @@ class PydanticAIGatewayBackend:
             provider_id=provider_id,
             model_name=model_name,
             count_input_tokens_fn=lambda: self.count_input_tokens(provider, request),
+            # Gateway sync requests intentionally skip exact token preflight because the
+            # cached async gateway client may otherwise be reused across event loops.
+            enable_pre_request_counting=False,
         )
         return _require_response_text(
             response=response,

@@ -854,32 +854,50 @@ def test_gateway_backend_loads_api_key_from_secure_settings(
     assert backend._current_api_key() == "gateway-key-from-settings"
 
 
-def test_gateway_backend_enforces_input_limit_before_request_when_counting_is_available(
+def test_gateway_backend_skips_pre_request_token_counting_in_sync_invoke_response(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def _fail_model_request_sync(*args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
-        raise AssertionError("model_request_sync should not be called when preflight limit is exceeded")
+    def _fake_model_request_sync(
+        model: Any,
+        messages: Any,
+        *,
+        model_settings: Dict[str, Any],
+        model_request_parameters: Any = None,
+        instrument: Any = None,
+    ) -> ModelResponse:
+        _ = model, messages, model_settings, model_request_parameters, instrument
+        return ModelResponse(
+            parts=[TextPart("Gateway response")],
+            usage=RequestUsage(input_tokens=350, output_tokens=45),
+            model_name="claude-sonnet-4-5",
+        )
 
-    monkeypatch.setattr("pydantic_ai.direct.model_request_sync", _fail_model_request_sync)
+    monkeypatch.setattr("pydantic_ai.direct.model_request_sync", _fake_model_request_sync)
 
     backend = PydanticAIGatewayBackend(api_key="pylf_test_key", base_url="https://gateway.example.com")
     monkeypatch.setattr(backend, "_build_model", lambda **_kwargs: object(), raising=True)
-    monkeypatch.setattr(backend, "count_input_tokens", lambda provider, request: 500, raising=True)
+    monkeypatch.setattr(
+        backend,
+        "count_input_tokens",
+        lambda provider, request: (_ for _ in ()).throw(AssertionError("gateway preflight should be skipped")),
+        raising=True,
+    )
 
-    with pytest.raises(Exception, match="input_tokens_limit"):
-        backend.invoke_response(
-            _ProviderMeta("anthropic", default_model="claude-sonnet-4-5"),
-            LLMInvocationRequest(
-                prompt="Summarize this",
-                system_prompt="System",
-                model="claude-sonnet-4-5",
-                model_settings={"temperature": 0.2, "max_tokens": 512},
-                input_tokens_limit=400,
-            ),
-        )
+    response = backend.invoke_response(
+        _ProviderMeta("anthropic", default_model="claude-sonnet-4-5"),
+        LLMInvocationRequest(
+            prompt="Summarize this",
+            system_prompt="System",
+            model="claude-sonnet-4-5",
+            model_settings={"temperature": 0.2, "max_tokens": 512},
+            input_tokens_limit=400,
+        ),
+    )
+
+    assert response.text == "Gateway response"
 
 
-def test_gateway_backend_enforces_input_limit_after_response_when_precount_is_unavailable(
+def test_gateway_backend_enforces_input_limit_after_response_when_sync_gateway_precount_is_skipped(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def _fake_model_request_sync(
@@ -901,14 +919,20 @@ def test_gateway_backend_enforces_input_limit_after_response_when_precount_is_un
 
     backend = PydanticAIGatewayBackend(api_key="pylf_test_key", base_url="https://gateway.example.com")
     monkeypatch.setattr(backend, "_build_model", lambda **_kwargs: object(), raising=True)
+    monkeypatch.setattr(
+        backend,
+        "count_input_tokens",
+        lambda provider, request: (_ for _ in ()).throw(AssertionError("gateway preflight should be skipped")),
+        raising=True,
+    )
 
     with pytest.raises(Exception, match="Exceeded the input_tokens_limit"):
         backend.invoke_response(
-            _ProviderMeta("openai", default_model="gpt-4.1"),
+            _ProviderMeta("anthropic", default_model="claude-sonnet-4-5"),
             LLMInvocationRequest(
                 prompt="Summarize this",
                 system_prompt="System",
-                model="gpt-4.1",
+                model="claude-sonnet-4-5",
                 model_settings={"temperature": 0.2, "max_tokens": 512},
                 input_tokens_limit=400,
             ),
