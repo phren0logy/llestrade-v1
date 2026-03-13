@@ -43,6 +43,8 @@ Bootstrap also applies the upstream D1 schema automatically after provisioning o
   `gateway/scripts/verify.sh`
 - Inspect authenticated capacity state:
   `curl -H "Authorization: $STATUS_AUTH_API_KEY" https://gateway.<your-domain>/status/`
+- Inspect authenticated gateway-backed model metadata for a route/provider:
+  `curl -H "Authorization: $PYDANTIC_AI_GATEWAY_API_KEY" "https://gateway.<your-domain>/metadata/models?provider=openai"`
 - Tail Worker logs:
   `gateway/scripts/tail.sh`
 - Roll back to an earlier Worker version:
@@ -57,6 +59,7 @@ Bootstrap also applies the upstream D1 schema automatically after provisioning o
 - Wrangler uses a Cloudflare API token loaded from 1Password; no interactive `wrangler login` flow is required.
 - The desktop app authenticates to the gateway with `PYDANTIC_AI_GATEWAY_API_KEY`.
 - `/status/` is script-only and protected by `STATUS_AUTH_API_KEY`.
+- `/metadata/models` uses the same gateway app API key as normal model requests and returns route-safe model metadata for the configured upstream credentials.
 
 ## Custom Domain and Access
 

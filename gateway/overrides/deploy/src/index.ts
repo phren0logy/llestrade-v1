@@ -22,6 +22,7 @@ import logfire from 'logfire'
 import { getCapacityController } from './capacity'
 import { config } from './config'
 import { ConfigDB, hash, LimitDbD1 } from './db'
+import { metadataModels } from './metadata'
 import { status } from './status'
 
 const handler = {
@@ -43,6 +44,9 @@ const handler = {
       kvVersion: await hash(JSON.stringify(config)),
       subFetch: fetch,
       proxyMiddlewares: [capacityController.middleware],
+    }
+    if (pathname === '/metadata/models' || pathname === '/metadata/models/') {
+      return await metadataModels(request, url, gatewayEnv)
     }
     try {
       return await gatewayFetch(request, url, ctx, gatewayEnv)

@@ -3,6 +3,7 @@ import OpenAI from 'openai'
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import SQL from '../../gateway/limits-schema.sql?raw'
 import { resetCapacityControllerForTest } from '../src/capacity'
+import { config } from '../src/config'
 
 beforeAll(async () => {
   try {
@@ -68,6 +69,48 @@ describe('deploy', () => {
     const payload = (await ok.json()) as { capacity: { enabled: boolean; providers: Record<string, unknown> } }
     expect(payload.capacity.enabled).toBe(true)
     expect(Object.keys(payload.capacity.providers)).toEqual(['anthropic', 'google-vertex', 'openai'])
+  })
+
+  it('metadata endpoint requires a valid gateway app key', async () => {
+    const noAuth = await SELF.fetch('https://example.com/metadata/models?provider=openai')
+    expect(noAuth.status).toBe(401)
+
+    const wrongAuth = await SELF.fetch('https://example.com/metadata/models?provider=openai', {
+      headers: { authorization: 'wrong' },
+    })
+    expect(wrongAuth.status).toBe(401)
+  })
+
+  it('metadata endpoint returns provider-native OpenAI models', async () => {
+    const appKey = Object.keys(config.apiKeys)[0]
+    if (!appKey) {
+      throw new Error('Expected at least one configured gateway app key')
+    }
+
+    fetchMock
+      .get('https://api.openai.com')
+      .intercept({ method: 'GET', path: '/v1/models' })
+      .reply(200, {
+        data: [
+          { id: 'gpt-5.4' },
+          { id: 'gpt-5-mini' },
+        ],
+      })
+
+    const response = await SELF.fetch('https://example.com/metadata/models?provider=openai', {
+      headers: { authorization: appKey },
+    })
+    expect(response.status).toBe(200)
+    const payload = (await response.json()) as {
+      provider: string
+      upstream_provider: string
+      models: Array<{ model_id: string; display_name: string; lifecycle_status: string }>
+    }
+    expect(payload.provider).toBe('openai')
+    expect(payload.upstream_provider).toBe('openai')
+    expect(payload.models.map((item) => item.model_id)).toEqual(['gpt-5.4', 'gpt-5-mini'])
+    expect(payload.models[0]?.display_name).toBe('gpt-5.4')
+    expect(payload.models[0]?.lifecycle_status).toBe('stable')
   })
 
   it('should call openai via gateway', async () => {
