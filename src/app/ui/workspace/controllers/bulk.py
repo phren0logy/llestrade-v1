@@ -29,6 +29,7 @@ from src.app.ui.workspace.bulk_tab import BulkAnalysisTab
 from src.app.ui.workspace.services import BulkAnalysisService
 from src.app.ui.dialogs.bulk_recovery_dialog import BulkRecoveryDialog, RecoveryAction
 from src.app.core.placeholders.analyzer import PlaceholderAnalysis
+from src.app.workers.progress import WorkerProgressDetail
 from .bulk_placeholders import analyse_group_placeholders
 from .bulk_view import (
     append_log_message as append_log_to_widget,
@@ -84,6 +85,8 @@ class BulkAnalysisController:
         self._running_groups: Set[str] = set()
         self._cancelling_groups: Set[str] = set()
         self._progress_map: Dict[str, tuple[int, int]] = {}
+        self._progress_details: Dict[str, WorkerProgressDetail] = {}
+        self._active_progress_group_id: str | None = None
         self._failures: Dict[str, List[str]] = {}
         self._estimate_cache: Dict[str, CostForecast] = {}
 
@@ -102,6 +105,8 @@ class BulkAnalysisController:
         self._running_groups.clear()
         self._cancelling_groups.clear()
         self._progress_map.clear()
+        self._progress_details.clear()
+        self._active_progress_group_id = None
         self._failures.clear()
         self._estimate_cache.clear()
         self._latest_metrics = None
@@ -111,6 +116,7 @@ class BulkAnalysisController:
         self._info_message = "No bulk analysis groups yet."
         self._tab.info_label.setText(self._info_message)
         self._tab.group_tree.clear()
+        self._reset_active_progress_widget()
 
     @property
     def tab(self) -> BulkAnalysisTab:
@@ -264,6 +270,7 @@ class BulkAnalysisController:
             running_groups=self._running_groups,
             cancelling_groups=self._cancelling_groups,
             progress_map=self._progress_map,
+            progress_details=self._progress_details,
         )
 
     def _build_action_widget(
@@ -437,6 +444,12 @@ class BulkAnalysisController:
             (manager.settings or {}).get("llm_provider", ""),
             (manager.settings or {}).get("llm_model", ""),
         )
+        if not self._verify_gateway_before_run(
+            provider_id=str(group.provider_id or "").strip(),
+            model=group.model or provider_default[1],
+            title="Bulk Analysis",
+        ):
+            return False
 
         self._running_groups.add(gid)
         self._progress_map[gid] = (0, len(files))
@@ -454,6 +467,7 @@ class BulkAnalysisController:
             project_name=manager.project_name,
             estimate_summary=forecast.to_dict() if forecast.available else None,
             on_progress=self._handle_progress,
+            on_progress_detail=self._handle_progress_detail,
             on_failed=self._handle_failed,
             on_log=self._handle_log,
             on_finished=lambda group_id, successes, failures: self._handle_finished(
@@ -582,6 +596,12 @@ class BulkAnalysisController:
             forecast=forecast,
         ):
             return
+        if not self._verify_gateway_before_run(
+            provider_id=str(group.provider_id or "").strip(),
+            model=group.model or None,
+            title="Bulk Analysis",
+        ):
+            return
 
         self._running_groups.add(gid)
         self._progress_map[gid] = (0, 1)
@@ -597,6 +617,7 @@ class BulkAnalysisController:
             project_name=manager.project_name,
             estimate_summary=forecast.to_dict() if forecast.available else None,
             on_progress=self._handle_progress,
+            on_progress_detail=self._handle_progress_detail,
             on_failed=self._handle_failed,
             on_log=self._handle_log,
             on_finished=lambda group_id, successes, failures: self._handle_finished(
@@ -645,6 +666,14 @@ class BulkAnalysisController:
         self._progress_map[group_id] = (completed, total)
         self._refresh_groups_safely(relative_path)
 
+    def _handle_progress_detail(self, group_id: str, detail: object) -> None:
+        if group_id in self._cancelling_groups or not isinstance(detail, WorkerProgressDetail):
+            return
+        self._progress_details[group_id] = detail
+        self._active_progress_group_id = group_id
+        self._update_active_progress_widget(group_id, detail)
+        self._on_refresh_groups()
+
     def _handle_failed(self, group_id: str, relative_path: str, error: str) -> None:
         LOGGER.error("Bulk analysis failed for %s: %s", relative_path, error)
         self._failures.setdefault(group_id, []).append(f"{relative_path}: {error}")
@@ -657,6 +686,7 @@ class BulkAnalysisController:
     def _handle_finished(self, group_id: str, successes: int, failures: int, *, operation: str) -> None:
         self._running_groups.discard(group_id)
         self._progress_map.pop(group_id, None)
+        self._progress_details.pop(group_id, None)
         errors = self._failures.pop(group_id, [])
 
         was_cancelled = group_id in self._cancelling_groups
@@ -679,6 +709,7 @@ class BulkAnalysisController:
 
         if self._on_refresh_metrics:
             self._on_refresh_metrics()
+        self._refresh_active_progress_group()
         self._on_refresh_groups()
 
     def _on_run_cost(self, amount: float, provider: str, stage: str) -> None:
@@ -701,6 +732,58 @@ class BulkAnalysisController:
         self._tab.info_label.setText(f"Processing… {relative_path}")
         self._on_refresh_groups()
 
+    def _update_active_progress_widget(self, group_id: str, detail: WorkerProgressDetail) -> None:
+        group_name = group_id
+        manager = self._project_manager
+        if manager:
+            for group in manager.list_bulk_analysis_groups():
+                if group.group_id == group_id:
+                    group_name = group.name
+                    break
+        self._tab.active_progress_group_label.setText(group_name)
+        self._tab.active_progress_bar.setValue(detail.percent or 0)
+        self._tab.active_progress_status_label.setText(detail.label)
+        self._tab.active_progress_detail_label.setText(self._format_progress_detail(detail))
+        self._tab.active_progress_widget.show()
+
+    def _format_progress_detail(self, detail: WorkerProgressDetail) -> str:
+        parts: list[str] = []
+        if detail.document_path:
+            parts.append(detail.document_path)
+        if detail.chunk_total and detail.chunks_completed is not None:
+            chunk_text = f"Chunks {detail.chunks_completed}/{detail.chunk_total}"
+            if detail.chunks_in_flight:
+                chunk_text += f", {detail.chunks_in_flight} in flight"
+            parts.append(chunk_text)
+        elif detail.chunk_total:
+            parts.append(f"Chunk {detail.chunk_index or 0}/{detail.chunk_total}")
+        if detail.section_total:
+            title = detail.section_title or "Untitled"
+            parts.append(f"Section {detail.section_index or 0}/{detail.section_total}: {title}")
+        if detail.detail:
+            parts.append(detail.detail)
+        return " | ".join(parts)
+
+    def _reset_active_progress_widget(self) -> None:
+        self._tab.active_progress_group_label.clear()
+        self._tab.active_progress_bar.setValue(0)
+        self._tab.active_progress_status_label.clear()
+        self._tab.active_progress_detail_label.clear()
+        self._tab.active_progress_widget.hide()
+
+    def _refresh_active_progress_group(self) -> None:
+        active = self._active_progress_group_id
+        if active and active in self._running_groups and active in self._progress_details:
+            self._update_active_progress_widget(active, self._progress_details[active])
+            return
+        if self._progress_details:
+            next_group_id = next(iter(self._progress_details))
+            self._active_progress_group_id = next_group_id
+            self._update_active_progress_widget(next_group_id, self._progress_details[next_group_id])
+            return
+        self._active_progress_group_id = None
+        self._reset_active_progress_widget()
+
     def _resolve_group_metrics(self, group_id: str) -> Optional[WorkspaceGroupMetrics]:
         if self._latest_metrics and group_id in self._latest_metrics.groups:
             return self._latest_metrics.groups[group_id]
@@ -717,7 +800,7 @@ class BulkAnalysisController:
         return metrics.groups.get(group_id)
 
     def _prune_stale_states(self, valid_ids: Set[str]) -> None:
-        for state_map in (self._progress_map, self._failures):
+        for state_map in (self._progress_map, self._progress_details, self._failures):
             for gid in list(state_map.keys()):
                 if gid not in valid_ids:
                     state_map.pop(gid, None)
@@ -728,6 +811,8 @@ class BulkAnalysisController:
             for gid, forecast in self._estimate_cache.items()
             if gid in valid_ids
         }
+        if self._active_progress_group_id not in self._running_groups:
+            self._refresh_active_progress_group()
 
     def _estimate_text(self, group: BulkAnalysisGroup) -> str:
         forecast = self._estimate_cache.get(group.group_id)
@@ -797,6 +882,64 @@ class BulkAnalysisController:
             QMessageBox.Yes,
         )
         return reply == QMessageBox.Yes
+
+    def _verify_gateway_before_run(
+        self,
+        *,
+        provider_id: str,
+        model: str | None,
+        title: str,
+    ) -> bool:
+        if not provider_id:
+            return True
+        result = self._service.verify_gateway_access(provider_id=provider_id, model=model)
+        if result.ok:
+            return True
+        QMessageBox.warning(
+            self._workspace,
+            title,
+            self._gateway_failure_message(result),
+        )
+        return False
+
+    @staticmethod
+    def _gateway_failure_message(result) -> str:  # noqa: ANN001
+        model_label = result.model or "<default>"
+        target = f"{result.provider_id}/{model_label}"
+        route = f"\nRoute: {result.route}" if result.route else ""
+        status = f"\nGateway response: HTTP {result.status_code}" if result.status_code else ""
+        if result.kind in {"auth_invalid", "auth_forbidden"}:
+            return (
+                "The saved Pydantic AI Gateway app key was rejected by the gateway.\n\n"
+                f"Requested selection: {target}{route}{status}\n"
+                f"Gateway message: {result.message}\n\n"
+                "Update Settings > API Keys > Pydantic AI Gateway App Key, then try again."
+            )
+        if result.kind == "route_missing":
+            return (
+                "The configured gateway route/provider mapping is not available for this run.\n\n"
+                f"Requested selection: {target}{route}{status}\n"
+                f"Gateway message: {result.message}\n\n"
+                "Check the selected provider/model and the optional gateway route in Settings."
+            )
+        if result.kind == "missing_config":
+            return (
+                "Gateway mode is enabled, but the gateway configuration is incomplete.\n\n"
+                f"Requested selection: {target}\n"
+                f"Gateway message: {result.message}\n\n"
+                "Set the Pydantic AI Gateway App Key in Settings > API Keys before starting the run."
+            )
+        if result.kind in {"timeout", "unreachable", "server_error"}:
+            return (
+                "The gateway is currently unavailable, so the run was not started.\n\n"
+                f"Requested selection: {target}{route}{status}\n"
+                f"Gateway message: {result.message}"
+            )
+        return (
+            "The gateway access check failed, so the run was not started.\n\n"
+            f"Requested selection: {target}{route}{status}\n"
+            f"Gateway message: {result.message}"
+        )
 
     def open_recovery_dialog(self, group: BulkAnalysisGroup) -> None:
         manager = self._project_manager

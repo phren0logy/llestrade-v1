@@ -23,10 +23,18 @@ from src.app.core.llm_catalog import default_model_for_provider
 from src.config.paths import app_config_dir
 
 # Shared cache so multiple SecureSettings instances reuse a single keychain lookup.
-_GLOBAL_API_KEY_CACHE: Dict[str, Optional[str]] = {}
+_GLOBAL_API_KEY_CACHE: Dict[tuple[str, str], Optional[str]] = {}
 _CACHE_LOCK = Lock()
 _CACHE_MISS = object()
 _LEGACY_SETTINGS_ENV_VAR = "FRD_SETTINGS_DIR"
+_KEYRING_SERVICE_ENV_VAR = "LLESTRADE_KEYRING_SERVICE_NAME"
+
+
+def keyring_service_name(default: str = "Llestrade") -> str:
+    override = os.getenv(_KEYRING_SERVICE_ENV_VAR)
+    if override and override.strip():
+        return override.strip()
+    return default
 
 
 class SecureSettings(QObject):
@@ -41,6 +49,7 @@ class SecureSettings(QObject):
     def __init__(self, settings_dir: Optional[Path] = None):
         super().__init__()
         self.logger = logging.getLogger(__name__)
+        self.service_name = keyring_service_name(self.SERVICE_NAME)
         
         # Determine settings directory
         env_override = os.getenv("LLESTRADE_SETTINGS_DIR") or os.getenv(_LEGACY_SETTINGS_ENV_VAR)
@@ -136,12 +145,12 @@ class SecureSettings(QObject):
         if KEYRING_AVAILABLE:
             try:
                 keyring.set_password(
-                    self.SERVICE_NAME,
+                    self.service_name,
                     f"api_key_{provider}",
                     api_key
                 )
                 with _CACHE_LOCK:
-                    self._api_key_cache[provider] = api_key
+                    self._api_key_cache[(self.service_name, provider)] = api_key
                 self.api_key_changed.emit(provider)
                 self.logger.info(f"API key for {provider} stored securely")
                 return True
@@ -156,14 +165,15 @@ class SecureSettings(QObject):
             self._settings["api_keys"][provider] = api_key
             self._save_settings()
             with _CACHE_LOCK:
-                self._api_key_cache[provider] = api_key
+                self._api_key_cache[(self.service_name, provider)] = api_key
             self.api_key_changed.emit(provider)
             return True
     
     def get_api_key(self, provider: str) -> Optional[str]:
         """Retrieve API key from OS keychain."""
+        cache_key = (self.service_name, provider)
         with _CACHE_LOCK:
-            cached = self._api_key_cache.get(provider, _CACHE_MISS)
+            cached = self._api_key_cache.get(cache_key, _CACHE_MISS)
             if cached is not _CACHE_MISS:
                 return cached
 
@@ -171,9 +181,9 @@ class SecureSettings(QObject):
             key: Optional[str] = None
             if KEYRING_AVAILABLE:
                 try:
-                    key = keyring.get_password(self.SERVICE_NAME, f"api_key_{provider}")
+                    key = keyring.get_password(self.service_name, f"api_key_{provider}")
                     if key:
-                        self._api_key_cache[provider] = key
+                        self._api_key_cache[cache_key] = key
                         return key
                 except Exception as e:
                     self.logger.error(f"Failed to retrieve API key: {e}")
@@ -181,7 +191,7 @@ class SecureSettings(QObject):
             # Fallback to settings file
             api_keys = self._settings.get("api_keys", {})
             key = api_keys.get(provider)
-            self._api_key_cache[provider] = key
+            self._api_key_cache[cache_key] = key
             return key
     
     def remove_api_key(self, provider: str) -> bool:
@@ -191,7 +201,7 @@ class SecureSettings(QObject):
         if KEYRING_AVAILABLE:
             try:
                 keyring.delete_password(
-                    self.SERVICE_NAME,
+                    self.service_name,
                     f"api_key_{provider}"
                 )
                 success = True
@@ -206,7 +216,7 @@ class SecureSettings(QObject):
         
         # Clear cache
         with _CACHE_LOCK:
-            self._api_key_cache.pop(provider, None)
+            self._api_key_cache.pop((self.service_name, provider), None)
         
         if success:
             self.api_key_changed.emit(provider)

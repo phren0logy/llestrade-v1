@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
 import time
@@ -12,7 +13,8 @@ from typing import Any, Literal, Mapping, Optional, Protocol
 import httpx
 from pydantic_ai.settings import ModelSettings
 
-from src.app.core.llm_catalog import default_model_for_provider
+from src.app.core.llm_catalog import default_model_for_provider, resolve_reasoning_capabilities
+from src.app.core.llm_operation_settings import LLMReasoningSettings
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +46,17 @@ _GATEWAY_UPSTREAM_PROVIDERS: Mapping[str, str] = {
 }
 
 ReasoningMode = Literal["none", "anthropic", "google", "openai"]
+GatewayAccessCheckKind = Literal[
+    "ok",
+    "missing_config",
+    "auth_invalid",
+    "auth_forbidden",
+    "route_missing",
+    "timeout",
+    "unreachable",
+    "server_error",
+    "unknown",
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,6 +110,70 @@ class LLMProviderRequest:
 
     provider_id: str
     model: Optional[str]
+
+
+@dataclass(frozen=True, slots=True)
+class GatewayAccessCheck:
+    """Classified result for a live gateway probe."""
+
+    ok: bool
+    kind: GatewayAccessCheckKind
+    status_code: int | None
+    message: str
+    base_url: str | None
+    route: str | None
+    provider_id: str
+    model: str | None
+
+
+_GATEWAY_ACCESS_CACHE_TTL_SECONDS = 300.0
+_gateway_access_check_cache: dict[str, tuple[float, GatewayAccessCheck]] = {}
+
+
+def reset_gateway_access_check_cache() -> None:
+    """Clear cached gateway probe results."""
+
+    _gateway_access_check_cache.clear()
+
+
+def _gateway_access_cache_key(
+    *,
+    api_key: str | None,
+    base_url: str | None,
+    route: str | None,
+    provider_id: str,
+    model: str | None,
+) -> str:
+    payload = "\0".join(
+        (
+            api_key or "",
+            base_url or "",
+            route or "",
+            provider_id,
+            model or "",
+        )
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _gateway_access_ok(
+    *,
+    provider_id: str,
+    model: str | None,
+    base_url: str | None,
+    route: str | None,
+    message: str = "Gateway verification succeeded.",
+) -> GatewayAccessCheck:
+    return GatewayAccessCheck(
+        ok=True,
+        kind="ok",
+        status_code=200,
+        message=message,
+        base_url=base_url,
+        route=route,
+        provider_id=provider_id,
+        model=model,
+    )
 
 
 def backend_transport_name(backend: Any) -> str:
@@ -183,6 +260,32 @@ def _reasoning_budget_tokens(max_tokens: int) -> int:
     return min(max(max_tokens // 8, 1_024), 8_192)
 
 
+def _openai_supports_sampling(*, model: str | None, use_reasoning: bool) -> bool:
+    if use_reasoning:
+        return False
+    if not model:
+        return True
+
+    try:
+        from pydantic_ai.profiles.openai import openai_model_profile
+    except Exception:
+        logger.debug("Unable to load OpenAI model profile; keeping sampling settings", exc_info=True)
+        return True
+
+    profile = openai_model_profile(model)
+    if not profile.openai_supports_reasoning:
+        return True
+    return bool(profile.openai_supports_reasoning_effort_none)
+
+
+def _normalize_reasoning_settings(
+    *,
+    reasoning: LLMReasoningSettings | Mapping[str, Any] | None,
+    use_reasoning: bool,
+) -> LLMReasoningSettings:
+    return LLMReasoningSettings.from_value(reasoning, legacy_use_reasoning=use_reasoning)
+
+
 def build_model_settings(
     provider_id: str,
     model: Optional[str],
@@ -190,43 +293,67 @@ def build_model_settings(
     temperature: float,
     max_tokens: int,
     use_reasoning: bool = False,
+    reasoning: LLMReasoningSettings | Mapping[str, Any] | None = None,
     base_settings: ModelSettings | None = None,
 ) -> ModelSettings:
     """Build provider-shaped model settings for a single request."""
 
+    normalized_reasoning = _normalize_reasoning_settings(reasoning=reasoning, use_reasoning=use_reasoning)
+    model_reasoning_capabilities = resolve_reasoning_capabilities(provider_id, model)
     settings: ModelSettings = dict(base_settings or {})
-    settings["temperature"] = temperature
+    if provider_id not in {"openai", "azure_openai"} or _openai_supports_sampling(
+        model=model,
+        use_reasoning=normalized_reasoning.enabled,
+    ):
+        settings["temperature"] = temperature
     settings["max_tokens"] = max_tokens
 
-    if not use_reasoning:
+    capabilities = provider_capabilities(provider_id, model)
+    if not capabilities.supports_reasoning or not model_reasoning_capabilities.supports_reasoning_controls:
+        if normalized_reasoning.enabled:
+            raise RuntimeError(
+                f"Provider '{provider_id}' does not support reasoning mode in the current LLM backend."
+            )
         return settings
 
-    capabilities = provider_capabilities(provider_id, model)
-    if not capabilities.supports_reasoning:
-        raise RuntimeError(
-            f"Provider '{provider_id}' does not support reasoning mode in the current LLM backend."
-        )
+    if provider_id in {"openai", "azure_openai"}:
+        if normalized_reasoning.state == "off" and model_reasoning_capabilities.can_disable_reasoning:
+            settings["openai_reasoning_effort"] = "none"
+            return settings
+        if normalized_reasoning.state in {"on", "default"} or not model_reasoning_capabilities.can_disable_reasoning:
+            effort = normalized_reasoning.effort or "medium"
+            if model_reasoning_capabilities.allowed_efforts and effort not in model_reasoning_capabilities.allowed_efforts:
+                effort = model_reasoning_capabilities.allowed_efforts[0]
+            settings["openai_reasoning_effort"] = effort
+            settings["openai_reasoning_summary"] = "detailed"
+        return settings
+
+    if not normalized_reasoning.enabled:
+        return settings
 
     if provider_id == "anthropic":
         settings["anthropic_thinking"] = {
             "type": "enabled",
-            "budget_tokens": _reasoning_budget_tokens(max_tokens),
+            "budget_tokens": normalized_reasoning.budget_tokens or _reasoning_budget_tokens(max_tokens),
         }
         settings["anthropic_effort"] = "medium"
     elif provider_id == "anthropic_bedrock":
         settings["bedrock_additional_model_requests_fields"] = {
             "thinking": {
                 "type": "enabled",
-                "budget_tokens": _reasoning_budget_tokens(max_tokens),
+                "budget_tokens": normalized_reasoning.budget_tokens or _reasoning_budget_tokens(max_tokens),
             }
         }
     elif provider_id == "gemini":
-        settings["gemini_thinking_config"] = {
-            "include_thoughts": True,
-        }
-    elif provider_id in {"openai", "azure_openai"}:
-        settings["openai_reasoning_effort"] = "medium"
-        settings["openai_reasoning_summary"] = "detailed"
+        thinking_config: dict[str, Any] = {"include_thoughts": True}
+        if model_reasoning_capabilities.allowed_levels:
+            level = normalized_reasoning.level or "MEDIUM"
+            if level not in model_reasoning_capabilities.allowed_levels:
+                level = model_reasoning_capabilities.allowed_levels[0]
+            thinking_config["thinking_level"] = level.upper()
+        elif normalized_reasoning.budget_tokens:
+            thinking_config["thinking_budget"] = normalized_reasoning.budget_tokens
+        settings["gemini_thinking_config"] = thinking_config
 
     return settings
 
@@ -423,6 +550,7 @@ class LLMExecutionBackend(Protocol):
         temperature: float,
         max_tokens: int,
         use_reasoning: bool = False,
+        reasoning: LLMReasoningSettings | Mapping[str, Any] | None = None,
         base_settings: ModelSettings | None = None,
     ) -> ModelSettings:
         """Build provider-shaped model settings for a request."""
@@ -456,6 +584,7 @@ class PydanticAIDirectBackend:
         temperature: float,
         max_tokens: int,
         use_reasoning: bool = False,
+        reasoning: LLMReasoningSettings | Mapping[str, Any] | None = None,
         base_settings: ModelSettings | None = None,
     ) -> ModelSettings:
         return build_model_settings(
@@ -464,6 +593,7 @@ class PydanticAIDirectBackend:
             temperature=temperature,
             max_tokens=max_tokens,
             use_reasoning=use_reasoning,
+            reasoning=reasoning,
             base_settings=base_settings,
         )
 
@@ -619,6 +749,8 @@ class PydanticAIGatewayBackend:
     _GATEWAY_RETRY_ATTEMPTS = 3
     _GATEWAY_RETRY_MAX_WAIT_SECONDS = 30.0
     _DEFAULT_GATEWAY_MAX_CONCURRENCY = 4
+    _VERIFY_PROMPT = "Return OK."
+    _VERIFY_SYSTEM_PROMPT = "Reply with the single word OK."
 
     def __init__(
         self,
@@ -688,6 +820,7 @@ class PydanticAIGatewayBackend:
         temperature: float,
         max_tokens: int,
         use_reasoning: bool = False,
+        reasoning: LLMReasoningSettings | Mapping[str, Any] | None = None,
         base_settings: ModelSettings | None = None,
     ) -> ModelSettings:
         return build_model_settings(
@@ -696,6 +829,7 @@ class PydanticAIGatewayBackend:
             temperature=temperature,
             max_tokens=max_tokens,
             use_reasoning=use_reasoning,
+            reasoning=reasoning,
             base_settings=base_settings,
         )
 
@@ -731,6 +865,83 @@ class PydanticAIGatewayBackend:
             error_prefix="Gateway token preflight failed",
         )
 
+    def verify_gateway_access(
+        self,
+        provider_id: str,
+        model: str | None,
+        *,
+        timeout_seconds: float = 5.0,
+        force: bool = False,
+    ) -> GatewayAccessCheck:
+        resolved_model = self.resolve_model(provider_id, model)
+        base_url = self._current_base_url()
+        route = self._current_route()
+        api_key = self._current_api_key()
+
+        if provider_id not in _GATEWAY_UPSTREAM_PROVIDERS:
+            return GatewayAccessCheck(
+                ok=False,
+                kind="missing_config",
+                status_code=None,
+                message=f"Provider '{provider_id}' is not supported by the Pydantic AI Gateway backend.",
+                base_url=base_url,
+                route=route,
+                provider_id=provider_id,
+                model=resolved_model or model,
+            )
+        if not api_key:
+            return GatewayAccessCheck(
+                ok=False,
+                kind="missing_config",
+                status_code=None,
+                message="No Pydantic AI Gateway app key is configured.",
+                base_url=base_url,
+                route=route,
+                provider_id=provider_id,
+                model=resolved_model or model,
+            )
+        if not resolved_model:
+            return GatewayAccessCheck(
+                ok=False,
+                kind="missing_config",
+                status_code=None,
+                message=f"No model is configured for gateway provider '{provider_id}'.",
+                base_url=base_url,
+                route=route,
+                provider_id=provider_id,
+                model=model,
+            )
+
+        cache_key = _gateway_access_cache_key(
+            api_key=api_key,
+            base_url=base_url,
+            route=route,
+            provider_id=provider_id,
+            model=resolved_model,
+        )
+        now = time.time()
+        if not force:
+            cached_entry = _gateway_access_check_cache.get(cache_key)
+            if cached_entry and cached_entry[0] > now:
+                return cached_entry[1]
+            if cached_entry:
+                _gateway_access_check_cache.pop(cache_key, None)
+
+        result = self._probe_gateway_access(
+            provider_id=provider_id,
+            model_name=resolved_model,
+            api_key=api_key,
+            base_url=base_url,
+            route=route,
+            timeout_seconds=timeout_seconds,
+        )
+        if result.ok or result.kind in {"auth_invalid", "auth_forbidden"}:
+            _gateway_access_check_cache[cache_key] = (
+                now + _GATEWAY_ACCESS_CACHE_TTL_SECONDS,
+                result,
+            )
+        return result
+
     def invoke_response(self, provider: Any, request: LLMInvocationRequest) -> Any:
         provider_id = self._resolve_provider_id(provider)
         if not provider_id:
@@ -759,13 +970,16 @@ class PydanticAIGatewayBackend:
             model_name=model_name,
         )
 
-    def _build_model(self, *, provider_id: str, model_name: str) -> Any:
+    def _build_model(self, *, provider_id: str, model_name: str, http_client: Any | None = None) -> Any:
         from pydantic_ai.models import infer_model
         from pydantic_ai.models.concurrency import limit_model_concurrency
 
         model = infer_model(
             self._gateway_model_id(provider_id=provider_id, model_name=model_name),
-            provider_factory=self._gateway_provider_factory,
+            provider_factory=lambda provider_name: self._gateway_provider_factory(
+                provider_name,
+                http_client=http_client,
+            ),
         )
         limiter = self._gateway_concurrency_limiter()
         if limiter is None:
@@ -796,7 +1010,7 @@ class PydanticAIGatewayBackend:
             return None
         return str(value)
 
-    def _gateway_provider_factory(self, provider_name: str) -> Any:
+    def _gateway_provider_factory(self, provider_name: str, *, http_client: Any | None = None) -> Any:
         from pydantic_ai.providers.gateway import gateway_provider
 
         upstream_provider = provider_name.removeprefix("gateway/")
@@ -805,7 +1019,7 @@ class PydanticAIGatewayBackend:
             api_key=self._current_api_key(),
             base_url=self._current_base_url(),
             route=self._current_route(),
-            http_client=self._gateway_http_client(),
+            http_client=http_client or self._gateway_http_client(),
         )
 
     def _current_api_key(self) -> str | None:
@@ -841,7 +1055,7 @@ class PydanticAIGatewayBackend:
         self._http_client = self._build_gateway_http_client()
         return self._http_client
 
-    def _build_gateway_http_client(self) -> Any | None:
+    def _build_gateway_http_client(self, *, timeout_seconds: float | None = None) -> Any | None:
         try:
             from httpx import AsyncClient, HTTPStatusError, TimeoutException, TransportError
             from pydantic_ai.retries import AsyncTenacityTransport, wait_retry_after
@@ -859,7 +1073,10 @@ class PydanticAIGatewayBackend:
             },
             validate_response=self._raise_for_retryable_gateway_response,
         )
-        return AsyncClient(transport=retry_transport)
+        client_kwargs: dict[str, Any] = {"transport": retry_transport}
+        if timeout_seconds and timeout_seconds > 0:
+            client_kwargs["timeout"] = timeout_seconds
+        return AsyncClient(**client_kwargs)
 
     @staticmethod
     def _resolve_max_concurrency(value: int | None) -> int | None:
@@ -909,7 +1126,147 @@ class PydanticAIGatewayBackend:
     def _gateway_upstream_provider(provider_id: str) -> str | None:
         return _GATEWAY_UPSTREAM_PROVIDERS.get(provider_id)
 
+    def _probe_gateway_access(
+        self,
+        *,
+        provider_id: str,
+        model_name: str,
+        api_key: str,
+        base_url: str | None,
+        route: str | None,
+        timeout_seconds: float,
+    ) -> GatewayAccessCheck:
+        verify_client = self._build_gateway_http_client(timeout_seconds=timeout_seconds)
+        request = LLMInvocationRequest(
+            prompt=self._VERIFY_PROMPT,
+            system_prompt=self._VERIFY_SYSTEM_PROMPT,
+            model=model_name,
+            model_settings=self.build_model_settings(
+                provider_id,
+                model_name,
+                temperature=0.0,
+                max_tokens=8,
+                use_reasoning=False,
+            ),
+        )
+        try:
+            _invoke_model_response_sync(
+                model=self._build_model(provider_id=provider_id, model_name=model_name, http_client=verify_client),
+                request=request,
+                provider_id=provider_id,
+                model_name=model_name,
+                count_input_tokens_fn=lambda: None,
+                enable_pre_request_counting=False,
+            )
+            return _gateway_access_ok(
+                provider_id=provider_id,
+                model=model_name,
+                base_url=base_url,
+                route=route,
+            )
+        except Exception as exc:
+            return self._classify_gateway_probe_error(
+                exc,
+                provider_id=provider_id,
+                model_name=model_name,
+                base_url=base_url,
+                route=route,
+            )
+        finally:
+            if verify_client is not None:
+                try:
+                    asyncio.run(verify_client.aclose())
+                except Exception:
+                    logger.debug("Unable to close temporary gateway probe HTTP client", exc_info=True)
+
+    @classmethod
+    def _classify_gateway_probe_error(
+        cls,
+        exc: Exception,
+        *,
+        provider_id: str,
+        model_name: str,
+        base_url: str | None,
+        route: str | None,
+    ) -> GatewayAccessCheck:
+        from pydantic_ai.exceptions import ModelHTTPError
+
+        if isinstance(exc, ModelHTTPError):
+            status_code = int(getattr(exc, "status_code", 0) or 0) or None
+            message = cls._gateway_probe_error_message(exc)
+            kind: GatewayAccessCheckKind = "unknown"
+            lower_message = message.lower()
+            if status_code == 401:
+                kind = "auth_invalid"
+            elif status_code == 403:
+                kind = "auth_forbidden"
+            elif status_code == 404 or "route not found" in lower_message or "no providers available for route" in lower_message:
+                kind = "route_missing"
+            elif status_code is not None and status_code >= 500:
+                kind = "server_error"
+            return GatewayAccessCheck(
+                ok=False,
+                kind=kind,
+                status_code=status_code,
+                message=message,
+                base_url=base_url,
+                route=route,
+                provider_id=provider_id,
+                model=model_name,
+            )
+        if isinstance(exc, (httpx.TimeoutException, asyncio.TimeoutError)):
+            return GatewayAccessCheck(
+                ok=False,
+                kind="timeout",
+                status_code=None,
+                message=str(exc) or "Gateway request timed out.",
+                base_url=base_url,
+                route=route,
+                provider_id=provider_id,
+                model=model_name,
+            )
+        if isinstance(exc, httpx.TransportError):
+            return GatewayAccessCheck(
+                ok=False,
+                kind="unreachable",
+                status_code=None,
+                message=str(exc) or "Gateway request could not reach the server.",
+                base_url=base_url,
+                route=route,
+                provider_id=provider_id,
+                model=model_name,
+            )
+        return GatewayAccessCheck(
+            ok=False,
+            kind="unknown",
+            status_code=getattr(exc, "status_code", None),
+            message=str(exc) or exc.__class__.__name__,
+            base_url=base_url,
+            route=route,
+            provider_id=provider_id,
+            model=model_name,
+        )
+
+    @staticmethod
+    def _gateway_probe_error_message(exc: Exception) -> str:
+        body = getattr(exc, "body", None)
+        if isinstance(body, dict):
+            message = str(body.get("message") or body.get("error") or "").strip()
+            status = str(body.get("status") or "").strip()
+            if message and status and status.lower() not in message.lower():
+                return f"{message} ({status})"
+            if message:
+                return message
+            if status:
+                return status
+        if body is not None:
+            text = str(body).strip()
+            if text:
+                return text
+        return str(exc) or exc.__class__.__name__
+
 __all__ = [
+    "GatewayAccessCheck",
     "ProviderMetadata",
     "LLMExecutionBackend",
     "LLMProviderRequest",
@@ -924,6 +1281,7 @@ __all__ = [
     "normalize_model_name",
     "provider_capabilities",
     "resolve_model_name",
+    "reset_gateway_access_check_cache",
     "supported_direct_provider_ids",
     "supported_gateway_provider_ids",
 ]

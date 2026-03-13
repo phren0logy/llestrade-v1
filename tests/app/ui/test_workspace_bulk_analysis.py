@@ -16,6 +16,8 @@ from src.app.core.bulk_analysis_groups import BulkAnalysisGroup
 from src.app.ui.stages import project_workspace
 from src.app.ui.stages.project_workspace import ProjectWorkspace
 from src.app.workers import bulk_analysis_worker
+from src.app.workers.llm_backend import GatewayAccessCheck
+from src.app.workers.progress import WorkerProgressDetail
 
 
 class _ImmediateThreadPool:
@@ -131,6 +133,7 @@ def test_workspace_run_executes_worker_and_updates_ui(tmp_path: Path, qt_app: QA
 
     controller = workspace.bulk_controller
     assert controller is not None
+    monkeypatch.setattr(controller, "_verify_gateway_before_run", lambda **_kwargs: True)
     table = controller.tab.table
     assert table.rowCount() == 1
 
@@ -263,6 +266,7 @@ def test_workspace_cancel_updates_status_and_cleans_state(tmp_path: Path, qt_app
 
     controller = workspace.bulk_controller
     assert controller is not None
+    monkeypatch.setattr(controller, "_verify_gateway_before_run", lambda **_kwargs: True)
     table = controller.tab.table
     action_widget = table.cellWidget(0, 6)
     run_button = _find_button(action_widget, "Run Pending")
@@ -310,6 +314,48 @@ def test_workspace_cancel_updates_status_and_cleans_state(tmp_path: Path, qt_app
     refreshed_cancel = _find_button(refreshed_widget, "Cancel")
     assert refreshed_run.isEnabled()
     assert not refreshed_cancel.isEnabled()
+
+    workspace.deleteLater()
+
+
+def test_workspace_bulk_progress_detail_updates_active_progress_widget(
+    tmp_path: Path,
+    qt_app: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert qt_app is not None
+
+    manager, group = _create_project_with_group(tmp_path)
+    pool = _CaptureThreadPool()
+    monkeypatch.setattr(project_workspace, "get_worker_pool", lambda: pool)
+
+    workspace = ProjectWorkspace()
+    workspace.set_project(manager)
+    QCoreApplication.processEvents()
+
+    controller = workspace.bulk_controller
+    assert controller is not None
+    controller._running_groups.add(group.group_id)
+    controller._progress_map[group.group_id] = (0, 1)
+
+    controller._handle_progress_detail(
+        group.group_id,
+        WorkerProgressDetail(
+            run_kind="bulk_map",
+            phase="chunk_started",
+            label="Running chunk 3/24",
+            percent=12,
+            completed=0,
+            total=1,
+            document_path="folder/record.md",
+            chunk_index=3,
+            chunk_total=24,
+        ),
+    )
+
+    assert controller.tab.active_progress_widget.isHidden() is False
+    assert controller.tab.active_progress_bar.value() == 12
+    assert "Chunk 3/24" in controller.tab.active_progress_detail_label.text()
 
     workspace.deleteLater()
 
@@ -367,6 +413,7 @@ def test_combined_run_prompts_when_inputs_are_stale(
 
     controller = workspace.bulk_controller
     assert controller is not None
+    monkeypatch.setattr(controller, "_verify_gateway_before_run", lambda **_kwargs: True)
 
     metrics = WorkspaceGroupMetrics(
         group_id=group.group_id,
@@ -475,5 +522,149 @@ def test_bulk_map_run_passes_estimate_summary_to_service(
         "projected_total_ceiling": None,
         "reason": None,
     }
+
+    workspace.deleteLater()
+
+
+def test_bulk_map_run_blocks_when_gateway_key_is_rejected(
+    tmp_path: Path,
+    qt_app: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert qt_app is not None
+
+    manager, group = _create_project_with_group(tmp_path)
+
+    workspace = ProjectWorkspace()
+    workspace.set_project(manager)
+    QCoreApplication.processEvents()
+
+    controller = workspace.bulk_controller
+    assert controller is not None
+
+    metrics = WorkspaceGroupMetrics(
+        group_id=group.group_id,
+        name=group.name,
+        slug=group.slug or group.folder_name,
+        converted_files=("folder/record.md",),
+        converted_count=1,
+        bulk_analysis_total=0,
+        pending_bulk_analysis=1,
+        pending_files=("folder/record.md",),
+        operation="per_document",
+    )
+
+    monkeypatch.setattr(controller, "_resolve_group_metrics", lambda _group_id: metrics)
+    monkeypatch.setattr(controller, "_analyse_placeholders", lambda _group: (None, set(), set()))
+    monkeypatch.setattr(
+        controller,
+        "_forecast_map_run",
+        lambda *_args, **_kwargs: CostForecast(available=True, best_estimate=1.0, ceiling=2.0),
+    )
+    monkeypatch.setattr(QMessageBox, "question", lambda *args, **kwargs: QMessageBox.Yes)
+    monkeypatch.setattr(
+        controller._service,
+        "verify_gateway_access",
+        lambda **_kwargs: GatewayAccessCheck(
+            ok=False,
+            kind="auth_invalid",
+            status_code=401,
+            message="Unauthorized - Key not found",
+            base_url="https://gateway.example.com",
+            route="bulk",
+            provider_id="anthropic",
+            model="claude-sonnet-4-5",
+        ),
+    )
+
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "warning",
+        lambda _parent, _title, message: warnings.append(message) or QMessageBox.Ok,
+    )
+
+    run_called = {"value": False}
+    monkeypatch.setattr(controller._service, "run_map", lambda **_kwargs: run_called.__setitem__("value", True) or True)
+
+    assert controller.start_map_run(group, force_rerun=False) is False
+    assert run_called["value"] is False
+    assert warnings
+    assert "Pydantic AI Gateway app key was rejected" in warnings[0]
+
+    workspace.deleteLater()
+
+
+def test_combined_run_blocks_when_gateway_route_is_missing(
+    tmp_path: Path,
+    qt_app: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert qt_app is not None
+
+    manager, group = _create_project_with_combined_group(tmp_path)
+
+    workspace = ProjectWorkspace()
+    workspace.set_project(manager)
+    QCoreApplication.processEvents()
+
+    controller = workspace.bulk_controller
+    assert controller is not None
+
+    metrics = WorkspaceGroupMetrics(
+        group_id=group.group_id,
+        name=group.name,
+        slug=group.slug or group.folder_name,
+        converted_files=(),
+        converted_count=0,
+        bulk_analysis_total=0,
+        pending_bulk_analysis=0,
+        pending_files=(),
+        operation="combined",
+        combined_input_count=2,
+        combined_latest_path=None,
+        combined_latest_at=None,
+        combined_is_stale=False,
+        combined_last_run_input_count=None,
+    )
+
+    monkeypatch.setattr(controller, "_resolve_group_metrics", lambda _group_id: metrics)
+    monkeypatch.setattr(controller, "_analyse_placeholders", lambda _group: (None, set(), set()))
+    monkeypatch.setattr(
+        controller,
+        "_forecast_combined_run",
+        lambda *_args, **_kwargs: CostForecast(available=True, best_estimate=1.0, ceiling=2.0),
+    )
+    monkeypatch.setattr(QMessageBox, "question", lambda *args, **kwargs: QMessageBox.Yes)
+    monkeypatch.setattr(
+        controller._service,
+        "verify_gateway_access",
+        lambda **_kwargs: GatewayAccessCheck(
+            ok=False,
+            kind="route_missing",
+            status_code=404,
+            message="Route not found: bulk",
+            base_url="https://gateway.example.com",
+            route="bulk",
+            provider_id="anthropic",
+            model="claude-sonnet-4-5",
+        ),
+    )
+
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "warning",
+        lambda _parent, _title, message: warnings.append(message) or QMessageBox.Ok,
+    )
+
+    run_called = {"value": False}
+    monkeypatch.setattr(controller._service, "run_combined", lambda **_kwargs: run_called.__setitem__("value", True) or True)
+
+    controller.start_combined_run(group, force_rerun=False)
+
+    assert run_called["value"] is False
+    assert warnings
+    assert "route/provider mapping is not available" in warnings[0]
 
     workspace.deleteLater()

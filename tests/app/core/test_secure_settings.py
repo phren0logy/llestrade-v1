@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from src.app.core.llm_catalog import default_model_for_provider
-from src.app.core.secure_settings import SecureSettings
+from src.app.core.secure_settings import SecureSettings, keyring_service_name
 from src.config.paths import app_user_root
 
 
@@ -26,6 +26,15 @@ def test_secure_settings_supports_legacy_settings_env(monkeypatch, tmp_path: Pat
 
     assert settings.settings_dir == settings_dir
     assert settings.settings_path == settings_dir / SecureSettings.SETTINGS_FILE
+
+
+def test_secure_settings_supports_keyring_service_override(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("LLESTRADE_KEYRING_SERVICE_NAME", "LlestradeTests-Keyring")
+
+    settings = SecureSettings(settings_dir=tmp_path / "settings")
+
+    assert keyring_service_name() == "LlestradeTests-Keyring"
+    assert settings.service_name == "LlestradeTests-Keyring"
 
 
 def test_get_recent_projects_prunes_missing_entries(tmp_path: Path) -> None:

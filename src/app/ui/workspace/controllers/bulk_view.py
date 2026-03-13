@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
 from src.app.core.bulk_analysis_groups import BulkAnalysisGroup
 from src.app.core.file_tracker import WorkspaceGroupMetrics
 from src.app.core.placeholders.analyzer import PlaceholderAnalysis
+from src.app.workers.progress import WorkerProgressDetail
 
 
 def build_status_text(
@@ -26,6 +27,7 @@ def build_status_text(
     running_groups: Set[str],
     cancelling_groups: Set[str],
     progress_map: Dict[str, tuple[int, int]],
+    progress_details: Dict[str, WorkerProgressDetail],
 ) -> str:
     gid = group.group_id
     op_type = getattr(metrics, "operation", "per_document") if metrics else group.operation or "per_document"
@@ -34,6 +36,23 @@ def build_status_text(
         return "Cancelling…"
     if gid in running_groups:
         completed, total = progress_map.get(gid, (0, 0))
+        detail = progress_details.get(gid)
+        if detail and detail.chunk_total and detail.chunks_completed is not None:
+            chunk_text = f"{detail.chunks_completed}/{detail.chunk_total} chunks"
+            if detail.chunks_in_flight:
+                chunk_text += f", {detail.chunks_in_flight} in flight"
+            if total:
+                return f"Running ({completed}/{total}, {chunk_text})"
+            return f"Running ({chunk_text})"
+        if detail and detail.chunk_total:
+            chunk_text = f"chunk {detail.chunk_index or 0}/{detail.chunk_total}"
+            if total:
+                return f"Running ({completed}/{total}, {chunk_text})"
+            return f"Running ({chunk_text})"
+        if detail and detail.phase == "combining":
+            if total:
+                return f"Running ({completed}/{total}, combining)"
+            return "Running (combining)"
         if total:
             return f"Running ({completed}/{total})"
         return "Running…"

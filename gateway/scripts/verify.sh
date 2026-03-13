@@ -22,6 +22,11 @@ unauth_code="$(curl -sS -o /dev/null -w '%{http_code}' "${GATEWAY_PUBLIC_BASE_UR
 auth_code="$(curl -sS -o /dev/null -w '%{http_code}' -H "Authorization: ${status_api_key}" "${GATEWAY_PUBLIC_BASE_URL}/status/")"
 [[ "${auth_code}" == "200" ]] || die "Expected /status/ with status API key to return 200, got ${auth_code}."
 
+metadata_response_file="$(mktemp)"
+trap 'rm -f "${metadata_response_file}"' EXIT
+metadata_code="$(curl -sS -o "${metadata_response_file}" -w '%{http_code}' -H "Authorization: ${app_api_key}" "${GATEWAY_PUBLIC_BASE_URL}/metadata/models?provider=anthropic")"
+[[ "${metadata_code}" == "200" ]] || die "Expected /metadata/models?provider=anthropic with app API key to return 200, got ${metadata_code}: $(cat "${metadata_response_file}")"
+
 GATEWAY_VERIFY_BASE_URL="${GATEWAY_PUBLIC_BASE_URL}" \
 GATEWAY_VERIFY_API_KEY="${app_api_key}" \
 uv run python - <<'PY'

@@ -10,7 +10,7 @@ from src.app.core.bulk_analysis_groups import BulkAnalysisGroup
 from src.app.core.project_manager import ProjectMetadata
 from src.app.workers import WorkerCoordinator
 from src.app.workers import BulkAnalysisWorker, BulkReduceWorker
-from src.app.workers.llm_backend import LLMExecutionBackend
+from src.app.workers.llm_backend import GatewayAccessCheck, LLMExecutionBackend
 
 
 class BulkAnalysisService:
@@ -44,6 +44,7 @@ class BulkAnalysisService:
         project_name: str,
         estimate_summary: Mapping[str, object] | None,
         on_progress: Callable[[str, int, int, str], None],
+        on_progress_detail: Callable[[str, object], None],
         on_failed: Callable[[str, str, str], None],
         on_log: Callable[[str, str], None],
         on_finished: Callable[[str, int, int], None],
@@ -68,6 +69,8 @@ class BulkAnalysisService:
 
         gid = group.group_id
         worker.progress.connect(lambda done, total, rel, g=gid: on_progress(g, done, total, rel))
+        if hasattr(worker, "progress_detail"):
+            worker.progress_detail.connect(lambda detail, g=gid: on_progress_detail(g, detail))
         worker.file_failed.connect(lambda rel, err, g=gid: on_failed(g, rel, err))
         worker.log_message.connect(lambda message, g=gid: on_log(g, message))
         if hasattr(worker, "cost_calculated"):
@@ -95,6 +98,7 @@ class BulkAnalysisService:
         project_name: str,
         estimate_summary: Mapping[str, object] | None,
         on_progress: Callable[[str, int, int, str], None],
+        on_progress_detail: Callable[[str, object], None],
         on_failed: Callable[[str, str, str], None],
         on_log: Callable[[str, str], None],
         on_finished: Callable[[str, int, int], None],
@@ -117,6 +121,8 @@ class BulkAnalysisService:
 
         gid = group.group_id
         worker.progress.connect(lambda done, total, msg, g=gid: on_progress(g, done, total, msg))
+        if hasattr(worker, "progress_detail"):
+            worker.progress_detail.connect(lambda detail, g=gid: on_progress_detail(g, detail))
         worker.file_failed.connect(lambda rel, err, g=gid: on_failed(g, rel, err))
         worker.log_message.connect(lambda message, g=gid: on_log(g, message))
         if hasattr(worker, "cost_calculated"):
@@ -140,6 +146,34 @@ class BulkAnalysisService:
                 worker.cancel()
                 return True
         return False
+
+    def verify_gateway_access(
+        self,
+        *,
+        provider_id: str,
+        model: str | None,
+        timeout_seconds: float = 5.0,
+        force: bool = False,
+    ) -> GatewayAccessCheck:
+        backend = self._llm_backend
+        verifier = getattr(backend, "verify_gateway_access", None)
+        if callable(verifier):
+            return verifier(
+                provider_id,
+                model,
+                timeout_seconds=timeout_seconds,
+                force=force,
+            )
+        return GatewayAccessCheck(
+            ok=True,
+            kind="ok",
+            status_code=200,
+            message="Gateway verification not required for this backend.",
+            base_url=None,
+            route=None,
+            provider_id=provider_id,
+            model=model,
+        )
 
     # ------------------------------------------------------------------
     # Internals

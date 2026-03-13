@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+from collections import deque
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Deque, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import frontmatter
 from PySide6.QtCore import Signal
@@ -56,6 +59,7 @@ from .llm_backend import (
     backend_route_name,
     backend_transport_name,
 )
+from .progress import WorkerProgressDetail
 from .stage_contracts import BulkMapStageInput, stage_trace_attributes
 
 
@@ -65,13 +69,58 @@ class ProviderConfig:
     model: Optional[str]
 
 
+@dataclass
+class _ProviderPromptLimitError(RuntimeError):
+    configured_limit: int | None
+    actual_tokens: int | None
+    message: str
+
+    def __str__(self) -> str:
+        return self.message
+
+
+@dataclass(frozen=True)
+class _InvocationResult:
+    response: object
+    content: str
+    usage: dict[str, int | float]
+
+
+@dataclass(frozen=True)
+class _ChunkTaskSpec:
+    chunk_index: int
+    chunk_total: int
+    chunk_checksum: str
+    prompt: str
+    context_label: str
+    trace_attributes: dict[str, object]
+
+
+@dataclass(frozen=True)
+class _ChunkTaskResult:
+    chunk_index: int
+    chunk_checksum: str
+    summary: str
+    usage: dict[str, int | float]
+
+
 
 
 _MANIFEST_VERSION = 2
 _MTIME_TOLERANCE = 1e-6
 _DEFAULT_MAX_OUTPUT_TOKENS = 32_000
 _MIN_CHUNK_TOKEN_TARGET = 4_000
+_MAX_PROVIDER_LIMIT_RETRIES = 5
+_DEFAULT_CHUNK_FANOUT_CONCURRENCY = 4
 _PAGE_MARKER_RE = re.compile(r"<!---\\s*.+?#page=(\\d+)\\s*--->")
+_CONFIGURED_LIMIT_RE = re.compile(
+    r"configured limit of (?P<limit>\d+) tokens.*?resulted in (?P<actual>\d+) tokens",
+    re.IGNORECASE | re.DOTALL,
+)
+_MAXIMUM_LIMIT_RE = re.compile(
+    r"(?P<actual>\d+) tokens?\s*>\s*(?P<limit>\d+)\s*maximum",
+    re.IGNORECASE,
+)
 
 _DYNAMIC_GLOBAL_KEYS: frozenset[str] = frozenset(
     {
@@ -226,6 +275,7 @@ class BulkAnalysisWorker(DashboardWorker):
     """Run bulk analysis summaries on the thread pool."""
 
     progress = Signal(int, int, str)  # completed, total, relative path
+    progress_detail = Signal(object)
     file_failed = Signal(str, str)  # relative path, error message
     finished = Signal(int, int)  # successes, failures
     log_message = Signal(str)
@@ -267,6 +317,10 @@ class BulkAnalysisWorker(DashboardWorker):
             "output_tokens": 0,
         }
         self._prompt_token_cache: dict[str, int] = {}
+        self._provider_input_budget_overrides: dict[tuple[str, str], int] = {}
+        self._current_document_index = 0
+        self._total_documents = 0
+        self._current_document_path: str | None = None
 
     # ------------------------------------------------------------------
     # QRunnable API
@@ -284,6 +338,68 @@ class BulkAnalysisWorker(DashboardWorker):
             source=source,
             reduce_sources=reduce_sources,
         )
+
+    def _emit_progress_detail(
+        self,
+        *,
+        phase: str,
+        label: str,
+        document_path: str | None = None,
+        chunk_index: int | None = None,
+        chunk_total: int | None = None,
+        detail: str | None = None,
+        chunks_completed: int | None = None,
+        chunks_in_flight: int | None = None,
+    ) -> None:
+        percent = self._bulk_progress_percent(
+            chunk_index=chunk_index,
+            chunk_total=chunk_total,
+            phase=phase,
+            chunks_completed=chunks_completed,
+        )
+        self.progress_detail.emit(
+            WorkerProgressDetail(
+                run_kind="bulk_map",
+                phase=phase,
+                label=label,
+                percent=percent,
+                completed=max(self._current_document_index - 1, 0),
+                total=self._total_documents or None,
+                document_path=document_path or self._current_document_path,
+                chunk_index=chunk_index,
+                chunk_total=chunk_total,
+                detail=detail,
+                chunks_completed=chunks_completed,
+                chunks_in_flight=chunks_in_flight,
+            )
+        )
+
+    def _bulk_progress_percent(
+        self,
+        *,
+        chunk_index: int | None = None,
+        chunk_total: int | None = None,
+        phase: str | None = None,
+        chunks_completed: int | None = None,
+    ) -> int:
+        if self._total_documents <= 0:
+            return 0
+        doc_position = max(self._current_document_index - 1, 0)
+        fraction = float(doc_position)
+        if chunk_total:
+            if phase == "combining":
+                fraction += 0.98
+            elif chunks_completed is not None:
+                fraction += min(max(chunks_completed, 0), chunk_total) / chunk_total
+            elif phase == "chunk_complete":
+                fraction += min(max(chunk_index or 0, 0), chunk_total) / chunk_total
+            else:
+                fraction += max((chunk_index or 1) - 1, 0) / chunk_total
+        elif phase == "document_complete":
+            fraction += 1.0
+        elif phase in {"document_started", "processing_document"}:
+            fraction += 0.02
+        return max(0, min(int((fraction / self._total_documents) * 100), 100))
 
     def _resolve_source_context(
         self,
@@ -354,6 +470,7 @@ class BulkAnalysisWorker(DashboardWorker):
         try:
             documents = prepare_documents(self._project_dir, self._group, self._files)
             total = len(documents)
+            self._total_documents = total
             if total == 0:
                 self.log_message.emit("No documents resolved for bulk analysis run.")
                 self.logger.info("%s no documents to process", self.job_tag)
@@ -421,6 +538,8 @@ class BulkAnalysisWorker(DashboardWorker):
             for index, document in enumerate(documents, start=1):
                 if self.is_cancelled():
                     raise BulkAnalysisCancelled
+                self._current_document_index = index
+                self._current_document_path = document.relative_path
 
                 try:
                     source_mtime = document.source_path.stat().st_mtime
@@ -456,6 +575,11 @@ class BulkAnalysisWorker(DashboardWorker):
                     continue
 
                 try:
+                    self._emit_progress_detail(
+                        phase="document_started",
+                        label=f"Processing document {index}/{total}",
+                        document_path=document.relative_path,
+                    )
                     summary, run_details, doc_placeholders = self._process_document(
                         provider,
                         provider_config,
@@ -515,15 +639,21 @@ class BulkAnalysisWorker(DashboardWorker):
                             }
                         entries[document.relative_path] = entry_payload
 
-                progress_count = successes + failures + skipped
-                self.logger.debug(
-                    "%s progress %s/%s %s",
-                    self.job_tag,
-                    progress_count,
-                    total,
-                    document.relative_path,
-                )
-                self.progress.emit(progress_count, total, document.relative_path)
+                        progress_count = successes + failures + skipped
+                        self.logger.debug(
+                            "%s progress %s/%s %s",
+                            self.job_tag,
+                            progress_count,
+                            total,
+                            document.relative_path,
+                        )
+                        self._emit_progress_detail(
+                            phase="document_complete",
+                            label=f"Completed document {index}/{total}",
+                            document_path=document.relative_path,
+                            detail=f"Saved {document.output_path.name}",
+                        )
+                        self.progress.emit(progress_count, total, document.relative_path)
 
         except BulkAnalysisCancelled:
             if recovery_manifest is not None:
@@ -626,9 +756,12 @@ class BulkAnalysisWorker(DashboardWorker):
                 provider_id=provider_config.provider_id,
             )
 
-        input_budget = self._max_input_budget(
-            raw_context_window=raw_context_window,
-            max_output_tokens=_DEFAULT_MAX_OUTPUT_TOKENS,
+        input_budget = self._effective_input_budget(
+            provider_config,
+            self._max_input_budget(
+                raw_context_window=raw_context_window,
+                max_output_tokens=_DEFAULT_MAX_OUTPUT_TOKENS,
+            ),
         )
         full_prompt = render_user_prompt(
             bundle,
@@ -675,44 +808,149 @@ class BulkAnalysisWorker(DashboardWorker):
 
         if not needs_chunking:
             run_details["chunk_count"] = 1
-            result = self._invoke_provider(
-                provider,
-                provider_config,
-                full_prompt,
-                system_prompt,
-                input_budget=input_budget,
-                context_label=f"document '{document.relative_path}'",
-            )
-            return result, run_details, doc_placeholders
+            try:
+                self._emit_progress_detail(
+                    phase="processing_document",
+                    label=f"Running document analysis for {document.relative_path}",
+                    document_path=document.relative_path,
+                    detail="Single request",
+                )
+                result = self._invoke_provider(
+                    provider,
+                    provider_config,
+                    full_prompt,
+                    system_prompt,
+                    input_budget=input_budget,
+                    context_label=f"document '{document.relative_path}'",
+                )
+                return result, run_details, doc_placeholders
+            except _ProviderPromptLimitError as exc:
+                learned_limit = self._register_provider_input_budget(provider_config, exc.configured_limit)
+                if learned_limit is None:
+                    raise
+                needs_chunking = True
+                run_details["chunking"] = True
+                run_details["input_budget_tokens"] = learned_limit
+                self.log_message.emit(
+                    f"Provider reduced effective prompt budget for {document.relative_path}: "
+                    f"{input_budget} -> {learned_limit} tokens"
+                )
+                input_budget = learned_limit
 
         chunk_target_tokens = max(
             min(default_chunk_tokens, int(input_budget * 0.75)),
             _MIN_CHUNK_TOKEN_TARGET,
         )
-        chunks = self._generate_fitting_chunks(
-            provider=provider,
-            provider_config=provider_config,
-            bundle=bundle,
-            system_prompt=system_prompt,
-            document=document,
-            body=body,
-            placeholder_values=doc_placeholders,
-            input_budget=input_budget,
-            initial_chunk_tokens=chunk_target_tokens,
-        )
-        if not chunks:
-            run_details["chunk_count"] = 1
-            run_details["chunking"] = False
-            result = self._invoke_provider(
-                provider,
-                provider_config,
-                full_prompt,
-                system_prompt,
-                input_budget=input_budget,
-                context_label=f"document '{document.relative_path}'",
+        provider_limit_retries = 0
+        while True:
+            input_budget = self._effective_input_budget(provider_config, input_budget)
+            run_details["input_budget_tokens"] = input_budget
+            adjusted_chunk_target = max(
+                min(chunk_target_tokens, int(input_budget * 0.75)),
+                _MIN_CHUNK_TOKEN_TARGET,
             )
-            return result, run_details, doc_placeholders
+            chunks = self._generate_fitting_chunks(
+                provider=provider,
+                provider_config=provider_config,
+                bundle=bundle,
+                system_prompt=system_prompt,
+                document=document,
+                body=body,
+                placeholder_values=doc_placeholders,
+                input_budget=input_budget,
+                initial_chunk_tokens=adjusted_chunk_target,
+            )
+            if not chunks:
+                run_details["chunk_count"] = 1
+                run_details["chunking"] = False
+                self._emit_progress_detail(
+                    phase="processing_document",
+                    label=f"Running document analysis for {document.relative_path}",
+                    document_path=document.relative_path,
+                    detail="Single request",
+                )
+                result = self._invoke_provider(
+                    provider,
+                    provider_config,
+                    full_prompt,
+                    system_prompt,
+                    input_budget=input_budget,
+                    context_label=f"document '{document.relative_path}'",
+                )
+                return result, run_details, doc_placeholders
+            try:
+                self._emit_progress_detail(
+                    phase="chunking",
+                    label=f"Split {document.relative_path} into {len(chunks)} chunks",
+                    document_path=document.relative_path,
+                    chunk_total=len(chunks),
+                )
+                return self._process_chunked_document(
+                    provider=provider,
+                    provider_config=provider_config,
+                    bundle=bundle,
+                    system_prompt=system_prompt,
+                    document=document,
+                    doc_placeholders=doc_placeholders,
+                    manifest=manifest,
+                    prompt_hash=prompt_hash,
+                    manifest_path=manifest_path,
+                    recovery_store=recovery_store,
+                    recovery_manifest=recovery_manifest,
+                    run_details=run_details,
+                    body=body,
+                    chunks=chunks,
+                    input_budget=input_budget,
+                )
+            except _ProviderPromptLimitError as exc:
+                provider_limit_retries += 1
+                learned_limit = self._register_provider_input_budget(provider_config, exc.configured_limit)
+                if provider_limit_retries >= _MAX_PROVIDER_LIMIT_RETRIES:
+                    raise RuntimeError(
+                        f"Provider repeatedly rejected prompt size for {document.relative_path}: {exc}"
+                    ) from exc
+                next_target = self._reduced_chunk_target_from_limit_error(
+                    adjusted_chunk_target,
+                    limit_error=exc,
+                    input_budget=input_budget,
+                )
+                if next_target >= adjusted_chunk_target and learned_limit is None:
+                    raise RuntimeError(str(exc)) from exc
+                self.log_message.emit(
+                    f"Provider reduced effective prompt budget for {document.relative_path}: "
+                    f"{input_budget} -> {learned_limit or input_budget} tokens; "
+                    f"reducing chunk target {adjusted_chunk_target} -> {next_target}"
+                )
+                documents = manifest.setdefault("documents", {})  # type: ignore[assignment]
+                if isinstance(documents, dict):
+                    documents.pop(document.relative_path, None)
+                    _save_manifest(manifest_path, manifest)
+                recovery_documents = recovery_manifest.setdefault("documents", {})  # type: ignore[assignment]
+                if isinstance(recovery_documents, dict):
+                    recovery_documents.pop(document.relative_path, None)
+                recovery_store.clear_map_document(document.relative_path)
+                recovery_store.save_map_manifest(recovery_manifest)
+                chunk_target_tokens = next_target
 
+    def _process_chunked_document(
+        self,
+        *,
+        provider: object,
+        provider_config: ProviderConfig,
+        bundle: PromptBundle,
+        system_prompt: str,
+        document: BulkAnalysisDocument,
+        doc_placeholders: Dict[str, str],
+        manifest: Dict[str, object],
+        prompt_hash: str,
+        manifest_path: Path,
+        recovery_store: BulkRecoveryStore,
+        recovery_manifest: Dict[str, object],
+        run_details: Dict[str, object],
+        body: str,
+        chunks: List[str],
+        input_budget: int,
+    ) -> tuple[str, Dict[str, object], Dict[str, str]]:
         documents = manifest.setdefault("documents", {})  # type: ignore[assignment]
         entry: Dict[str, object] = dict(documents.get(document.relative_path, {}) or {})
         recovery_documents = recovery_manifest.setdefault("documents", {})  # type: ignore[assignment]
@@ -743,11 +981,13 @@ class BulkAnalysisWorker(DashboardWorker):
         recovery_entry.setdefault("status", "incomplete")
         recovery_documents[document.relative_path] = recovery_entry
 
-        chunk_summaries: List[str] = []
+        chunk_summaries: List[str | None] = [None] * total_chunks
         run_details["chunk_count"] = total_chunks
         done_set = set(entry.get("chunks_done") or [])
         checksums: Dict[str, str] = dict(entry.get("checksums") or {})
         recovery_chunks: Dict[str, Dict[str, object]] = dict(recovery_entry.get("chunks") or {})
+        pending_specs: Deque[_ChunkTaskSpec] = deque()
+        completed_chunks = 0
 
         for idx, chunk in enumerate(chunks, start=1):
             if self.is_cancelled():
@@ -781,70 +1021,186 @@ class BulkAnalysisWorker(DashboardWorker):
                     }
 
             if cached_content:
-                summary = cached_content
-                self.log_message.emit(
-                    f"Reusing chunk {idx}/{total_chunks} for {document.relative_path} from checkpoint"
-                )
-            else:
-                chunk_prompt = render_user_prompt(
-                    bundle,
-                    self._metadata,
-                    document.relative_path,
-                    chunk,
-                    chunk_index=idx,
-                    chunk_total=total_chunks,
-                    placeholder_values=doc_placeholders,
-                )
-                chunk_ledger = self._build_document_evidence_ledger(
-                    relative_path=document.relative_path,
-                    content=chunk,
-                )
-                chunk_prompt = self._append_citation_ledger(chunk_prompt, chunk_ledger)
-                summary = self._invoke_provider(
-                    provider,
-                    provider_config,
-                    chunk_prompt,
-                    system_prompt,
-                    input_budget=input_budget,
-                    context_label=f"chunk {idx}/{total_chunks} for '{document.relative_path}'",
-                    on_response=lambda response, chunk_index=chunk_key: self._record_recovery_actuals(
-                        recovery_store,
-                        recovery_manifest,
-                        response,
+                with trace_operation(
+                    "bulk_analysis.chunk",
+                    self._chunk_trace_attributes(
                         provider_config=provider_config,
-                        stage="map_chunk",
-                        item=recovery_chunks.setdefault(chunk_index, {}),
+                        document_path=document.relative_path,
+                        chunk_index=idx,
+                        chunk_total=total_chunks,
                     ),
+                ):
+                    self._emit_progress_detail(
+                        phase="chunk_complete",
+                        label=f"Reused chunk {idx}/{total_chunks}",
+                        document_path=document.relative_path,
+                        chunk_index=idx,
+                        chunk_total=total_chunks,
+                        detail="Recovered from checkpoint",
+                        chunks_completed=completed_chunks + 1,
+                        chunks_in_flight=0,
+                    )
+                    summary = cached_content
+                    self.log_message.emit(
+                        f"Reusing chunk {idx}/{total_chunks} for {document.relative_path} from checkpoint"
+                    )
+                self._persist_chunk_completion(
+                    document=document,
+                    manifest=manifest,
+                    manifest_path=manifest_path,
+                    recovery_store=recovery_store,
+                    recovery_manifest=recovery_manifest,
+                    recovery_documents=recovery_documents,
+                    recovery_entry=recovery_entry,
+                    recovery_chunks=recovery_chunks,
+                    entry=entry,
+                    documents=documents,
+                    done_set=done_set,
+                    checksums=checksums,
+                    chunk_index=idx,
+                    chunk_checksum=chunk_checksum,
+                    summary=summary,
+                    usage_summary=None,
                 )
-                payload = recovery_store.save_payload(
-                    recovery_store.map_chunk_path(document.relative_path, idx),
-                    content=summary,
-                    input_checksum=chunk_checksum,
+                chunk_summaries[idx - 1] = summary
+                completed_chunks += 1
+            else:
+                pending_specs.append(
+                    self._build_chunk_task_spec(
+                        bundle=bundle,
+                        document=document,
+                        doc_placeholders=doc_placeholders,
+                        chunk=chunk,
+                        chunk_index=idx,
+                        chunk_total=total_chunks,
+                        chunk_checksum=chunk_checksum,
+                        provider_config=provider_config,
+                    )
                 )
-                recovery_chunks[chunk_key] = {
-                    **recovery_chunks.get(chunk_key, {}),
-                    "status": "complete",
-                    "input_checksum": payload.get("input_checksum"),
-                    "content_checksum": payload.get("content_checksum"),
-                    "updated_at": payload.get("updated_at"),
-                }
 
-            checksums[chunk_key] = chunk_checksum
-            done_set.add(idx)
-            entry["checksums"] = checksums
-            entry["chunks_done"] = sorted(done_set)
-            documents[document.relative_path] = entry
-            recovery_entry["chunks"] = recovery_chunks
-            recovery_documents[document.relative_path] = recovery_entry
-            try:
-                _save_manifest(manifest_path, manifest)
-            except Exception:
-                self.logger.debug("Failed to persist map chunk manifest update", exc_info=True)
-            recovery_store.save_map_manifest(recovery_manifest)
+        chunk_failures: list[Exception] = []
+        prompt_limit_error: _ProviderPromptLimitError | None = None
+        fanout_limit = min(self._chunk_fanout_max_concurrency(), len(pending_specs)) if pending_specs else 0
 
-            chunk_summaries.append(summary)
+        if fanout_limit > 0:
+            in_flight: dict[Future[_ChunkTaskResult], _ChunkTaskSpec] = {}
+            stop_submitting = False
+            with ThreadPoolExecutor(max_workers=fanout_limit, thread_name_prefix="bulk-map-chunk") as executor:
+                self._submit_chunk_tasks(
+                    executor=executor,
+                    max_workers=fanout_limit,
+                    in_flight=in_flight,
+                    pending_specs=pending_specs,
+                    provider_config=provider_config,
+                    system_prompt=system_prompt,
+                    input_budget=input_budget,
+                    document=document,
+                    chunks_completed=completed_chunks,
+                )
+                while in_flight:
+                    done_futures, _ = wait(tuple(in_flight.keys()), return_when=FIRST_COMPLETED)
+                    for future in done_futures:
+                        _spec = in_flight.pop(future)
+                        try:
+                            chunk_result = future.result()
+                        except _ProviderPromptLimitError as exc:
+                            if prompt_limit_error is None:
+                                prompt_limit_error = exc
+                                stop_submitting = True
+                                pending_specs.clear()
+                                self._cancel_pending_chunk_futures(in_flight)
+                        except BulkAnalysisCancelled:
+                            stop_submitting = True
+                            pending_specs.clear()
+                            self._cancel_pending_chunk_futures(in_flight)
+                            if not any(isinstance(error, BulkAnalysisCancelled) for error in chunk_failures):
+                                chunk_failures.append(BulkAnalysisCancelled())
+                        except Exception as exc:  # noqa: BLE001 - settle in-flight work before failing
+                            stop_submitting = True
+                            pending_specs.clear()
+                            self._cancel_pending_chunk_futures(in_flight)
+                            chunk_failures.append(exc)
+                        else:
+                            if prompt_limit_error is None:
+                                self._persist_chunk_completion(
+                                    document=document,
+                                    manifest=manifest,
+                                    manifest_path=manifest_path,
+                                    recovery_store=recovery_store,
+                                    recovery_manifest=recovery_manifest,
+                                    recovery_documents=recovery_documents,
+                                    recovery_entry=recovery_entry,
+                                    recovery_chunks=recovery_chunks,
+                                    entry=entry,
+                                    documents=documents,
+                                    done_set=done_set,
+                                    checksums=checksums,
+                                    chunk_index=chunk_result.chunk_index,
+                                    chunk_checksum=chunk_result.chunk_checksum,
+                                    summary=chunk_result.summary,
+                                    usage_summary=chunk_result.usage,
+                                )
+                                chunk_summaries[chunk_result.chunk_index - 1] = chunk_result.summary
+                                completed_chunks += 1
+                                self._emit_progress_detail(
+                                    phase="chunk_complete",
+                                    label=f"Completed {completed_chunks}/{total_chunks} chunks",
+                                    document_path=document.relative_path,
+                                    chunk_index=chunk_result.chunk_index,
+                                    chunk_total=total_chunks,
+                                    chunks_completed=completed_chunks,
+                                    chunks_in_flight=len(in_flight),
+                                    detail=self._chunk_progress_detail_text(
+                                        chunks_completed=completed_chunks,
+                                        chunk_total=total_chunks,
+                                        chunks_in_flight=len(in_flight),
+                                    ),
+                                )
+
+                    if self.is_cancelled():
+                        stop_submitting = True
+                        pending_specs.clear()
+                        self._cancel_pending_chunk_futures(in_flight)
+                        if not any(isinstance(error, BulkAnalysisCancelled) for error in chunk_failures):
+                            chunk_failures.append(BulkAnalysisCancelled())
+
+                    if not stop_submitting:
+                        self._submit_chunk_tasks(
+                            executor=executor,
+                            max_workers=fanout_limit,
+                            in_flight=in_flight,
+                            pending_specs=pending_specs,
+                            provider_config=provider_config,
+                            system_prompt=system_prompt,
+                            input_budget=input_budget,
+                            document=document,
+                            chunks_completed=completed_chunks,
+                        )
+
+        if prompt_limit_error is not None:
+            raise prompt_limit_error
+        if any(isinstance(error, BulkAnalysisCancelled) for error in chunk_failures):
+            raise BulkAnalysisCancelled
+        if chunk_failures:
+            raise chunk_failures[0]
+
+        ordered_chunk_summaries = [summary for summary in chunk_summaries if summary is not None]
+        if len(ordered_chunk_summaries) != total_chunks:
+            raise RuntimeError(
+                f"Incomplete chunk results for {document.relative_path}: "
+                f"{len(ordered_chunk_summaries)}/{total_chunks} chunks available"
+            )
 
         def invoke_combine(prompt: str) -> str:
+            self._emit_progress_detail(
+                phase="combining",
+                label=f"Combining {total_chunks} chunk summaries",
+                document_path=document.relative_path,
+                chunk_index=total_chunks,
+                chunk_total=total_chunks,
+                chunks_completed=total_chunks,
+                chunks_in_flight=0,
+            )
             return self._invoke_provider(
                 provider,
                 provider_config,
@@ -908,7 +1264,7 @@ class BulkAnalysisWorker(DashboardWorker):
             recovery_store.save_map_manifest(recovery_manifest)
 
         result = combine_chunk_summaries_hierarchical(
-            chunk_summaries,
+            ordered_chunk_summaries,
             document_name=document.relative_path,
             metadata=self._metadata,
             placeholder_values=doc_placeholders,
@@ -929,6 +1285,217 @@ class BulkAnalysisWorker(DashboardWorker):
         recovery_store.save_map_manifest(recovery_manifest)
         return result, run_details, doc_placeholders
 
+    def _chunk_fanout_max_concurrency(self) -> int:
+        raw = os.getenv("LLESTRADE_BULK_MAP_CHUNK_MAX_CONCURRENCY", "").strip()
+        if not raw:
+            return _DEFAULT_CHUNK_FANOUT_CONCURRENCY
+        try:
+            value = int(raw)
+        except ValueError:
+            return _DEFAULT_CHUNK_FANOUT_CONCURRENCY
+        return value if value > 0 else _DEFAULT_CHUNK_FANOUT_CONCURRENCY
+
+    def _chunk_trace_attributes(
+        self,
+        *,
+        provider_config: ProviderConfig,
+        document_path: str,
+        chunk_index: int,
+        chunk_total: int,
+    ) -> dict[str, object]:
+        return {
+            "llestrade.transport": backend_transport_name(self._llm_backend),
+            "llestrade.provider_id": provider_config.provider_id,
+            "llestrade.model": provider_config.model,
+            "llestrade.worker": "bulk_analysis",
+            "llestrade.stage": "bulk_map_chunk",
+            "llestrade.group_id": self._group.group_id,
+            "llestrade.group_name": self._group.name,
+            "llestrade.group_slug": getattr(self._group, "slug", None) or self._group.folder_name,
+            "llestrade.document_path": document_path,
+            "llestrade.chunk_index": chunk_index,
+            "llestrade.chunk_total": chunk_total,
+        }
+
+    def _build_chunk_task_spec(
+        self,
+        *,
+        bundle: PromptBundle,
+        document: BulkAnalysisDocument,
+        doc_placeholders: Mapping[str, str],
+        chunk: str,
+        chunk_index: int,
+        chunk_total: int,
+        chunk_checksum: str,
+        provider_config: ProviderConfig,
+    ) -> _ChunkTaskSpec:
+        chunk_prompt = render_user_prompt(
+            bundle,
+            self._metadata,
+            document.relative_path,
+            chunk,
+            chunk_index=chunk_index,
+            chunk_total=chunk_total,
+            placeholder_values=doc_placeholders,
+        )
+        chunk_ledger = self._build_document_evidence_ledger(
+            relative_path=document.relative_path,
+            content=chunk,
+        )
+        return _ChunkTaskSpec(
+            chunk_index=chunk_index,
+            chunk_total=chunk_total,
+            chunk_checksum=chunk_checksum,
+            prompt=self._append_citation_ledger(chunk_prompt, chunk_ledger),
+            context_label=f"chunk {chunk_index}/{chunk_total} for '{document.relative_path}'",
+            trace_attributes=self._chunk_trace_attributes(
+                provider_config=provider_config,
+                document_path=document.relative_path,
+                chunk_index=chunk_index,
+                chunk_total=chunk_total,
+            ),
+        )
+
+    def _submit_chunk_tasks(
+        self,
+        *,
+        executor: ThreadPoolExecutor,
+        max_workers: int,
+        in_flight: dict[Future[_ChunkTaskResult], _ChunkTaskSpec],
+        pending_specs: Deque[_ChunkTaskSpec],
+        provider_config: ProviderConfig,
+        system_prompt: str,
+        input_budget: int,
+        document: BulkAnalysisDocument,
+        chunks_completed: int,
+    ) -> None:
+        while pending_specs and len(in_flight) < max_workers and not self.is_cancelled():
+            spec = pending_specs.popleft()
+            future = executor.submit(
+                self._execute_chunk_task,
+                provider_config=provider_config,
+                system_prompt=system_prompt,
+                spec=spec,
+                input_budget=input_budget,
+            )
+            in_flight[future] = spec
+            self._emit_progress_detail(
+                phase="chunk_started",
+                label=f"Running chunk {spec.chunk_index}/{spec.chunk_total}",
+                document_path=document.relative_path,
+                chunk_index=spec.chunk_index,
+                chunk_total=spec.chunk_total,
+                chunks_completed=chunks_completed,
+                chunks_in_flight=len(in_flight),
+                detail=self._chunk_progress_detail_text(
+                    chunks_completed=chunks_completed,
+                    chunk_total=spec.chunk_total,
+                    chunks_in_flight=len(in_flight),
+                ),
+            )
+
+    def _execute_chunk_task(
+        self,
+        *,
+        provider_config: ProviderConfig,
+        system_prompt: str,
+        spec: _ChunkTaskSpec,
+        input_budget: int,
+    ) -> _ChunkTaskResult:
+        provider = self._create_provider(provider_config)
+        try:
+            with trace_operation("bulk_analysis.chunk", spec.trace_attributes):
+                invocation = self._invoke_provider_result(
+                    provider,
+                    provider_config,
+                    spec.prompt,
+                    system_prompt,
+                    input_budget=input_budget,
+                    context_label=spec.context_label,
+                )
+            return _ChunkTaskResult(
+                chunk_index=spec.chunk_index,
+                chunk_checksum=spec.chunk_checksum,
+                summary=invocation.content,
+                usage=invocation.usage,
+            )
+        finally:
+            if provider is not None and hasattr(provider, "deleteLater"):
+                provider.deleteLater()
+
+    @staticmethod
+    def _cancel_pending_chunk_futures(in_flight: Mapping[Future[Any], _ChunkTaskSpec]) -> None:
+        for future in in_flight:
+            future.cancel()
+
+    @staticmethod
+    def _chunk_progress_detail_text(
+        *,
+        chunks_completed: int,
+        chunk_total: int,
+        chunks_in_flight: int,
+    ) -> str:
+        detail = f"Completed {chunks_completed}/{chunk_total} chunks"
+        if chunks_in_flight > 0:
+            detail += f", {chunks_in_flight} in flight"
+        return detail
+
+    def _persist_chunk_completion(
+        self,
+        *,
+        document: BulkAnalysisDocument,
+        manifest: Dict[str, object],
+        manifest_path: Path,
+        recovery_store: BulkRecoveryStore,
+        recovery_manifest: Dict[str, object],
+        recovery_documents: Dict[str, object],
+        recovery_entry: Dict[str, object],
+        recovery_chunks: Dict[str, Dict[str, object]],
+        entry: Dict[str, object],
+        documents: Dict[str, object],
+        done_set: set[int],
+        checksums: Dict[str, str],
+        chunk_index: int,
+        chunk_checksum: str,
+        summary: str,
+        usage_summary: Mapping[str, int | float] | None,
+    ) -> None:
+        chunk_key = str(chunk_index)
+        if usage_summary is not None:
+            self._record_usage_summary(usage_summary)
+        payload = recovery_store.save_payload(
+            recovery_store.map_chunk_path(document.relative_path, chunk_index),
+            content=summary,
+            input_checksum=chunk_checksum,
+        )
+        recovery_chunks[chunk_key] = {
+            **recovery_chunks.get(chunk_key, {}),
+            "status": "complete",
+            "input_checksum": payload.get("input_checksum"),
+            "content_checksum": payload.get("content_checksum"),
+            "updated_at": payload.get("updated_at"),
+        }
+        if usage_summary is not None:
+            self._record_recovery_usage_summary(
+                recovery_store,
+                recovery_manifest,
+                usage_summary,
+                stage="map_chunk",
+                item=recovery_chunks[chunk_key],
+            )
+        checksums[chunk_key] = chunk_checksum
+        done_set.add(chunk_index)
+        entry["checksums"] = checksums
+        entry["chunks_done"] = sorted(done_set)
+        documents[document.relative_path] = entry
+        recovery_entry["chunks"] = recovery_chunks
+        recovery_documents[document.relative_path] = recovery_entry
+        try:
+            _save_manifest(manifest_path, manifest)
+        except Exception:
+            self.logger.debug("Failed to persist map chunk manifest update", exc_info=True)
+        recovery_store.save_map_manifest(recovery_manifest)
+
     def _max_input_budget(self, *, raw_context_window: int, max_output_tokens: int) -> int:
         budget = compute_input_token_budget(
             raw_context_window=raw_context_window,
@@ -936,6 +1503,78 @@ class BulkAnalysisWorker(DashboardWorker):
             minimum_budget=_MIN_CHUNK_TOKEN_TARGET,
         )
         return budget or _MIN_CHUNK_TOKEN_TARGET
+
+    def _effective_input_budget(self, provider_config: ProviderConfig, input_budget: int) -> int:
+        override = self._provider_input_budget_overrides.get(
+            (provider_config.provider_id, provider_config.model or "")
+        )
+        if override is None:
+            return input_budget
+        return max(min(input_budget, override), _MIN_CHUNK_TOKEN_TARGET)
+
+    def _register_provider_input_budget(
+        self,
+        provider_config: ProviderConfig,
+        configured_limit: int | None,
+    ) -> int | None:
+        if configured_limit is None or configured_limit <= 0:
+            return None
+        key = (provider_config.provider_id, provider_config.model or "")
+        current = self._provider_input_budget_overrides.get(key)
+        next_limit = configured_limit if current is None else min(current, configured_limit)
+        self._provider_input_budget_overrides[key] = max(next_limit, _MIN_CHUNK_TOKEN_TARGET)
+        return self._provider_input_budget_overrides[key]
+
+    @staticmethod
+    def _parse_provider_prompt_limit_error(exc: Exception) -> _ProviderPromptLimitError | None:
+        body = getattr(exc, "body", None)
+        message_parts = [str(exc)]
+        if isinstance(body, str):
+            message_parts.append(body)
+        elif isinstance(body, Mapping):
+            try:
+                message_parts.append(json.dumps(body, sort_keys=True))
+            except Exception:
+                message_parts.append(str(body))
+
+        haystack = "\n".join(part for part in message_parts if part)
+        if not haystack:
+            return None
+
+        match = _CONFIGURED_LIMIT_RE.search(haystack)
+        if match:
+            return _ProviderPromptLimitError(
+                configured_limit=int(match.group("limit")),
+                actual_tokens=int(match.group("actual")),
+                message=haystack,
+            )
+
+        match = _MAXIMUM_LIMIT_RE.search(haystack)
+        if match:
+            return _ProviderPromptLimitError(
+                configured_limit=int(match.group("limit")),
+                actual_tokens=int(match.group("actual")),
+                message=haystack,
+            )
+
+        return None
+
+    @staticmethod
+    def _reduced_chunk_target_from_limit_error(
+        current_target: int,
+        *,
+        limit_error: _ProviderPromptLimitError,
+        input_budget: int,
+    ) -> int:
+        if limit_error.actual_tokens and limit_error.configured_limit and limit_error.actual_tokens > 0:
+            scale = (limit_error.configured_limit / limit_error.actual_tokens) * 0.9
+            if scale < 1.0:
+                reduced = int(current_target * scale)
+                return max(min(reduced, current_target - 1), _MIN_CHUNK_TOKEN_TARGET)
+
+        fallback_limit = limit_error.configured_limit or input_budget
+        reduced = int(min(current_target, fallback_limit) * 0.75)
+        return max(min(reduced, current_target - 1), _MIN_CHUNK_TOKEN_TARGET)
 
     def _count_prompt_tokens(
         self,
@@ -977,6 +1616,7 @@ class BulkAnalysisWorker(DashboardWorker):
                             temperature=0.1,
                             max_tokens=max_tokens,
                             use_reasoning=bool(getattr(self._group, "use_reasoning", False)),
+                            reasoning=getattr(self._group, "reasoning", {}),
                         ),
                     ),
                 )
@@ -1118,6 +1758,33 @@ class BulkAnalysisWorker(DashboardWorker):
         context_label: str = "bulk analysis request",
         on_response=None,
     ) -> str:
+        result = self._invoke_provider_result(
+            provider,
+            provider_config,
+            prompt,
+            system_prompt,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            input_budget=input_budget,
+            context_label=context_label,
+        )
+        if on_response is not None:
+            on_response(result.response)
+        self._record_usage_summary(result.usage)
+        return result.content
+
+    def _invoke_provider_result(
+        self,
+        provider: object,
+        provider_config: ProviderConfig,
+        prompt: str,
+        system_prompt: str,
+        *,
+        temperature: float = 0.1,
+        max_tokens: int = _DEFAULT_MAX_OUTPUT_TOKENS,
+        input_budget: Optional[int] = None,
+        context_label: str = "bulk analysis request",
+    ) -> _InvocationResult:
         if self._cancel_event.is_set():
             raise BulkAnalysisCancelled
 
@@ -1152,36 +1819,41 @@ class BulkAnalysisWorker(DashboardWorker):
         )
         trace_attributes = stage_trace_attributes(stage_input)
         with trace_operation("bulk_analysis.invoke_llm", trace_attributes):
-            response = self._llm_backend.invoke_response(
-                provider,
-                LLMInvocationRequest(
-                    prompt=prompt,
-                    model=provider_config.model,
-                    system_prompt=system_prompt,
-                    model_settings=self._llm_backend.build_model_settings(
-                        provider_config.provider_id,
-                        provider_config.model,
-                        temperature=temperature,
-                        max_tokens=max_tokens,
-                        use_reasoning=getattr(self._group, "use_reasoning", False),
+            try:
+                response = self._llm_backend.invoke_response(
+                    provider,
+                    LLMInvocationRequest(
+                        prompt=prompt,
+                        model=provider_config.model,
+                        system_prompt=system_prompt,
+                        model_settings=self._llm_backend.build_model_settings(
+                            provider_config.provider_id,
+                            provider_config.model,
+                            temperature=temperature,
+                            max_tokens=max_tokens,
+                            use_reasoning=getattr(self._group, "use_reasoning", False),
+                            reasoning=getattr(self._group, "reasoning", {}),
+                        ),
+                        input_tokens_limit=input_budget,
                     ),
-                    input_tokens_limit=input_budget,
-                ),
-            )
-        if on_response is not None:
-            on_response(response)
-        self._record_response_usage(response)
+                )
+            except Exception as exc:
+                parsed_limit_error = self._parse_provider_prompt_limit_error(exc)
+                if parsed_limit_error is not None:
+                    raise parsed_limit_error from exc
+                raise
         content = str(response.text or "").strip()
         if not content:
             raise RuntimeError("LLM returned empty response")
-        return content
+        return _InvocationResult(
+            response=response,
+            content=content,
+            usage=self._response_usage_summary(response, provider_config=provider_config),
+        )
 
-    def _record_response_usage(self, response: object) -> None:
-        usage = getattr(response, "usage", None)
-        if usage is None:
-            return
-        self._usage_totals["input_tokens"] += int(getattr(usage, "input_tokens", 0) or 0)
-        self._usage_totals["output_tokens"] += int(getattr(usage, "output_tokens", 0) or 0)
+    def _record_usage_summary(self, usage_summary: Mapping[str, int | float]) -> None:
+        self._usage_totals["input_tokens"] += int(usage_summary.get("input_tokens", 0) or 0)
+        self._usage_totals["output_tokens"] += int(usage_summary.get("output_tokens", 0) or 0)
 
     def _response_usage_summary(
         self,
@@ -1215,6 +1887,23 @@ class BulkAnalysisWorker(DashboardWorker):
         item: dict[str, object] | None = None,
     ) -> None:
         usage = self._response_usage_summary(response, provider_config=provider_config)
+        self._record_recovery_usage_summary(
+            recovery_store,
+            recovery_manifest,
+            usage,
+            stage=stage,
+            item=item,
+        )
+
+    def _record_recovery_usage_summary(
+        self,
+        recovery_store: BulkRecoveryStore,
+        recovery_manifest: dict[str, object],
+        usage: Mapping[str, int | float],
+        *,
+        stage: str,
+        item: dict[str, object] | None = None,
+    ) -> None:
         recovery_store.add_actuals(
             recovery_manifest,
             input_tokens=int(usage["input_tokens"]),

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from pathlib import Path
+import time
 from typing import Sequence
 
 import pytest
@@ -11,12 +12,14 @@ from pydantic_ai.usage import RequestUsage
 from src.app.workers.checkpoint_manager import CheckpointManager
 
 from src.app.core.bulk_analysis_runner import PromptBundle
+from src.app.core.placeholders.system import SourceFileContext
 from src.app.core.project_manager import ProjectMetadata
 from src.app.core.bulk_analysis_groups import BulkAnalysisGroup
 from src.app.workers import bulk_analysis_worker as worker_module
 from src.app.workers.bulk_analysis_worker import (
     BulkAnalysisWorker,
     ProviderConfig,
+    _ProviderPromptLimitError,
     _compute_prompt_hash,
     _load_manifest,
     _manifest_path,
@@ -483,6 +486,138 @@ def test_bulk_worker_real_gateway_backend_skips_duplicate_exact_preflight(
     assert result == "summary"
 
 
+def test_bulk_worker_parses_provider_prompt_limit_error(tmp_path: Path) -> None:
+    class _PromptLimitBackend(_ResultBackend):
+        def __init__(self) -> None:
+            error = RuntimeError("context_length_exceeded")
+            error.body = {
+                "error": {
+                    "message": (
+                        "Input tokens exceed the configured limit of 272000 tokens. "
+                        "Your messages resulted in 380475 tokens. Please reduce the length "
+                        "of the messages."
+                    ),
+                    "code": "context_length_exceeded",
+                }
+            }
+            super().__init__(error)
+
+    group = BulkAnalysisGroup.create("Group")
+    worker = BulkAnalysisWorker(
+        project_dir=tmp_path,
+        group=group,
+        files=[],
+        metadata=ProjectMetadata(case_name="Case"),
+        force_rerun=False,
+        llm_backend=_PromptLimitBackend(),
+    )
+
+    with pytest.raises(_ProviderPromptLimitError) as exc_info:
+        worker._invoke_provider(
+            provider=object(),
+            provider_config=ProviderConfig(provider_id="openai", model="gpt-5-mini"),
+            prompt="Prompt",
+            system_prompt="System",
+            input_budget=300_000,
+        )
+
+    assert exc_info.value.configured_limit == 272_000
+    assert exc_info.value.actual_tokens == 380_475
+
+
+def test_bulk_worker_retries_chunked_document_after_provider_limit_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_dir = tmp_path
+    source_path = project_dir / "converted_documents" / "doc.md"
+    source_path.parent.mkdir(parents=True, exist_ok=True)
+    source_path.write_text("body", encoding="utf-8")
+
+    document = worker_module.BulkAnalysisDocument(
+        source_path=source_path,
+        relative_path="converted_documents/doc.md",
+        output_path=project_dir / "bulk_analysis" / "group" / "doc.md",
+    )
+    group = BulkAnalysisGroup.create("Group")
+    group.provider_id = "openai"
+    group.model = "gpt-5-mini"
+    worker = BulkAnalysisWorker(
+        project_dir=project_dir,
+        group=group,
+        files=[],
+        metadata=ProjectMetadata(case_name="Case"),
+        force_rerun=False,
+        llm_backend=_NoNativeBackend(),
+    )
+    bundle = PromptBundle(system_template="System", user_template="Analyze {document_content}")
+    provider = worker._create_provider(ProviderConfig(provider_id="openai", model="gpt-5-mini"))
+    source_context = SourceFileContext(
+        absolute_path=source_path.resolve(),
+        relative_path=document.relative_path,
+    )
+    manifest_path = _manifest_path(project_dir, group)
+    recovery_store = worker_module.BulkRecoveryStore(project_dir / "bulk_analysis" / group.folder_name)
+    recovery_manifest = recovery_store.load_map_manifest()
+
+    monkeypatch.setattr(worker, "_load_document", lambda _document: ("body", {}, source_context))
+    monkeypatch.setattr(worker_module, "should_chunk", lambda *_args, **_kwargs: (True, 3_704_406, 200_000))
+    monkeypatch.setattr(worker, "_count_prompt_tokens", lambda *_args, **_kwargs: 1_000)
+
+    chunk_targets: list[int] = []
+
+    def _fake_generate(*, initial_chunk_tokens, **_kwargs):
+        chunk_targets.append(initial_chunk_tokens)
+        if initial_chunk_tokens > 150_000:
+            return ["chunk-one"]
+        return ["chunk-one", "chunk-two"]
+
+    monkeypatch.setattr(worker, "_generate_fitting_chunks", _fake_generate)
+
+    invoke_calls: list[str] = []
+
+    def _fake_execute_chunk_task(self, *, spec, **_kwargs):  # noqa: ANN001
+        invoke_calls.append(spec.context_label)
+        if spec.context_label.startswith("chunk 1/1"):
+            raise _ProviderPromptLimitError(
+                configured_limit=272_000,
+                actual_tokens=380_475,
+                message="Input tokens exceed the configured limit of 272000 tokens.",
+            )
+        return worker_module._ChunkTaskResult(
+            chunk_index=spec.chunk_index,
+            chunk_checksum=spec.chunk_checksum,
+            summary="summary",
+            usage={"input_tokens": 0, "output_tokens": 0, "cost": 0.0},
+        )
+
+    monkeypatch.setattr(BulkAnalysisWorker, "_execute_chunk_task", _fake_execute_chunk_task)
+    monkeypatch.setattr(
+        worker_module,
+        "combine_chunk_summaries_hierarchical",
+        lambda summaries, **_kwargs: "combined:" + "|".join(summaries),
+    )
+
+    result, run_details, _placeholders = worker._process_document(
+        provider=provider,
+        provider_config=ProviderConfig(provider_id="openai", model="gpt-5-mini"),
+        bundle=bundle,
+        system_prompt="System",
+        document=document,
+        global_placeholders={},
+        manifest={"version": 2, "signature": None, "documents": {}},
+        prompt_hash="prompt-hash",
+        manifest_path=manifest_path,
+        recovery_store=recovery_store,
+        recovery_manifest=recovery_manifest,
+    )
+
+    assert result == "combined:summary|summary"
+    assert run_details["chunk_count"] == 2
+    assert chunk_targets[0] > chunk_targets[1]
+    assert invoke_calls[0] == "chunk 1/1 for 'converted_documents/doc.md'"
+
+
 def test_bulk_worker_applies_reasoning_settings_to_llm_request(tmp_path: Path) -> None:
     group = BulkAnalysisGroup.create("Group")
     group.use_reasoning = True
@@ -836,3 +971,105 @@ def test_bulk_worker_surfaces_gateway_spend_limit_rejection(
 
     assert failures == [("doc.md", "Gateway spend limit exceeded")]
     assert finished == [(0, 1)]
+
+
+def test_bulk_worker_chunk_fanout_uses_env_override(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worker = BulkAnalysisWorker(
+        project_dir=tmp_path,
+        group=BulkAnalysisGroup.create("Group"),
+        files=[],
+        metadata=ProjectMetadata(case_name="Case"),
+        force_rerun=False,
+    )
+
+    assert worker._chunk_fanout_max_concurrency() == 4
+
+    monkeypatch.setenv("LLESTRADE_BULK_MAP_CHUNK_MAX_CONCURRENCY", "8")
+    assert worker._chunk_fanout_max_concurrency() == 8
+
+    monkeypatch.setenv("LLESTRADE_BULK_MAP_CHUNK_MAX_CONCURRENCY", "0")
+    assert worker._chunk_fanout_max_concurrency() == 4
+
+    monkeypatch.setenv("LLESTRADE_BULK_MAP_CHUNK_MAX_CONCURRENCY", "invalid")
+    assert worker._chunk_fanout_max_concurrency() == 4
+
+
+def test_bulk_worker_chunked_document_reassembles_parallel_results_in_order(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_dir = tmp_path
+    source_path = project_dir / "converted_documents" / "doc.md"
+    source_path.parent.mkdir(parents=True, exist_ok=True)
+    source_path.write_text("body", encoding="utf-8")
+
+    group = BulkAnalysisGroup.create("Group")
+    group.provider_id = "openai"
+    group.model = "gpt-5-mini"
+    worker = BulkAnalysisWorker(
+        project_dir=project_dir,
+        group=group,
+        files=[],
+        metadata=ProjectMetadata(case_name="Case"),
+        force_rerun=False,
+        llm_backend=_NoNativeBackend(),
+    )
+    document = worker_module.BulkAnalysisDocument(
+        source_path=source_path,
+        relative_path="converted_documents/doc.md",
+        output_path=project_dir / "bulk_analysis" / "group" / "doc.md",
+    )
+    manifest = {"version": 2, "signature": None, "documents": {}}
+    manifest_path = worker_module._manifest_path(project_dir, group)
+    recovery_store = worker_module.BulkRecoveryStore(project_dir / "bulk_analysis" / group.folder_name)
+    recovery_manifest = recovery_store.load_map_manifest()
+    completion_order: list[int] = []
+
+    monkeypatch.setenv("LLESTRADE_BULK_MAP_CHUNK_MAX_CONCURRENCY", "3")
+    monkeypatch.setattr(BulkAnalysisWorker, "_create_provider", lambda self, *_args, **_kwargs: object())
+
+    def _fake_execute_chunk_task(self, *, spec, **_kwargs):  # noqa: ANN001
+        time.sleep({1: 0.05, 2: 0.01, 3: 0.03}[spec.chunk_index])
+        completion_order.append(spec.chunk_index)
+        return worker_module._ChunkTaskResult(
+            chunk_index=spec.chunk_index,
+            chunk_checksum=spec.chunk_checksum,
+            summary=f"summary-{spec.chunk_index}",
+            usage={"input_tokens": spec.chunk_index, "output_tokens": 1, "cost": 0.1 * spec.chunk_index},
+        )
+
+    monkeypatch.setattr(BulkAnalysisWorker, "_execute_chunk_task", _fake_execute_chunk_task)
+    monkeypatch.setattr(
+        worker_module,
+        "combine_chunk_summaries_hierarchical",
+        lambda summaries, **_kwargs: "combined:" + "|".join(summaries),
+    )
+
+    result, run_details, _ = worker._process_chunked_document(
+        provider=object(),
+        provider_config=ProviderConfig(provider_id="openai", model="gpt-5-mini"),
+        bundle=PromptBundle(system_template="System", user_template="Analyze {document_content}"),
+        system_prompt="System",
+        document=document,
+        doc_placeholders={},
+        manifest=manifest,
+        prompt_hash="prompt-hash",
+        manifest_path=manifest_path,
+        recovery_store=recovery_store,
+        recovery_manifest=recovery_manifest,
+        run_details={},
+        body="body",
+        chunks=["chunk-1", "chunk-2", "chunk-3"],
+        input_budget=100_000,
+    )
+
+    assert completion_order != [1, 2, 3]
+    assert sorted(completion_order) == [1, 2, 3]
+    assert result == "combined:summary-1|summary-2|summary-3"
+    assert run_details["chunk_count"] == 3
+    assert manifest["documents"]["converted_documents/doc.md"]["chunks_done"] == [1, 2, 3]
+    assert recovery_manifest["actual_usage"] == {"input_tokens": 6, "output_tokens": 3}
+    assert recovery_manifest["actual_cost"] == pytest.approx(0.6)

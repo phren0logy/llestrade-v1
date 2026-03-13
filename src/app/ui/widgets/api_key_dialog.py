@@ -6,6 +6,12 @@ import json
 import logging
 from typing import Any, Dict
 
+from src.app.core.llm_operation_settings import default_provider_catalog_for_transport
+from src.app.workers.llm_backend import (
+    PydanticAIGatewayBackend,
+    reset_gateway_access_check_cache,
+)
+
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QFormLayout,
     QLineEdit, QPushButton, QLabel, QGroupBox,
@@ -125,8 +131,8 @@ class APIKeyDialog(QDialog):
         gateway_layout = QFormLayout(gateway_group)
 
         gateway_info = QLabel(
-            "Optional custom base URL for a self-hosted gateway. Leave blank to use the managed gateway "
-            "or the environment variable override."
+            "This app key is the credential used for provider/model selections whenever gateway mode is enabled. "
+            "Set a custom base URL only for a self-hosted gateway deployment."
         )
         gateway_info.setWordWrap(True)
         gateway_layout.addRow(gateway_info)
@@ -478,6 +484,9 @@ class APIKeyDialog(QDialog):
         """Save API keys and settings to secure storage."""
         saved_count = 0
         errors = []
+        warnings = []
+        previous_gateway_settings = self.settings.get("pydantic_ai_gateway_settings", {}) or {}
+        previous_gateway_key = str(self.settings.get_api_key("pydantic_ai_gateway") or "").strip()
         
         # Save API keys
         for provider, field in self.api_fields.items():
@@ -536,6 +545,12 @@ class APIKeyDialog(QDialog):
                 "route": gateway_route or None,
             },
         )
+        gateway_effective_key = self._effective_secret_field_value(self.gateway_api_key)
+        gateway_changed = (
+            gateway_effective_key != previous_gateway_key
+            or (str(previous_gateway_settings.get("base_url") or "").strip() or None) != (gateway_base_url or None)
+            or (str(previous_gateway_settings.get("route") or "").strip() or None) != (gateway_route or None)
+        )
 
         target = self.observability_target.currentData() or "phoenix_local"
         observability_headers: dict[str, str] = {}
@@ -577,13 +592,91 @@ class APIKeyDialog(QDialog):
                 "otlp_headers": observability_headers,
             }
             self.settings.set("observability_settings", observability_settings)
-            if saved_count > 0:
+            if gateway_changed:
+                reset_gateway_access_check_cache()
+                gateway_warning = self._validate_saved_gateway_settings(
+                    api_key=gateway_effective_key or None,
+                    base_url=gateway_base_url or None,
+                    route=gateway_route or None,
+                )
+                if gateway_warning:
+                    warnings.append(gateway_warning)
+            if warnings:
+                QMessageBox.warning(
+                    self,
+                    "Gateway Validation Warning",
+                    "\n\n".join(warnings),
+                )
+            elif saved_count > 0:
                 QMessageBox.information(
                     self,
                     "Settings Saved",
                     f"Successfully saved {saved_count} API key(s) and settings."
                 )
             self.accept()
+
+    @staticmethod
+    def _effective_secret_field_value(field: QLineEdit) -> str:
+        text = field.text().strip()
+        if bool(field.property("has_saved_key")) and not bool(field.property("key_dirty")):
+            if text == APIKeyDialog._MASKED_SECRET:
+                return str(field.property("saved_key_value") or "").strip()
+        if text == APIKeyDialog._MASKED_SECRET:
+            return str(field.property("saved_key_value") or "").strip()
+        return text
+
+    def _validate_saved_gateway_settings(
+        self,
+        *,
+        api_key: str | None,
+        base_url: str | None,
+        route: str | None,
+    ) -> str | None:
+        provider_catalog = default_provider_catalog_for_transport(include_azure=True, transport="gateway")
+        probe_provider = next((provider for provider in provider_catalog if provider.models), None)
+        if probe_provider is None:
+            return None
+        probe_model = probe_provider.models[0].model_id if probe_provider.models else None
+        backend = PydanticAIGatewayBackend(
+            api_key=api_key,
+            base_url=base_url,
+            route=route,
+        )
+        result = backend.verify_gateway_access(
+            probe_provider.provider_id,
+            probe_model,
+            timeout_seconds=5.0,
+            force=True,
+        )
+        if result.ok:
+            return None
+        route_text = f"\nRoute: {result.route}" if result.route else ""
+        status_text = f"\nGateway response: HTTP {result.status_code}" if result.status_code else ""
+        if result.kind in {"auth_invalid", "auth_forbidden"}:
+            return (
+                "The saved Pydantic AI Gateway app key was rejected by the gateway.\n\n"
+                f"Validation probe: {result.provider_id}/{result.model or '<default>'}{route_text}{status_text}\n"
+                f"Gateway message: {result.message}\n\n"
+                "Bulk and report runs will be blocked until this key is corrected."
+            )
+        if result.kind == "route_missing":
+            return (
+                "The saved gateway route/provider configuration could not be validated with the default probe.\n\n"
+                f"Validation probe: {result.provider_id}/{result.model or '<default>'}{route_text}{status_text}\n"
+                f"Gateway message: {result.message}\n\n"
+                "Runs will validate the selected provider/model again before they start."
+            )
+        if result.kind == "missing_config":
+            return (
+                "Gateway mode is enabled, but the saved gateway configuration is incomplete.\n\n"
+                f"Gateway message: {result.message}"
+            )
+        return (
+            "The saved gateway settings could not be validated.\n\n"
+            f"Validation probe: {result.provider_id}/{result.model or '<default>'}{route_text}{status_text}\n"
+            f"Gateway message: {result.message}\n\n"
+            "Runs will validate the selected provider/model again before they start."
+        )
     
     @staticmethod
     def configure_api_keys(settings, parent=None):

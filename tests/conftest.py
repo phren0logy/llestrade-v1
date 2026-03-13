@@ -81,8 +81,36 @@ def _isolate_settings_dir(tmp_path, monkeypatch: pytest.MonkeyPatch):
     settings_dir.mkdir()
     monkeypatch.setenv("LLESTRADE_USER_ROOT", str(user_root))
     monkeypatch.setenv("LLESTRADE_SETTINGS_DIR", str(settings_dir))
+    monkeypatch.setenv("LLESTRADE_KEYRING_SERVICE_NAME", f"LlestradeTests-{tmp_path.name}")
     monkeypatch.setenv("LLESTRADE_QSETTINGS_ORG", "LlestradeTests")
     monkeypatch.setenv("LLESTRADE_QSETTINGS_APP", f"Settings-{tmp_path.name}")
+    yield
+
+
+@pytest.fixture(autouse=True)
+def _stub_gateway_preflight_for_ui_tests(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch):
+    """Prevent GUI tests from reaching the live gateway preflight path."""
+
+    if "ui" not in request.keywords:
+        yield
+        return
+
+    from src.app.workers.llm_backend import GatewayAccessCheck, PydanticAIGatewayBackend
+
+    def _ok_gateway_check(self, provider_id: str, model: str | None, *, timeout_seconds: float = 5.0, force: bool = False):  # noqa: ANN001
+        _ = self, timeout_seconds, force
+        return GatewayAccessCheck(
+            ok=True,
+            kind="ok",
+            status_code=200,
+            message="stubbed for UI tests",
+            base_url="https://gateway.test",
+            route="llm",
+            provider_id=provider_id,
+            model=model,
+        )
+
+    monkeypatch.setattr(PydanticAIGatewayBackend, "verify_gateway_access", _ok_gateway_check)
     yield
 
 

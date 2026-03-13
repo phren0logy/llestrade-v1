@@ -9,6 +9,7 @@ from PySide6.QtWidgets import QApplication, QMessageBox, QPushButton
 
 _ = PySide6
 
+import src.app.ui.widgets.api_key_dialog as api_key_dialog_module
 from src.app.core.secure_settings import SecureSettings
 from src.app.ui.widgets.api_key_dialog import APIKeyDialog
 
@@ -174,6 +175,81 @@ def test_api_key_dialog_reports_mismatched_saved_key(
 
     assert warnings
     assert "does not match the value entered" in warnings[0]
+
+
+def test_api_key_dialog_resets_gateway_probe_cache_and_warns_on_invalid_gateway_key(
+    tmp_path: Path,
+    qt_app: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert qt_app is not None
+    monkeypatch.setenv("LLESTRADE_SETTINGS_DIR", str(tmp_path / "settings"))
+    warnings: list[str] = []
+    monkeypatch.setattr(QMessageBox, "information", lambda *args, **kwargs: QMessageBox.Ok)
+    monkeypatch.setattr(
+        QMessageBox,
+        "warning",
+        lambda _parent, _title, message: warnings.append(message) or QMessageBox.Ok,
+    )
+
+    settings = SecureSettings()
+    settings.set_api_key("pydantic_ai_gateway", "gateway-key-1")
+
+    reset_calls = {"count": 0}
+
+    def _fake_reset() -> None:
+        reset_calls["count"] += 1
+
+    monkeypatch.setattr(api_key_dialog_module, "reset_gateway_access_check_cache", _fake_reset)
+    monkeypatch.setattr(
+        api_key_dialog_module,
+        "default_provider_catalog_for_transport",
+        lambda **_kwargs: (type("Provider", (), {"provider_id": "anthropic", "models": (type("Model", (), {"model_id": "claude-sonnet-4-5"})(),)})(),),
+    )
+
+    class _Result:
+        ok = False
+        kind = "auth_invalid"
+        status_code = 401
+        message = "Unauthorized - Key not found"
+        route = "bulk"
+        provider_id = "anthropic"
+        model = "claude-sonnet-4-5"
+
+    class _Backend:
+        def __init__(self, *, api_key=None, base_url=None, route=None) -> None:
+            self.api_key = api_key
+            self.base_url = base_url
+            self.route = route
+
+        def verify_gateway_access(self, provider_id: str, model: str | None, *, timeout_seconds: float = 5.0, force: bool = False):  # noqa: ANN001
+            assert self.api_key == "gateway-key-2"
+            assert self.base_url == "https://gateway.example.com"
+            assert self.route == "bulk"
+            assert provider_id == "anthropic"
+            assert model == "claude-sonnet-4-5"
+            assert timeout_seconds == 5.0
+            assert force is True
+            return _Result()
+
+    monkeypatch.setattr(
+        api_key_dialog_module,
+        "PydanticAIGatewayBackend",
+        _Backend,
+    )
+
+    dialog = APIKeyDialog(settings)
+    try:
+        dialog.gateway_base_url.setText("https://gateway.example.com")
+        dialog.gateway_route.setText("bulk")
+        dialog.gateway_api_key.setText("gateway-key-2")
+        dialog.save_keys()
+    finally:
+        dialog.deleteLater()
+
+    assert reset_calls["count"] == 1
+    assert warnings
+    assert "rejected by the gateway" in warnings[0]
 
 
 def test_api_key_dialog_loads_and_saves_observability_settings(

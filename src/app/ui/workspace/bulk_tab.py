@@ -7,6 +7,7 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QHBoxLayout,
     QLabel,
+    QProgressBar,
     QPushButton,
     QTreeWidget,
     QVBoxLayout,
@@ -27,6 +28,16 @@ class BulkAnalysisTab(QWidget):
         self.refresh_button = QPushButton("Refresh")
 
         self.info_label = QLabel("No bulk analysis groups yet.")
+        self.active_progress_group_label = QLabel("")
+        self.active_progress_group_label.setStyleSheet("font-weight: 600;")
+        self.active_progress_bar = QProgressBar()
+        self.active_progress_bar.setRange(0, 100)
+        self.active_progress_bar.setValue(0)
+        self.active_progress_status_label = QLabel("")
+        self.active_progress_detail_label = QLabel("")
+        self.active_progress_detail_label.setStyleSheet("color: #666;")
+        self.active_progress_widget = QWidget()
+        self.active_progress_widget.hide()
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
         self.log_text.setMaximumHeight(120)
@@ -73,6 +84,14 @@ class BulkAnalysisTab(QWidget):
         layout.addLayout(header_layout)
 
         layout.addWidget(self.info_label)
+        progress_layout = QVBoxLayout(self.active_progress_widget)
+        progress_layout.setContentsMargins(0, 0, 0, 0)
+        progress_layout.setSpacing(4)
+        progress_layout.addWidget(self.active_progress_group_label)
+        progress_layout.addWidget(self.active_progress_bar)
+        progress_layout.addWidget(self.active_progress_status_label)
+        progress_layout.addWidget(self.active_progress_detail_label)
+        layout.addWidget(self.active_progress_widget)
         layout.addWidget(self.log_text)
 
         content_layout = QHBoxLayout()

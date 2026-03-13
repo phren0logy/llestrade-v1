@@ -8,11 +8,13 @@ from typing import Any, Dict
 
 import httpx
 import pytest
+from pydantic_ai.exceptions import ModelHTTPError
 from pydantic_ai.messages import ModelResponse, TextPart
 from pydantic_ai.usage import RequestUsage
 
 from src.app.workers.llm_backend import (
     DirectProviderMetadata,
+    GatewayAccessCheck,
     LLMInvocationRequest,
     LLMProviderCapabilities,
     LLMProviderRequest,
@@ -22,6 +24,7 @@ from src.app.workers.llm_backend import (
     build_model_settings,
     normalize_model_name,
     provider_capabilities,
+    reset_gateway_access_check_cache,
     resolve_model_name,
     supported_direct_provider_ids,
     supported_gateway_provider_ids,
@@ -36,6 +39,7 @@ class _ProviderMeta:
 
 @pytest.fixture(autouse=True)
 def gateway_test_event_loop() -> Any:
+    reset_gateway_access_check_cache()
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
@@ -43,6 +47,7 @@ def gateway_test_event_loop() -> Any:
     finally:
         asyncio.set_event_loop(None)
         loop.close()
+        reset_gateway_access_check_cache()
 
 
 def test_direct_provider_backend_requires_direct_provider_metadata() -> None:
@@ -147,13 +152,36 @@ def test_build_model_settings_adds_provider_specific_reasoning_controls() -> Non
     )["gemini_thinking_config"] == {"include_thoughts": True}
     openai_settings = build_model_settings(
         "openai",
-        "gpt-4.1",
+        "gpt-5.1",
         temperature=0.2,
         max_tokens=32_000,
         use_reasoning=True,
     )
     assert openai_settings["openai_reasoning_effort"] == "medium"
     assert openai_settings["openai_reasoning_summary"] == "detailed"
+    assert "temperature" not in openai_settings
+
+
+def test_build_model_settings_keeps_sampling_for_openai_models_when_supported() -> None:
+    settings = build_model_settings(
+        "openai",
+        "gpt-5.1",
+        temperature=0.2,
+        max_tokens=32_000,
+        use_reasoning=False,
+    )
+    assert settings["temperature"] == 0.2
+
+
+def test_build_model_settings_drops_sampling_for_always_reasoning_openai_models() -> None:
+    settings = build_model_settings(
+        "openai",
+        "gpt-5-mini",
+        temperature=0.2,
+        max_tokens=32_000,
+        use_reasoning=False,
+    )
+    assert "temperature" not in settings
 
 
 def test_build_model_settings_rejects_unsupported_reasoning_provider() -> None:
@@ -689,11 +717,11 @@ def test_direct_backend_capabilities_delegate_to_shared_capability_map() -> None
 def test_gateway_backend_capabilities_delegate_to_shared_capability_map() -> None:
     backend = PydanticAIGatewayBackend(api_key="gateway-key")
 
-    assert backend.capabilities("openai", "gpt-4.1").reasoning_mode == "openai"
-    assert backend.capabilities("openai", "gpt-4.1").supports_pre_request_token_count is False
+    assert backend.capabilities("openai", "gpt-5.1").reasoning_mode == "openai"
+    assert backend.capabilities("openai", "gpt-5.1").supports_pre_request_token_count is False
     settings = backend.build_model_settings(
         "openai",
-        "gpt-4.1",
+        "gpt-5.1",
         temperature=0.2,
         max_tokens=1024,
         use_reasoning=True,
@@ -852,6 +880,221 @@ def test_gateway_backend_loads_api_key_from_secure_settings(
     backend = PydanticAIGatewayBackend(api_key=None, base_url="https://gateway.example.com")
 
     assert backend._current_api_key() == "gateway-key-from-settings"
+
+
+def test_gateway_backend_verify_gateway_access_classifies_invalid_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _fake_model_request_sync(*_args, **_kwargs):  # noqa: ANN002, ANN003
+        raise ModelHTTPError(
+            401,
+            "gemini-2.5-flash-lite",
+            {"message": "Unauthorized - Key not found", "status": "Unauthorized"},
+        )
+
+    monkeypatch.setattr("pydantic_ai.direct.model_request_sync", _fake_model_request_sync)
+
+    backend = PydanticAIGatewayBackend(api_key="gateway-key", base_url="https://gateway.example.com")
+    monkeypatch.setattr(backend, "_build_model", lambda **_kwargs: object(), raising=True)
+    monkeypatch.setattr(backend, "_build_gateway_http_client", lambda **_kwargs: None, raising=True)
+
+    result = backend.verify_gateway_access("gemini", "gemini-2.5-flash-lite", force=True)
+
+    assert result.ok is False
+    assert result.kind == "auth_invalid"
+    assert result.status_code == 401
+    assert result.message == "Unauthorized - Key not found"
+
+
+def test_gateway_backend_verify_gateway_access_classifies_forbidden_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _fake_model_request_sync(*_args, **_kwargs):  # noqa: ANN002, ANN003
+        raise ModelHTTPError(
+            403,
+            "claude-sonnet-4-5",
+            {"message": "Unauthorized - Key disabled", "status": "Forbidden"},
+        )
+
+    monkeypatch.setattr("pydantic_ai.direct.model_request_sync", _fake_model_request_sync)
+
+    backend = PydanticAIGatewayBackend(api_key="gateway-key", base_url="https://gateway.example.com")
+    monkeypatch.setattr(backend, "_build_model", lambda **_kwargs: object(), raising=True)
+    monkeypatch.setattr(backend, "_build_gateway_http_client", lambda **_kwargs: None, raising=True)
+
+    result = backend.verify_gateway_access("anthropic", "claude-sonnet-4-5", force=True)
+
+    assert result.ok is False
+    assert result.kind == "auth_forbidden"
+    assert result.status_code == 403
+
+
+def test_gateway_backend_verify_gateway_access_classifies_route_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _fake_model_request_sync(*_args, **_kwargs):  # noqa: ANN002, ANN003
+        raise ModelHTTPError(
+            404,
+            "claude-sonnet-4-5",
+            {"message": "Route not found: bulk", "status": "Not Found"},
+        )
+
+    monkeypatch.setattr("pydantic_ai.direct.model_request_sync", _fake_model_request_sync)
+
+    backend = PydanticAIGatewayBackend(
+        api_key="gateway-key",
+        base_url="https://gateway.example.com",
+        route="bulk",
+    )
+    monkeypatch.setattr(backend, "_build_model", lambda **_kwargs: object(), raising=True)
+    monkeypatch.setattr(backend, "_build_gateway_http_client", lambda **_kwargs: None, raising=True)
+
+    result = backend.verify_gateway_access("anthropic", "claude-sonnet-4-5", force=True)
+
+    assert result.ok is False
+    assert result.kind == "route_missing"
+    assert result.status_code == 404
+    assert result.route == "bulk"
+
+
+def test_gateway_backend_verify_gateway_access_uses_env_over_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class _FakeSecureSettings:
+        def get_api_key(self, provider: str) -> str | None:
+            assert provider == "pydantic_ai_gateway"
+            return "settings-key"
+
+        def get(self, key: str, default: object = None) -> object:
+            if key == "pydantic_ai_gateway_settings":
+                return {"base_url": "https://settings.example.com", "route": "settings-route"}
+            return default
+
+    def _fake_probe(*, provider_id: str, model_name: str, api_key: str, base_url: str | None, route: str | None, timeout_seconds: float):  # noqa: ANN001
+        captured.update(
+            provider_id=provider_id,
+            model_name=model_name,
+            api_key=api_key,
+            base_url=base_url,
+            route=route,
+            timeout_seconds=timeout_seconds,
+        )
+        return GatewayAccessCheck(
+            ok=True,
+            kind="ok",
+            status_code=200,
+            message="ok",
+            base_url=base_url,
+            route=route,
+            provider_id=provider_id,
+            model=model_name,
+        )
+
+    monkeypatch.setattr("src.app.core.secure_settings.SecureSettings", _FakeSecureSettings)
+    monkeypatch.setenv("PYDANTIC_AI_GATEWAY_API_KEY", "env-key")
+    monkeypatch.setenv("PYDANTIC_AI_GATEWAY_BASE_URL", "https://env.example.com")
+    monkeypatch.setenv("PYDANTIC_AI_GATEWAY_ROUTE", "env-route")
+
+    backend = PydanticAIGatewayBackend(api_key=None, base_url=None, route=None)
+    monkeypatch.setattr(backend, "_probe_gateway_access", _fake_probe, raising=True)
+
+    result = backend.verify_gateway_access("anthropic", "claude-sonnet-4-5", force=True)
+
+    assert result.ok is True
+    assert captured == {
+        "provider_id": "anthropic",
+        "model_name": "claude-sonnet-4-5",
+        "api_key": "env-key",
+        "base_url": "https://env.example.com",
+        "route": "env-route",
+        "timeout_seconds": 5.0,
+    }
+
+
+def test_gateway_backend_verify_gateway_access_caches_successes_and_auth_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = {"count": 0}
+
+    def _fake_probe(**kwargs):  # noqa: ANN003
+        calls["count"] += 1
+        return GatewayAccessCheck(
+            ok=False,
+            kind="auth_invalid",
+            status_code=401,
+            message="Unauthorized - Key not found",
+            base_url=kwargs["base_url"],
+            route=kwargs["route"],
+            provider_id=kwargs["provider_id"],
+            model=kwargs["model_name"],
+        )
+
+    backend = PydanticAIGatewayBackend(api_key="gateway-key", base_url="https://gateway.example.com")
+    monkeypatch.setattr(backend, "_probe_gateway_access", _fake_probe, raising=True)
+
+    first = backend.verify_gateway_access("anthropic", "claude-sonnet-4-5")
+    second = backend.verify_gateway_access("anthropic", "claude-sonnet-4-5")
+
+    assert first.kind == "auth_invalid"
+    assert second.kind == "auth_invalid"
+    assert calls["count"] == 1
+
+
+def test_gateway_backend_verify_gateway_access_cache_reset_forces_recheck(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = {"count": 0}
+
+    def _fake_probe(**kwargs):  # noqa: ANN003
+        calls["count"] += 1
+        return GatewayAccessCheck(
+            ok=True,
+            kind="ok",
+            status_code=200,
+            message="ok",
+            base_url=kwargs["base_url"],
+            route=kwargs["route"],
+            provider_id=kwargs["provider_id"],
+            model=kwargs["model_name"],
+        )
+
+    backend = PydanticAIGatewayBackend(api_key="gateway-key", base_url="https://gateway.example.com")
+    monkeypatch.setattr(backend, "_probe_gateway_access", _fake_probe, raising=True)
+
+    backend.verify_gateway_access("anthropic", "claude-sonnet-4-5")
+    reset_gateway_access_check_cache()
+    backend.verify_gateway_access("anthropic", "claude-sonnet-4-5")
+
+    assert calls["count"] == 2
+
+
+def test_gateway_backend_verify_gateway_access_does_not_cache_transient_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = {"count": 0}
+
+    def _fake_probe(**kwargs):  # noqa: ANN003
+        calls["count"] += 1
+        return GatewayAccessCheck(
+            ok=False,
+            kind="unreachable",
+            status_code=None,
+            message="connect failed",
+            base_url=kwargs["base_url"],
+            route=kwargs["route"],
+            provider_id=kwargs["provider_id"],
+            model=kwargs["model_name"],
+        )
+
+    backend = PydanticAIGatewayBackend(api_key="gateway-key", base_url="https://gateway.example.com")
+    monkeypatch.setattr(backend, "_probe_gateway_access", _fake_probe, raising=True)
+
+    backend.verify_gateway_access("anthropic", "claude-sonnet-4-5")
+    backend.verify_gateway_access("anthropic", "claude-sonnet-4-5")
+
+    assert calls["count"] == 2
 
 
 def test_gateway_backend_skips_pre_request_token_counting_in_sync_invoke_response(
