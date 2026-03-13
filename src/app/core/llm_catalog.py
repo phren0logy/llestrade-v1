@@ -482,10 +482,6 @@ def _supports_gemini_generate_content(model: object) -> bool:
 def _is_excluded_gemini_model(model_id: str) -> bool:
     normalized = model_id.lower()
     excluded_tokens = (
-        "preview",
-        "beta",
-        "experimental",
-        "-exp",
         "latest",
         "image",
         "vision",

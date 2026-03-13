@@ -157,7 +157,7 @@ def test_runtime_default_model_for_gemini_uses_cache_when_live_discovery_fails(
     assert llm_catalog.runtime_default_model_for_provider("gemini") == "gemini-2.5-pro"
 
 
-def test_parse_gemini_discovered_model_filters_non_text_and_preview_variants() -> None:
+def test_parse_gemini_discovered_model_allows_preview_but_filters_non_text_variants() -> None:
     preview = type(
         "Model",
         (),
@@ -189,7 +189,10 @@ def test_parse_gemini_discovered_model_filters_non_text_and_preview_variants() -
         },
     )()
 
-    assert llm_catalog._parse_gemini_discovered_model(preview) is None
+    parsed_preview = llm_catalog._parse_gemini_discovered_model(preview)
+    assert parsed_preview is not None
+    assert parsed_preview.model_id == "gemini-2.5-pro-preview-03-25"
+    assert parsed_preview.context_window == 1_048_576
     assert llm_catalog._parse_gemini_discovered_model(image) is None
 
     parsed = llm_catalog._parse_gemini_discovered_model(stable)
