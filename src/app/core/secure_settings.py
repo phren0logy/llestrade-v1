@@ -137,6 +137,19 @@ class SecureSettings(QObject):
         }
     
     # API Key Management (Secure)
+    def _store_api_key_in_settings_file(self, provider: str, api_key: str) -> bool:
+        """Persist API key in the JSON settings store when keyring is unavailable."""
+
+        self.logger.warning(f"Storing API key for {provider} in settings file (not secure)")
+        if "api_keys" not in self._settings:
+            self._settings["api_keys"] = {}
+        self._settings["api_keys"][provider] = api_key
+        self._save_settings()
+        with _CACHE_LOCK:
+            self._api_key_cache[(self.service_name, provider)] = api_key
+        self.api_key_changed.emit(provider)
+        return True
+
     def set_api_key(self, provider: str, api_key: str) -> bool:
         """Store API key securely in OS keychain."""
         if not api_key:
@@ -156,18 +169,9 @@ class SecureSettings(QObject):
                 return True
             except Exception as e:
                 self.logger.error(f"Failed to store API key securely: {e}")
-                return False
+                return self._store_api_key_in_settings_file(provider, api_key)
         else:
-            # Fallback to settings file (less secure)
-            self.logger.warning(f"Storing API key for {provider} in settings file (not secure)")
-            if "api_keys" not in self._settings:
-                self._settings["api_keys"] = {}
-            self._settings["api_keys"][provider] = api_key
-            self._save_settings()
-            with _CACHE_LOCK:
-                self._api_key_cache[(self.service_name, provider)] = api_key
-            self.api_key_changed.emit(provider)
-            return True
+            return self._store_api_key_in_settings_file(provider, api_key)
     
     def get_api_key(self, provider: str) -> Optional[str]:
         """Retrieve API key from OS keychain."""
