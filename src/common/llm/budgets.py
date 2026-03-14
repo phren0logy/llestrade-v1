@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Optional
 
 
-DEFAULT_INPUT_BUDGET_RATIO = 0.85
+DEFAULT_INPUT_BUDGET_RATIO = 0.66
 DEFAULT_INPUT_BUDGET_BUFFER = 1_000
 DEFAULT_MIN_INPUT_BUDGET = 4_000
 
@@ -20,17 +20,19 @@ def compute_input_token_budget(
 ) -> int | None:
     """Return a conservative input-token budget for a request.
 
-    The budget leaves explicit space for output tokens and an additional buffer,
-    while also capping the usable prompt size to a fixed percentage of the raw
-    model window. `None` indicates that no meaningful budget could be derived.
+    The budget first reserves explicit space for output tokens and an
+    additional buffer, then applies a global safety ratio to the remaining
+    prompt space. `None` indicates that no meaningful budget could be derived.
     """
 
     if raw_context_window is None or raw_context_window <= 0:
         return None
 
-    ratio_budget = int(raw_context_window * ratio)
     available_budget = raw_context_window - max_output_tokens - buffer_tokens
-    budget = min(ratio_budget, available_budget)
+    if available_budget <= 0:
+        return None
+
+    budget = int(available_budget * ratio)
     if budget <= 0:
         return None
 

@@ -31,7 +31,12 @@ from src.app.core.report_prompt_context import (
     build_report_refinement_placeholders,
 )
 from src.app.core.report_template_sections import load_template_sections
-from src.common.llm.budgets import compute_input_token_budget
+from src.common.llm.request_budget import (
+    compute_preflight_input_budget,
+    compute_request_input_budget,
+    estimate_request_input_tokens,
+    evaluate_request_budget,
+)
 from src.common.llm.tokens import TokenCounter
 from src.app.workers.bulk_analysis_worker import (
     _DEFAULT_MAX_OUTPUT_TOKENS as _BULK_MAX_TOKENS,
@@ -44,7 +49,7 @@ from src.app.workers.bulk_reduce_worker import (
     BulkReduceWorker,
     ProviderConfig as ReduceProviderConfig,
 )
-from src.app.workers.report_common import ReportWorkerBase
+from src.app.workers.report_common import ReportWorkerBase, _MIN_REPORT_INPUT_BUDGET
 from src.app.workers.llm_backend import PydanticAIDirectBackend
 
 
@@ -144,12 +149,12 @@ def _sum_costs(costs: Iterable[float | None]) -> float | None:
 
 
 def _token_estimate(text: str, *, provider_id: str, model_id: str | None) -> int:
-    info = TokenCounter.count(text=text, provider=provider_id, model=model_id or "")
-    if info.get("success"):
-        counted = int(info.get("token_count") or 0)
-        if counted > 0:
-            return counted
-    return max(len(text) // 4, 1)
+    return estimate_request_input_tokens(
+        system_prompt="",
+        user_prompt=text,
+        provider_id=provider_id,
+        model_id=model_id,
+    )
 
 
 def _combine_prompt_tokens(
@@ -158,6 +163,7 @@ def _combine_prompt_tokens(
     metadata: ProjectMetadata | None,
     placeholder_values: Mapping[str, str],
     summary_tokens: Sequence[int],
+    system_prompt: str,
     provider_id: str,
     model_id: str | None,
 ) -> int:
@@ -168,7 +174,12 @@ def _combine_prompt_tokens(
         metadata=metadata,
         placeholder_values=placeholder_values,
     )
-    return _token_estimate(prompt, provider_id=provider_id, model_id=model_id)
+    return estimate_request_input_tokens(
+        system_prompt=system_prompt,
+        user_prompt=prompt,
+        provider_id=provider_id,
+        model_id=model_id,
+    )
 
 
 def _plan_hierarchical_combine_cost(
@@ -176,6 +187,7 @@ def _plan_hierarchical_combine_cost(
     document_name: str,
     metadata: ProjectMetadata | None,
     placeholder_values: Mapping[str, str],
+    system_prompt: str,
     provider_id: str,
     model_id: str | None,
     summary_tokens: Sequence[int],
@@ -201,6 +213,7 @@ def _plan_hierarchical_combine_cost(
                 metadata=metadata,
                 placeholder_values=placeholder_values,
                 summary_tokens=trial,
+                system_prompt=system_prompt,
                 provider_id=provider_id,
                 model_id=model_id,
             )
@@ -212,6 +225,7 @@ def _plan_hierarchical_combine_cost(
                         metadata=metadata,
                         placeholder_values=placeholder_values,
                         summary_tokens=batch,
+                        system_prompt=system_prompt,
                         provider_id=provider_id,
                         model_id=model_id,
                     )
@@ -236,6 +250,7 @@ def _plan_hierarchical_combine_cost(
                             metadata=metadata,
                             placeholder_values=placeholder_values,
                             summary_tokens=batch,
+                            system_prompt=system_prompt,
                             provider_id=provider_id,
                             model_id=model_id,
                         ),
@@ -256,6 +271,7 @@ def _plan_hierarchical_combine_cost(
                     metadata=metadata,
                     placeholder_values=placeholder_values,
                     summary_tokens=batch,
+                    system_prompt=system_prompt,
                     provider_id=provider_id,
                     model_id=model_id,
                 )
@@ -280,6 +296,7 @@ def _plan_hierarchical_combine_cost(
                         metadata=metadata,
                         placeholder_values=placeholder_values,
                         summary_tokens=batch,
+                        system_prompt=system_prompt,
                         provider_id=provider_id,
                         model_id=model_id,
                     ),
@@ -359,10 +376,19 @@ def estimate_bulk_map_cost(
                 ratio=1.0,
                 provider_id=provider_config.provider_id,
             )
-        input_budget = worker._max_input_budget(
+        _, input_budget = compute_request_input_budget(
+            provider_id=provider_config.provider_id,
+            model_id=provider_config.model,
             raw_context_window=raw_context_window,
             max_output_tokens=_BULK_MAX_TOKENS,
+            minimum_budget=_MIN_CHUNK_TOKEN_TARGET,
         )
+        input_budget = compute_preflight_input_budget(
+            provider_id=provider_config.provider_id,
+            model_id=provider_config.model,
+            runtime_input_budget=input_budget,
+            minimum_budget=_MIN_CHUNK_TOKEN_TARGET,
+        ) or _MIN_CHUNK_TOKEN_TARGET
         full_prompt = render_user_prompt(
             bundle,
             metadata,
@@ -370,13 +396,16 @@ def estimate_bulk_map_cost(
             body,
             placeholder_values=doc_placeholders,
         )
-        full_prompt_tokens = worker._count_prompt_tokens(
-            object(),
-            provider_config,
-            system_prompt,
-            full_prompt,
-            allow_backend_preflight=False,
+        full_request = evaluate_request_budget(
+            provider_id=provider_config.provider_id,
+            model_id=provider_config.model,
+            system_prompt=system_prompt,
+            user_prompt=full_prompt,
+            raw_context_window=raw_context_window,
+            max_output_tokens=_BULK_MAX_TOKENS,
+            minimum_budget=_MIN_CHUNK_TOKEN_TARGET,
         )
+        full_prompt_tokens = full_request.input_tokens
         if full_prompt_tokens > input_budget:
             needs_chunking = True
 
@@ -430,7 +459,10 @@ def estimate_bulk_map_cost(
             body=body,
             placeholder_values=doc_placeholders,
             input_budget=input_budget,
-            initial_chunk_tokens=max(min(default_chunk_tokens, int(input_budget * 0.75)), _MIN_CHUNK_TOKEN_TARGET),
+            initial_chunk_tokens=worker._chunk_target_from_budget(
+                input_budget=input_budget,
+                default_chunk_tokens=default_chunk_tokens,
+            ),
         )
         best_summary_tokens: list[int] = []
         ceiling_summary_tokens: list[int] = []
@@ -444,13 +476,16 @@ def estimate_bulk_map_cost(
                 chunk_total=len(chunks),
                 placeholder_values=doc_placeholders,
             )
-            input_tokens = worker._count_prompt_tokens(
-                object(),
-                provider_config,
-                system_prompt,
-                prompt,
-                allow_backend_preflight=False,
+            input_tokens = evaluate_request_budget(
+                provider_id=provider_config.provider_id,
+                model_id=provider_config.model,
+                system_prompt=system_prompt,
+                user_prompt=prompt,
+                raw_context_window=raw_context_window,
+                max_output_tokens=_BULK_MAX_TOKENS,
+                minimum_budget=_MIN_CHUNK_TOKEN_TARGET,
             )
+            input_tokens = input_tokens.input_tokens
             best_out = _estimate_output_tokens(input_tokens, kind="bulk_chunk", max_tokens=_BULK_MAX_TOKENS, mode="best")
             ceiling_out = _estimate_output_tokens(input_tokens, kind="bulk_chunk", max_tokens=_BULK_MAX_TOKENS, mode="ceiling")
             best_summary_tokens.append(best_out)
@@ -464,6 +499,7 @@ def estimate_bulk_map_cost(
                 document_name=document.relative_path,
                 metadata=metadata,
                 placeholder_values=doc_placeholders,
+                system_prompt=system_prompt,
                 provider_id=provider_config.provider_id,
                 model_id=provider_config.model,
                 summary_tokens=best_summary_tokens,
@@ -478,6 +514,7 @@ def estimate_bulk_map_cost(
                 document_name=document.relative_path,
                 metadata=metadata,
                 placeholder_values=doc_placeholders,
+                system_prompt=system_prompt,
                 provider_id=provider_config.provider_id,
                 model_id=provider_config.model,
                 summary_tokens=ceiling_summary_tokens,
@@ -537,7 +574,24 @@ def estimate_bulk_reduce_cost(
     placeholders = worker._build_placeholder_map(reduce_sources=list(contexts.values()))
     system_prompt = render_system_prompt(bundle, metadata, placeholder_values=placeholders)
     content = worker._assemble_combined_content(inputs)
-    input_budget = worker._max_input_budget(provider_cfg, max_output_tokens=32_000) or _MIN_INPUT_TOKEN_BUDGET
+    raw_context_window = normalize_context_window_override(
+        provider_id=provider_cfg.provider_id,
+        model_id=provider_cfg.model,
+        context_window=getattr(group, "model_context_window", None),
+    )
+    _, input_budget = compute_request_input_budget(
+        provider_id=provider_cfg.provider_id,
+        model_id=provider_cfg.model,
+        explicit_context_window=raw_context_window if isinstance(raw_context_window, int) and raw_context_window > 0 else None,
+        max_output_tokens=32_000,
+        minimum_budget=_MIN_INPUT_TOKEN_BUDGET,
+    )
+    input_budget = compute_preflight_input_budget(
+        provider_id=provider_cfg.provider_id,
+        model_id=provider_cfg.model,
+        runtime_input_budget=input_budget,
+        minimum_budget=_MIN_INPUT_TOKEN_BUDGET,
+    ) or _MIN_INPUT_TOKEN_BUDGET
     needs_chunking, token_count, max_tokens = should_chunk(content, provider_cfg.provider_id, provider_cfg.model)
     recovery = BulkRecoveryStore(project_dir / "bulk_analysis" / (getattr(group, "slug", None) or group.folder_name))
     manifest = recovery.load_reduce_manifest()
@@ -553,7 +607,15 @@ def estimate_bulk_reduce_cost(
 
     if not needs_chunking:
         prompt = render_user_prompt(bundle, metadata, group.name, content, placeholder_values=placeholders)
-        input_tokens = _token_estimate(f"{system_prompt}\n\n{prompt}", provider_id=provider_cfg.provider_id, model_id=provider_cfg.model)
+        input_tokens = evaluate_request_budget(
+            provider_id=provider_cfg.provider_id,
+            model_id=provider_cfg.model,
+            system_prompt=system_prompt,
+            user_prompt=prompt,
+            max_output_tokens=32_000,
+            explicit_context_window=raw_context_window if isinstance(raw_context_window, int) and raw_context_window > 0 else None,
+            minimum_budget=_MIN_INPUT_TOKEN_BUDGET,
+        ).input_tokens
         best = _request_cost(
             provider_cfg.provider_id, provider_cfg.model,
             input_tokens=input_tokens,
@@ -594,7 +656,15 @@ def estimate_bulk_reduce_cost(
             chunk_total=len(chunks),
             placeholder_values=placeholders,
         )
-        input_tokens = _token_estimate(f"{system_prompt}\n\n{prompt}", provider_id=provider_cfg.provider_id, model_id=provider_cfg.model)
+        input_tokens = evaluate_request_budget(
+            provider_id=provider_cfg.provider_id,
+            model_id=provider_cfg.model,
+            system_prompt=system_prompt,
+            user_prompt=prompt,
+            max_output_tokens=32_000,
+            explicit_context_window=raw_context_window if isinstance(raw_context_window, int) and raw_context_window > 0 else None,
+            minimum_budget=_MIN_INPUT_TOKEN_BUDGET,
+        ).input_tokens
         best_out = _estimate_output_tokens(input_tokens, kind="reduce_chunk", max_tokens=32_000, mode="best")
         ceiling_out = _estimate_output_tokens(input_tokens, kind="reduce_chunk", max_tokens=32_000, mode="ceiling")
         best_summary_tokens.append(best_out)
@@ -607,6 +677,7 @@ def estimate_bulk_reduce_cost(
             document_name=group.name,
             metadata=metadata,
             placeholder_values=placeholders,
+            system_prompt=system_prompt,
             provider_id=provider_cfg.provider_id,
             model_id=provider_cfg.model,
             summary_tokens=best_summary_tokens,
@@ -621,6 +692,7 @@ def estimate_bulk_reduce_cost(
             document_name=group.name,
             metadata=metadata,
             placeholder_values=placeholders,
+            system_prompt=system_prompt,
             provider_id=provider_cfg.provider_id,
             model_id=provider_cfg.model,
             summary_tokens=ceiling_summary_tokens,
@@ -701,7 +773,15 @@ def estimate_report_draft_cost(
             additional_documents=combined_content.strip(),
         )
         prompt = format_prompt(user_template, user_placeholders)
-        input_tokens = _token_estimate(f"{system_prompt}\n\n{prompt}", provider_id=llm_settings.provider_id, model_id=llm_settings.model_id)
+        input_tokens = evaluate_request_budget(
+            provider_id=llm_settings.provider_id,
+            model_id=llm_settings.model_id,
+            system_prompt=system_prompt,
+            user_prompt=prompt,
+            max_output_tokens=max_report_tokens,
+            explicit_context_window=llm_settings.context_window,
+            minimum_budget=_MIN_REPORT_INPUT_BUDGET,
+        ).input_tokens
         best_out = _estimate_output_tokens(input_tokens, kind="report_section", max_tokens=max_report_tokens, mode="best")
         ceiling_out = _estimate_output_tokens(input_tokens, kind="report_section", max_tokens=max_report_tokens, mode="ceiling")
         best_costs.append(_request_cost(llm_settings.provider_id, llm_settings.model_id, input_tokens=input_tokens, output_tokens=best_out))
@@ -758,7 +838,15 @@ def estimate_report_refinement_cost(
         transcript=transcript_text,
     )
     prompt = format_prompt(user_template, user_placeholders)
-    input_tokens = _token_estimate(f"{system_prompt}\n\n{prompt}", provider_id=llm_settings.provider_id, model_id=llm_settings.model_id)
+    input_tokens = evaluate_request_budget(
+        provider_id=llm_settings.provider_id,
+        model_id=llm_settings.model_id,
+        system_prompt=system_prompt,
+        user_prompt=prompt,
+        max_output_tokens=max_report_tokens,
+        explicit_context_window=llm_settings.context_window,
+        minimum_budget=_MIN_REPORT_INPUT_BUDGET,
+    ).input_tokens
     best = _request_cost(
         llm_settings.provider_id,
         llm_settings.model_id,

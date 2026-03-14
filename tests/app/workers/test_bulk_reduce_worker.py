@@ -589,7 +589,7 @@ def test_bulk_reduce_passes_computed_input_budget_to_backend(
 
     assert result == "summary"
     assert len(backend.requests) == 1
-    assert backend.requests[0].input_tokens_limit == 67_000
+    assert backend.requests[0].input_tokens_limit == 44_220
 
 
 def test_bulk_reduce_ignores_stale_context_override_for_catalog_model(
@@ -612,7 +612,7 @@ def test_bulk_reduce_ignores_stale_context_override_for_catalog_model(
         max_output_tokens=32_000,
     )
 
-    assert budget == 167_000
+    assert budget == 110_220
 
 
 def test_bulk_reduce_applies_reasoning_settings_to_llm_request(tmp_path: Path) -> None:

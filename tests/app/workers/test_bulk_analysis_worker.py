@@ -568,7 +568,7 @@ def test_bulk_worker_retries_chunked_document_after_provider_limit_error(
 
     def _fake_generate(*, initial_chunk_tokens, **_kwargs):
         chunk_targets.append(initial_chunk_tokens)
-        if initial_chunk_tokens > 150_000:
+        if initial_chunk_tokens > 90_000:
             return ["chunk-one"]
         return ["chunk-one", "chunk-two"]
 
@@ -614,6 +614,7 @@ def test_bulk_worker_retries_chunked_document_after_provider_limit_error(
 
     assert result == "combined:summary|summary"
     assert run_details["chunk_count"] == 2
+    assert chunk_targets[0] == 96_888
     assert chunk_targets[0] > chunk_targets[1]
     assert invoke_calls[0] == "chunk 1/1 for 'converted_documents/doc.md'"
 
@@ -808,17 +809,10 @@ def test_invoke_provider_rejects_over_budget_prompt(tmp_path: Path) -> None:
         files=[],
         metadata=ProjectMetadata(case_name="Case"),
         force_rerun=True,
-        llm_backend=_ResultBackend(
-            _model_response("summary", model_name="claude-sonnet-4-5-20250929", output_tokens=1)
-        ),
+        llm_backend=_CountingBackend(token_count=250_000),
     )
 
     config = ProviderConfig(provider_id="anthropic", model="claude-sonnet-4-5-20250929")
-
-    def fake_count(*_args, **_kwargs):  # noqa: ANN001
-        return 250_000
-
-    worker._count_prompt_tokens = fake_count  # type: ignore[method-assign]
 
     with pytest.raises(RuntimeError, match="Prompt exceeds model input budget"):
         worker._invoke_provider(
@@ -1064,6 +1058,7 @@ def test_bulk_worker_chunked_document_reassembles_parallel_results_in_order(
         body="body",
         chunks=["chunk-1", "chunk-2", "chunk-3"],
         input_budget=100_000,
+        preflight_input_budget=80_000,
     )
 
     assert completion_order != [1, 2, 3]
@@ -1073,3 +1068,83 @@ def test_bulk_worker_chunked_document_reassembles_parallel_results_in_order(
     assert manifest["documents"]["converted_documents/doc.md"]["chunks_done"] == [1, 2, 3]
     assert recovery_manifest["actual_usage"] == {"input_tokens": 6, "output_tokens": 3}
     assert recovery_manifest["actual_cost"] == pytest.approx(0.6)
+
+
+def test_bulk_worker_passes_runtime_budget_and_count_callback_to_hierarchical_combine(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_dir = tmp_path
+    source_path = project_dir / "converted_documents" / "doc.md"
+    source_path.parent.mkdir(parents=True, exist_ok=True)
+    source_path.write_text("body", encoding="utf-8")
+
+    group = BulkAnalysisGroup.create("Group")
+    group.provider_id = "openai"
+    group.model = "gpt-5-mini"
+    worker = BulkAnalysisWorker(
+        project_dir=project_dir,
+        group=group,
+        files=[],
+        metadata=ProjectMetadata(case_name="Case"),
+        force_rerun=False,
+        llm_backend=_CountingBackend(token_count=4321),
+    )
+    document = worker_module.BulkAnalysisDocument(
+        source_path=source_path,
+        relative_path="converted_documents/doc.md",
+        output_path=project_dir / "bulk_analysis" / "group" / "doc.md",
+    )
+    manifest = {"version": 2, "signature": None, "documents": {}}
+    manifest_path = worker_module._manifest_path(project_dir, group)
+    recovery_store = worker_module.BulkRecoveryStore(project_dir / "bulk_analysis" / group.folder_name)
+    recovery_manifest = recovery_store.load_map_manifest()
+
+    monkeypatch.setattr(BulkAnalysisWorker, "_create_provider", lambda self, *_args, **_kwargs: object())
+    monkeypatch.setattr(
+        BulkAnalysisWorker,
+        "_execute_chunk_task",
+        lambda self, *, spec, **_kwargs: worker_module._ChunkTaskResult(
+            chunk_index=spec.chunk_index,
+            chunk_checksum=spec.chunk_checksum,
+            summary=f"summary-{spec.chunk_index}",
+            usage={"input_tokens": 1, "output_tokens": 1, "cost": 0.1},
+        ),
+    )
+
+    captured: dict[str, object] = {}
+
+    def _fake_hierarchical(summaries, **kwargs):  # noqa: ANN001
+        captured["summaries"] = list(summaries)
+        captured["input_budget"] = kwargs["input_budget"]
+        captured["runtime_input_budget"] = kwargs["runtime_input_budget"]
+        captured["counted"] = kwargs["count_prompt_tokens_fn"]("combine prompt")
+        return "combined"
+
+    monkeypatch.setattr(worker_module, "combine_chunk_summaries_hierarchical", _fake_hierarchical)
+
+    result, run_details, _ = worker._process_chunked_document(
+        provider=object(),
+        provider_config=ProviderConfig(provider_id="openai", model="gpt-5-mini"),
+        bundle=PromptBundle(system_template="System", user_template="Analyze {document_content}"),
+        system_prompt="System",
+        document=document,
+        doc_placeholders={},
+        manifest=manifest,
+        prompt_hash="prompt-hash",
+        manifest_path=manifest_path,
+        recovery_store=recovery_store,
+        recovery_manifest=recovery_manifest,
+        run_details={},
+        body="body",
+        chunks=["chunk-1", "chunk-2"],
+        input_budget=242_220,
+        preflight_input_budget=193_776,
+    )
+
+    assert result == "combined"
+    assert run_details["chunk_count"] == 2
+    assert captured["summaries"] == ["summary-1", "summary-2"]
+    assert captured["input_budget"] == 193_776
+    assert captured["runtime_input_budget"] == 242_220
+    assert captured["counted"] == 4321

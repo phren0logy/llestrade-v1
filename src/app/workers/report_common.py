@@ -14,6 +14,10 @@ from src.app.core.report_prompt_context import build_report_base_placeholders
 from src.app.core.project_manager import ProjectMetadata
 from src.app.core.report_inputs import category_display_name
 from src.common.llm.budgets import compute_input_token_budget
+from src.common.llm.request_budget import (
+    compute_request_input_budget,
+    evaluate_request_budget,
+)
 from src.common.llm.tokens import TokenCounter
 from src.common.markdown import PromptReference, SourceReference, compute_file_checksum
 
@@ -21,6 +25,7 @@ from .base import DashboardWorker
 from .llm_backend import (
     PydanticAIDirectBackend,
     LLMExecutionBackend,
+    LLMInvocationRequest,
     LLMProviderRequest,
     backend_transport_name,
 )
@@ -213,10 +218,48 @@ class ReportWorkerBase(DashboardWorker):
             return path.name
 
     def _input_token_limit(self, *, max_output_tokens: int) -> int | None:
-        return compute_input_token_budget(
-            raw_context_window=self._context_window,
+        _, input_budget = compute_request_input_budget(
+            provider_id=self._provider_id,
+            model_id=self._custom_model or self._model,
             max_output_tokens=max_output_tokens,
+            explicit_context_window=self._context_window,
             minimum_budget=_MIN_REPORT_INPUT_BUDGET,
+        )
+        return input_budget
+
+    def _evaluate_request_budget(
+        self,
+        provider: object,
+        *,
+        prompt: str,
+        system_prompt: str,
+        max_output_tokens: int,
+        temperature: float,
+    ):
+        return evaluate_request_budget(
+            provider_id=self._provider_id,
+            model_id=self._custom_model or self._model,
+            system_prompt=system_prompt,
+            user_prompt=prompt,
+            max_output_tokens=max_output_tokens,
+            explicit_context_window=self._context_window,
+            minimum_budget=_MIN_REPORT_INPUT_BUDGET,
+            exact_token_counter=lambda: self._llm_backend.count_input_tokens(
+                provider,
+                LLMInvocationRequest(
+                    prompt=prompt,
+                    system_prompt=system_prompt,
+                    model=self._custom_model or self._model,
+                    model_settings=self._llm_backend.build_model_settings(
+                        self._provider_id,
+                        self._custom_model or self._model,
+                        temperature=temperature,
+                        max_tokens=max_output_tokens,
+                        use_reasoning=self._use_reasoning,
+                        reasoning=self._reasoning,
+                    ),
+                ),
+            ),
         )
 
     def _record_response_usage(self, response: object) -> None:

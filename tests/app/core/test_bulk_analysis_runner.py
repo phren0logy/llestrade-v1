@@ -201,6 +201,38 @@ def test_combine_chunk_summaries_hierarchical_wraps_errors_with_context() -> Non
     assert "Hierarchical reduction failed" in error_msg or ("level" in error_msg.lower() and "batch" in error_msg.lower())
 
 
+def test_combine_chunk_summaries_hierarchical_falls_back_after_single_pass_input_limit_error() -> None:
+    summaries = ["Summary A", "Summary B", "Summary C"]
+    invoke_calls: list[str] = []
+
+    def mock_invoke(prompt: str) -> str:
+        invoke_calls.append(prompt)
+        if len(invoke_calls) == 1:
+            raise RuntimeError("Exceeded the input_tokens_limit of 100 (input_tokens=120)")
+        return "Recovered result"
+
+    def count_prompt_tokens(prompt: str) -> int:
+        if prompt.count("Summary ") >= 3:
+            return 90
+        return 40
+
+    result = runner.combine_chunk_summaries_hierarchical(
+        summaries,
+        document_name="Doc",
+        metadata=None,
+        placeholder_values=None,
+        provider_id="openai",
+        model="gpt-5-mini",
+        invoke_fn=mock_invoke,
+        is_cancelled_fn=None,
+        input_budget=100,
+        count_prompt_tokens_fn=count_prompt_tokens,
+    )
+
+    assert result == "Recovered result"
+    assert len(invoke_calls) == 2
+
+
 def test_generate_chunks_enforces_hard_cap_for_large_sections() -> None:
     max_tokens = 100
     large_section = "A" * 5000

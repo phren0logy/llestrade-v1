@@ -6,10 +6,11 @@ import hashlib
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Mapping, Optional, Sequence
+from typing import Callable, Dict, Iterable, List, Mapping, Optional, Sequence
 
 from src.app.core.azure_artifacts import is_azure_raw_artifact
 from src.common.llm.chunking import ChunkingStrategy
+from src.common.llm.request_budget import estimate_request_input_tokens
 from src.common.llm.tokens import TokenCounter
 from src.config.paths import app_base_dir, app_resource_root
 from src.config.prompt_store import get_bundled_dir, get_custom_dir
@@ -278,6 +279,9 @@ def combine_chunk_summaries_hierarchical(
     is_cancelled_fn=None,
     load_batch_fn=None,
     save_batch_fn=None,
+    input_budget: int | None = None,
+    runtime_input_budget: int | None = None,
+    count_prompt_tokens_fn: Callable[[str], int] | None = None,
 ) -> str:
     """
     Hierarchically combine summaries using multi-level reduction when needed.
@@ -321,12 +325,38 @@ def combine_chunk_summaries_hierarchical(
         model,
         provider_id=provider_id,
     )
-    max_combine_tokens = int(context_window * 0.95)
-
-    logger.info(
-        f"Hierarchical reduction starting: {len(summaries)} summaries, "
-        f"max_combine_tokens={max_combine_tokens} (~95% of safe window {context_window}, raw {raw_context_window})"
+    derived_max_combine_tokens = int(context_window * 0.95)
+    max_combine_tokens = (
+        int(input_budget)
+        if isinstance(input_budget, int) and input_budget > 0
+        else derived_max_combine_tokens
     )
+
+    if input_budget is not None and input_budget > 0:
+        if runtime_input_budget is not None and runtime_input_budget > 0 and runtime_input_budget != max_combine_tokens:
+            logger.info(
+                "Hierarchical reduction starting: %s summaries, max_combine_tokens=%s "
+                "(caller preflight budget; runtime budget %s, safe window %s, raw %s)",
+                len(summaries),
+                max_combine_tokens,
+                runtime_input_budget,
+                context_window,
+                raw_context_window,
+            )
+        else:
+            logger.info(
+                "Hierarchical reduction starting: %s summaries, max_combine_tokens=%s "
+                "(caller budget; safe window %s, raw %s)",
+                len(summaries),
+                max_combine_tokens,
+                context_window,
+                raw_context_window,
+            )
+    else:
+        logger.info(
+            f"Hierarchical reduction starting: {len(summaries)} summaries, "
+            f"max_combine_tokens={max_combine_tokens} (~95% of safe window {context_window}, raw {raw_context_window})"
+        )
 
     # Step 1: Try single-pass combination (existing behavior for small documents)
     prompt, context = combine_chunk_summaries(
@@ -337,20 +367,34 @@ def combine_chunk_summaries_hierarchical(
     )
 
     # Count tokens in the combined prompt
-    prompt_tokens = _count_tokens(prompt, provider_id, model)
+    prompt_tokens = _count_prompt_tokens(
+        prompt,
+        provider_id=provider_id,
+        model=model,
+        count_prompt_tokens_fn=count_prompt_tokens_fn,
+    )
 
     logger.info(f"Single-pass prompt: {prompt_tokens} tokens")
 
     # If under threshold, use single-pass (fast path)
     if prompt_tokens <= max_combine_tokens:
         logger.info("Single-pass combination fits within limit, invoking provider")
-        return invoke_fn(prompt)
-
-    # Step 2: Multi-level hierarchical reduction required
-    logger.warning(
-        f"Single-pass prompt exceeds limit ({prompt_tokens} > {max_combine_tokens}), "
-        f"switching to hierarchical reduction"
-    )
+        try:
+            return invoke_fn(prompt)
+        except Exception as exc:
+            if not _is_input_budget_exceeded_error(exc):
+                raise
+            logger.warning(
+                "Single-pass combination exceeded the runtime input budget despite preflight; "
+                "switching to hierarchical reduction",
+                exc_info=True,
+            )
+    else:
+        logger.warning(
+            "Single-pass prompt exceeds preflight limit (%s > %s), switching to hierarchical reduction",
+            prompt_tokens,
+            max_combine_tokens,
+        )
 
     # Process summaries hierarchically
     current_level_summaries = list(summaries)
@@ -457,7 +501,12 @@ def combine_chunk_summaries_hierarchical(
                 metadata=metadata,
                 placeholder_values=placeholder_values,
             )
-            test_tokens = _count_tokens(test_prompt, provider_id, model)
+            test_tokens = _count_prompt_tokens(
+                test_prompt,
+                provider_id=provider_id,
+                model=model,
+                count_prompt_tokens_fn=count_prompt_tokens_fn,
+            )
 
             # If adding this summary would exceed limit, finalize current batch
             if test_tokens > max_combine_tokens and current_batch:
@@ -575,6 +624,45 @@ def _count_tokens(text: str, provider_id: str, model: Optional[str]) -> int:
     if provider_id in {"anthropic", "anthropic_bedrock"}:
         return max(counted, conservative)
     return max(counted, 1)
+
+
+def _count_prompt_tokens(
+    prompt: str,
+    *,
+    provider_id: str,
+    model: Optional[str],
+    count_prompt_tokens_fn: Callable[[str], int] | None = None,
+) -> int:
+    if count_prompt_tokens_fn is not None:
+        counted = int(count_prompt_tokens_fn(prompt))
+        if counted > 0:
+            return counted
+    return estimate_request_input_tokens(
+        system_prompt="",
+        user_prompt=prompt,
+        provider_id=provider_id,
+        model_id=model,
+    )
+
+
+def _iter_exception_chain(exc: BaseException) -> Iterable[BaseException]:
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        yield current
+        seen.add(id(current))
+        next_exc = current.__cause__ or current.__context__
+        current = next_exc if isinstance(next_exc, BaseException) else None
+
+
+def _is_input_budget_exceeded_error(exc: BaseException) -> bool:
+    for candidate in _iter_exception_chain(exc):
+        message = str(candidate)
+        if "Exceeded the input_tokens_limit" in message:
+            return True
+        if "Prompt exceeds model input budget" in message:
+            return True
+    return False
 
 
 def _truncate_to_tokens(text: str, max_tokens: int) -> str:

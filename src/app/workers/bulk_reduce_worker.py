@@ -41,6 +41,7 @@ from src.app.core.bulk_prompt_context import build_bulk_placeholders
 from src.app.core.placeholders.system import SourceFileContext
 from src.app.core.project_manager import ProjectMetadata
 from src.common.llm.budgets import compute_input_token_budget
+from src.common.llm.request_budget import compute_preflight_input_budget, evaluate_request_budget
 from src.common.llm.tokens import TokenCounter
 from src.config.observability import trace_operation
 from src.common.markdown import (
@@ -511,6 +512,13 @@ class BulkReduceWorker(DashboardWorker):
             }
             input_budget = self._max_input_budget(provider_cfg, max_output_tokens=32_000)
             run_details["input_budget"] = input_budget
+            preflight_input_budget = compute_preflight_input_budget(
+                provider_id=provider_cfg.provider_id,
+                model_id=provider_cfg.model,
+                runtime_input_budget=input_budget,
+                minimum_budget=_MIN_INPUT_TOKEN_BUDGET,
+            )
+            run_details["preflight_input_budget"] = preflight_input_budget
 
             if not needs_chunking:
                 prompt = render_user_prompt(
@@ -527,6 +535,7 @@ class BulkReduceWorker(DashboardWorker):
                     prompt,
                     system_prompt,
                     input_budget=input_budget,
+                    preflight_input_budget=preflight_input_budget,
                 )
                 run_details["chunk_count"] = 1
                 chunk_state = current_manifest.get("chunks", {"count": 0, "done": [], "checksums": {}})
@@ -675,7 +684,36 @@ class BulkReduceWorker(DashboardWorker):
                             prompt,
                             system_prompt,
                             input_budget=input_budget,
+                            preflight_input_budget=preflight_input_budget,
                         )
+
+                    def count_combine_prompt_tokens(prompt: str) -> int:
+                        evaluation = evaluate_request_budget(
+                            provider_id=provider_cfg.provider_id,
+                            model_id=provider_cfg.model,
+                            system_prompt=system_prompt,
+                            user_prompt=prompt,
+                            max_output_tokens=32_000,
+                            minimum_budget=_MIN_INPUT_TOKEN_BUDGET,
+                            input_budget_limit=input_budget,
+                            exact_token_counter=lambda: self._llm_backend.count_input_tokens(
+                                provider,
+                                LLMInvocationRequest(
+                                    prompt=prompt,
+                                    model=provider_cfg.model,
+                                    system_prompt=system_prompt,
+                                    model_settings=self._llm_backend.build_model_settings(
+                                        provider_cfg.provider_id,
+                                        provider_cfg.model,
+                                        temperature=provider_cfg.temperature,
+                                        max_tokens=32_000,
+                                        use_reasoning=getattr(self._group, "use_reasoning", False),
+                                        reasoning=getattr(self._group, "reasoning", {}),
+                                    ),
+                                ),
+                            ),
+                        )
+                        return evaluation.input_tokens
 
                     def load_batch(level: int, batch_index: int, checksum: str) -> Optional[str]:
                         batch_key = f"{level}:{batch_index}"
@@ -722,7 +760,7 @@ class BulkReduceWorker(DashboardWorker):
                         _save_manifest(state_manifest_path, current_manifest)
                         recovery_store.save_reduce_manifest(recovery_manifest)
 
-                    result = combine_chunk_summaries_hierarchical(
+                        result = combine_chunk_summaries_hierarchical(
                         chunk_summaries,
                         document_name=self._group.name,
                         metadata=self._metadata,
@@ -733,6 +771,9 @@ class BulkReduceWorker(DashboardWorker):
                         is_cancelled_fn=self.is_cancelled,
                         load_batch_fn=load_batch,
                         save_batch_fn=save_batch,
+                        input_budget=preflight_input_budget,
+                        runtime_input_budget=input_budget,
+                        count_prompt_tokens_fn=count_combine_prompt_tokens,
                     )
 
             # Persist
@@ -1080,10 +1121,42 @@ class BulkReduceWorker(DashboardWorker):
         *,
         max_tokens: int = 32_000,
         input_budget: Optional[int] = None,
+        preflight_input_budget: Optional[int] = None,
         on_response=None,
     ) -> str:
         if self._cancel_event.is_set():
             raise BulkAnalysisCancelled
+        if input_budget is not None:
+            evaluation = evaluate_request_budget(
+                provider_id=provider_cfg.provider_id,
+                model_id=provider_cfg.model,
+                system_prompt=system_prompt,
+                user_prompt=prompt,
+                max_output_tokens=max_tokens,
+                minimum_budget=_MIN_INPUT_TOKEN_BUDGET,
+                input_budget_limit=preflight_input_budget if preflight_input_budget is not None else input_budget,
+                exact_token_counter=lambda: self._llm_backend.count_input_tokens(
+                    provider,
+                    LLMInvocationRequest(
+                        prompt=prompt,
+                        model=provider_cfg.model,
+                        system_prompt=system_prompt,
+                        model_settings=self._llm_backend.build_model_settings(
+                            provider_cfg.provider_id,
+                            provider_cfg.model,
+                            temperature=provider_cfg.temperature,
+                            max_tokens=max_tokens,
+                            use_reasoning=getattr(self._group, "use_reasoning", False),
+                            reasoning=getattr(self._group, "reasoning", {}),
+                        ),
+                    ),
+                ),
+            )
+            if not evaluation.fits:
+                raise RuntimeError(
+                    f"Prompt exceeds model input budget for bulk reduce request: "
+                    f"{evaluation.input_tokens} tokens > {evaluation.preflight_input_budget} budget"
+                )
         stage_input = BulkReduceStageInput(
             group_id=self._group.group_id,
             group_name=self._group.name,

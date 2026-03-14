@@ -805,7 +805,7 @@ def test_report_draft_passes_computed_input_budget_to_backend(
 
     assert outputs[0]["title"] == "Section One"
     assert len(backend.requests) == 1
-    assert backend.requests[0].input_tokens_limit == 79_000
+    assert backend.requests[0].input_tokens_limit == 52_140
 
 
 def test_report_draft_applies_reasoning_settings_to_backend_request(
@@ -1041,7 +1041,7 @@ def test_report_refine_passes_computed_input_budget_to_backend(
     assert content.strip() == "stub output"
     assert reasoning is None
     assert len(backend.requests) == 1
-    assert backend.requests[0].input_tokens_limit == 79_000
+    assert backend.requests[0].input_tokens_limit == 52_140
 
 
 def test_report_refine_applies_openai_reasoning_settings(

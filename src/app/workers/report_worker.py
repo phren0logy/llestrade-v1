@@ -357,6 +357,18 @@ class DraftReportWorker(ReportWorkerBase):
             section_trace_attributes["llestrade.phase_name"] = "section"
             with trace_operation("report_draft.section", section_trace_attributes):
                 with trace_operation("report_draft.invoke_llm", trace_attributes):
+                    budget_evaluation = self._evaluate_request_budget(
+                        provider,
+                        prompt=prompt,
+                        system_prompt=system_prompt,
+                        max_output_tokens=self._max_report_tokens,
+                        temperature=0.2,
+                    )
+                    if not budget_evaluation.fits:
+                        raise RuntimeError(
+                            f"Prompt exceeds model input budget for report draft section '{section.title}': "
+                            f"{budget_evaluation.input_tokens} tokens > {budget_evaluation.preflight_input_budget} budget"
+                        )
                     response = self._llm_backend.invoke_response(
                         provider,
                         LLMInvocationRequest(
@@ -371,9 +383,7 @@ class DraftReportWorker(ReportWorkerBase):
                                 use_reasoning=self._use_reasoning,
                                 reasoning=self._reasoning,
                             ),
-                            input_tokens_limit=self._input_token_limit(
-                                max_output_tokens=self._max_report_tokens
-                            ),
+                            input_tokens_limit=budget_evaluation.runtime_input_budget,
                         ),
                     )
                 self._emit_progress_detail(
@@ -792,6 +802,18 @@ class ReportRefinementWorker(ReportWorkerBase):
         phase_trace_attributes["llestrade.phase_name"] = "refining"
         with trace_operation("report_refine.phase", phase_trace_attributes):
             with trace_operation("report_refine.invoke_llm", trace_attributes):
+                budget_evaluation = self._evaluate_request_budget(
+                    provider,
+                    prompt=prompt,
+                    system_prompt=system_prompt,
+                    max_output_tokens=self._max_report_tokens,
+                    temperature=0.2,
+                )
+                if not budget_evaluation.fits:
+                    raise RuntimeError(
+                        "Prompt exceeds model input budget for report refinement: "
+                        f"{budget_evaluation.input_tokens} tokens > {budget_evaluation.preflight_input_budget} budget"
+                    )
                 response = self._llm_backend.invoke_response(
                     provider,
                     LLMInvocationRequest(
@@ -806,9 +828,7 @@ class ReportRefinementWorker(ReportWorkerBase):
                             use_reasoning=self._use_reasoning,
                             reasoning=self._reasoning,
                         ),
-                        input_tokens_limit=self._input_token_limit(
-                            max_output_tokens=self._max_report_tokens
-                        ),
+                        input_tokens_limit=budget_evaluation.runtime_input_budget,
                     ),
                 )
         self._record_response_usage(response)
