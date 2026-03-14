@@ -57,6 +57,14 @@ export interface MetadataModelRecord {
   sources: ModelSources
 }
 
+export interface MetadataCatalogProviderRecord {
+  provider_id: string
+  route: string
+  upstream_provider_id: string
+  label: string
+  models: MetadataModelRecord[]
+}
+
 interface CacheEntry {
   expiresAt: number
   value?: MetadataModelRecord[]
@@ -115,6 +123,25 @@ interface ServiceAccount {
 
 const metadataCache = new Map<string, CacheEntry>()
 const googleTokenCache = new Map<string, { expiresAt: number; token: string }>()
+
+export async function metadataCatalog(request: Request, options: GatewayOptions): Promise<Response> {
+  const authResult = await authenticateGatewayAppKey(request, options)
+  if (authResult instanceof Response) {
+    return authResult
+  }
+
+  try {
+    const providers = await loadCatalogForApiKey(authResult)
+    return new Response(JSON.stringify({ providers }, null, 2), {
+      headers: { 'Content-Type': 'application/json' },
+    })
+  } catch (error) {
+    return new Response(`Failed to load metadata catalog: ${(error as Error).message}`, {
+      status: 502,
+      headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+    })
+  }
+}
 
 export async function metadataModels(
   request: Request,
@@ -274,6 +301,62 @@ async function getCachedModels(cacheKey: string, loader: () => Promise<MetadataM
   return pending
 }
 
+async function loadCatalogForApiKey(apiKeyInfo: ApiKeyInfo): Promise<MetadataCatalogProviderRecord[]> {
+  const providerProxies = apiKeyInfo.providers.filter((provider): provider is ProviderProxy & { key: string } => {
+    return typeof provider.key === 'string' && supportsMetadataProvider(provider.providerId)
+  })
+
+  const settled = await Promise.allSettled(
+    providerProxies.map((providerProxy) => loadCatalogProvider(apiKeyInfo.id, providerProxy)),
+  )
+
+  const providers: MetadataCatalogProviderRecord[] = []
+  const errors: string[] = []
+  for (const result of settled) {
+    if (result.status === 'fulfilled') {
+      if (result.value !== null) {
+        providers.push(result.value)
+      }
+    } else {
+      errors.push(result.reason instanceof Error ? result.reason.message : String(result.reason))
+    }
+  }
+
+  if (providers.length === 0 && errors.length > 0) {
+    throw new Error(errors.join('; '))
+  }
+
+  return providers.sort(compareCatalogProviders)
+}
+
+async function loadCatalogProvider(
+  apiKeyId: number,
+  providerProxy: ProviderProxy & { key: string },
+): Promise<MetadataCatalogProviderRecord | null> {
+  const route = providerProxy.key
+  const providerId = canonicalProviderId(providerProxy)
+  const cacheKey = await buildCacheKey(route, apiKeyId, [providerProxy])
+  const models = await getCachedModels(cacheKey, () =>
+    loadModelsForRoute({
+      route,
+      requestedProviderId: providerId,
+      providerProxies: [providerProxy],
+    }),
+  )
+
+  if (models.length === 0) {
+    return null
+  }
+
+  return {
+    provider_id: providerId,
+    route,
+    upstream_provider_id: providerProxy.providerId,
+    label: formatProviderLabel(providerProxy),
+    models,
+  }
+}
+
 async function loadModelsForRoute(routeResult: {
   route: string
   requestedProviderId: string
@@ -324,6 +407,10 @@ async function loadModelsForProvider(
     default:
       return []
   }
+}
+
+function supportsMetadataProvider(providerId: string): boolean {
+  return providerId === 'openai' || providerId === 'anthropic' || providerId === 'google-vertex'
 }
 
 async function loadOpenAIModels(
@@ -671,6 +758,36 @@ function normalizeDisplayName(modelId: string): string {
     .filter(Boolean)
     .map((part) => (part.length <= 3 ? part.toUpperCase() : part[0]!.toUpperCase() + part.slice(1)))
     .join(' ')
+}
+
+function formatProviderLabel(providerProxy: ProviderProxy & { key: string }): string {
+  return upstreamProviderLabel(providerProxy.providerId)
+}
+
+function canonicalProviderId(providerProxy: ProviderProxy & { key: string }): string {
+  switch (providerProxy.providerId) {
+    case 'google-vertex':
+      return 'gemini'
+    default:
+      return providerProxy.providerId
+  }
+}
+
+function upstreamProviderLabel(providerId: string): string {
+  switch (providerId) {
+    case 'openai':
+      return 'OpenAI'
+    case 'anthropic':
+      return 'Anthropic'
+    case 'google-vertex':
+      return 'Google Gemini'
+    default:
+      return normalizeDisplayName(providerId)
+    }
+}
+
+function compareCatalogProviders(left: MetadataCatalogProviderRecord, right: MetadataCatalogProviderRecord): number {
+  return left.label.localeCompare(right.label) || left.provider_id.localeCompare(right.provider_id)
 }
 
 function compareModelRecords(left: MetadataModelRecord, right: MetadataModelRecord): number {

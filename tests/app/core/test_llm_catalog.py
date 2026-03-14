@@ -52,9 +52,9 @@ class _FakeSnapshot:
 
 @pytest.fixture(autouse=True)
 def reset_gemini_cache() -> None:
-    llm_catalog.reset_gemini_model_cache()
+    llm_catalog.reset_provider_catalog_cache()
     yield
-    llm_catalog.reset_gemini_model_cache()
+    llm_catalog.reset_provider_catalog_cache()
 
 
 def test_runtime_default_model_for_gemini_prefers_stable_pro(
@@ -86,37 +86,24 @@ def test_runtime_default_model_for_gemini_prefers_stable_pro(
     assert llm_catalog.runtime_default_model_for_provider("gemini") == "gemini-2.5-pro"
 
 
-def test_runtime_default_model_for_gateway_gemini_ignores_direct_preview_discovery(
+def test_runtime_default_model_for_gateway_uses_gateway_provider_catalog(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    snapshot = _FakeSnapshot(
-        providers=[
-            _FakeProvider(
-                id="google",
-                models=[
-                    _FakeModel(
-                        id="gemini-2.5-pro",
-                        name="Gemini 2.5 Pro",
-                        context_window=1_048_576,
-                    ),
-                    _FakeModel(
-                        id="gemini-3-flash-preview",
-                        name="Gemini 3 Flash Preview",
-                        context_window=1_048_576,
-                    ),
-                ],
-            )
-        ]
-    )
-    monkeypatch.setattr(llm_catalog, "_snapshot", lambda: snapshot)
     monkeypatch.setattr(
         llm_catalog,
-        "_discover_gemini_models_live",
+        "_discover_gateway_provider_catalog_live",
         lambda: (
-            llm_catalog._DiscoveredModel(
-                model_id="gemini-3-flash-preview",
-                label="Gemini 3 Flash Preview",
-                context_window=1_048_576,
+            llm_catalog._GatewayCatalogProvider(
+                provider_id="gemini",
+                label="Google Gemini",
+                route="gemini",
+                models=(
+                    llm_catalog.LLMModelOption(
+                        model_id="gemini-2.5-pro",
+                        label="Gemini 2.5 Pro",
+                        context_window=1_048_576,
+                    ),
+                ),
             ),
         ),
     )
@@ -124,36 +111,98 @@ def test_runtime_default_model_for_gateway_gemini_ignores_direct_preview_discove
     assert llm_catalog.runtime_default_model_for_provider("gemini", transport="gateway") == "gemini-2.5-pro"
 
 
-def test_gateway_gemini_catalog_uses_snapshot_and_excludes_image_variants(
+def test_runtime_default_model_for_gateway_returns_none_without_gateway_catalog(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    snapshot = _FakeSnapshot(
-        providers=[
-            _FakeProvider(
-                id="google",
-                models=[
-                    _FakeModel(
-                        id="gemini-2.5-pro",
-                        name="Gemini 2.5 Pro",
-                        context_window=None,
-                    ),
-                    _FakeModel(
-                        id="gemini-2.5-flash-image",
-                        name="Gemini 2.5 Flash Image",
-                        context_window=1_000_000,
-                    ),
-                ],
-            )
-        ]
+    monkeypatch.setattr(llm_catalog, "_discover_gateway_provider_catalog_live", lambda: ())
+    monkeypatch.setattr(llm_catalog, "_load_cached_gateway_provider_catalog", lambda: ())
+    monkeypatch.setattr(
+        llm_catalog,
+        "_snapshot",
+        lambda: _FakeSnapshot(
+            providers=[
+                _FakeProvider(
+                    id="google",
+                    models=[
+                        _FakeModel(
+                            id="gemini-2.5-pro",
+                            name="Gemini 2.5 Pro",
+                            context_window=1_048_576,
+                        )
+                    ],
+                )
+            ]
+        ),
     )
-    monkeypatch.setattr(llm_catalog, "_snapshot", lambda: snapshot)
+
+    assert llm_catalog.runtime_default_model_for_provider("gemini", transport="gateway") is None
+
+
+def test_gateway_provider_catalog_uses_gateway_payload_without_snapshot_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        llm_catalog,
+        "_discover_gateway_provider_catalog_live",
+        lambda: (
+            llm_catalog._GatewayCatalogProvider(
+                provider_id="gemini",
+                label="Google Gemini",
+                route="gemini",
+                models=(
+                    llm_catalog.LLMModelOption(
+                        model_id="gemini-3-flash",
+                        label="Gemini 3 Flash",
+                        context_window=2_000_000,
+                    ),
+                ),
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        llm_catalog,
+        "_snapshot",
+        lambda: _FakeSnapshot(
+            providers=[
+                _FakeProvider(
+                    id="google",
+                    models=[
+                        _FakeModel(
+                            id="gemini-2.5-flash-image",
+                            name="Gemini 2.5 Flash Image",
+                            context_window=1_000_000,
+                        )
+                    ],
+                )
+            ]
+        ),
+    )
 
     catalog = llm_catalog.default_provider_catalog_for_transport(transport="gateway")
     gemini = next(provider for provider in catalog if provider.provider_id == "gemini")
-    model_ids = {model.model_id for model in gemini.models}
 
-    assert "gemini-2.5-pro" in model_ids
-    assert "gemini-2.5-flash-image" not in model_ids
+    assert [model.model_id for model in gemini.models] == ["gemini-3-flash"]
+
+
+def test_gateway_provider_payload_normalizes_google_vertex_to_gemini() -> None:
+    provider = llm_catalog._gateway_provider_option_from_payload(
+        {
+            "provider_id": "google-vertex",
+            "upstream_provider_id": "google-vertex",
+            "label": "Google Gemini",
+            "models": [
+                {
+                    "model_id": "gemini-2.5-pro",
+                    "display_name": "Gemini 2.5 Pro",
+                    "context_window": 1_048_576,
+                }
+            ],
+        }
+    )
+
+    assert provider is not None
+    assert provider.provider_id == "gemini"
+    assert [model.model_id for model in provider.models] == ["gemini-2.5-pro"]
 
 
 def test_resolve_catalog_model_for_gemini_uses_live_context_and_catalog_prices(
@@ -237,6 +286,58 @@ def test_default_provider_catalog_for_transport_uses_live_openai_discovery_with_
     assert resolved.context_window == 400_000
     assert resolved.input_price_label == "$2.5/1M"
     assert resolved.output_price_label == "$12.5/1M"
+
+
+def test_gateway_model_option_from_payload_uses_gateway_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        llm_catalog,
+        "_reasoning_capabilities_for_model",
+        lambda provider_id, model_id: llm_catalog.LLMReasoningCapabilities(
+            supports_reasoning_controls=False,
+            can_disable_reasoning=False,
+            controls=(),
+            allowed_efforts=("low", "medium", "high"),
+            default_state="off",
+        ),
+    )
+
+    resolved = llm_catalog._gateway_model_option_from_payload(
+        "openai",
+        {
+            "model_id": "gpt-5.4",
+            "display_name": "GPT-5.4",
+            "context_window": "400000",
+            "max_output_tokens": 16000,
+            "pricing_input_per_million": "2.5",
+            "pricing_output_per_million": 12.5,
+            "lifecycle_status": "stable",
+            "reasoning_capabilities": {
+                "supports_reasoning_controls": True,
+                "can_disable_reasoning": True,
+                "controls": ["toggle", "effort"],
+                "notes": "Gateway supplied reasoning metadata.",
+            },
+            "sources": {
+                "availability": "gateway",
+                "context_window": "gateway",
+                "pricing": "gateway",
+                "reasoning_capabilities": "gateway",
+            },
+        },
+    )
+
+    assert resolved is not None
+    assert resolved.context_window == 400_000
+    assert resolved.max_output_tokens == 16_000
+    assert resolved.input_price_label == "$2.5/1M"
+    assert resolved.output_price_label == "$12.5/1M"
+    assert resolved.reasoning_capabilities.supports_reasoning_controls is True
+    assert resolved.reasoning_capabilities.can_disable_reasoning is True
+    assert resolved.reasoning_capabilities.controls == ("toggle", "effort")
+    assert resolved.reasoning_capabilities.allowed_efforts == ("low", "medium", "high")
+    assert resolved.provenance.pricing == "gateway"
 
 
 def test_runtime_default_model_for_gemini_uses_cache_when_live_discovery_fails(

@@ -196,11 +196,16 @@ def test_api_key_dialog_resets_gateway_probe_cache_and_warns_on_invalid_gateway_
     settings.set_api_key("pydantic_ai_gateway", "gateway-key-1")
 
     reset_calls = {"count": 0}
+    catalog_reset_calls = {"count": 0}
 
     def _fake_reset() -> None:
         reset_calls["count"] += 1
 
+    def _fake_catalog_reset() -> None:
+        catalog_reset_calls["count"] += 1
+
     monkeypatch.setattr(api_key_dialog_module, "reset_gateway_access_check_cache", _fake_reset)
+    monkeypatch.setattr(api_key_dialog_module, "reset_provider_catalog_cache", _fake_catalog_reset)
     monkeypatch.setattr(
         api_key_dialog_module,
         "default_provider_catalog_for_transport",
@@ -248,6 +253,7 @@ def test_api_key_dialog_resets_gateway_probe_cache_and_warns_on_invalid_gateway_
         dialog.deleteLater()
 
     assert reset_calls["count"] == 1
+    assert catalog_reset_calls["count"] == 1
     assert warnings
     assert "rejected by the gateway" in warnings[0]
 
