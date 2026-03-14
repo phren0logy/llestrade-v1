@@ -7,6 +7,7 @@ from typing import Callable, Dict, List, Optional, Sequence, Set, TYPE_CHECKING
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
+    QDialog,
     QMessageBox,
     QTableWidgetItem,
     QTreeWidgetItem,
@@ -751,7 +752,7 @@ class BulkAnalysisController:
         if detail.document_path:
             parts.append(detail.document_path)
         if detail.chunk_total and detail.chunks_completed is not None:
-            chunk_text = f"Chunks {detail.chunks_completed}/{detail.chunk_total}"
+            chunk_text = f"{detail.chunks_completed}/{detail.chunk_total} chunks"
             if detail.chunks_in_flight:
                 chunk_text += f", {detail.chunks_in_flight} in flight"
             parts.append(chunk_text)
@@ -955,7 +956,7 @@ class BulkAnalysisController:
         action = dialog.selected_action
         self._on_refresh_metrics()
         self._on_refresh_groups()
-        if result != dialog.Accepted or action is None:
+        if result != QDialog.Accepted or action is None:
             return
         if action == RecoveryAction.RESUME:
             if (group.operation or "per_document") == "combined":

@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 import pytest
 from PySide6.QtCore import QCoreApplication, QObject, QRunnable, Signal
-from PySide6.QtWidgets import QApplication, QPushButton, QMessageBox
+from PySide6.QtWidgets import QApplication, QDialog, QPushButton, QMessageBox
 
 from src.app.core.bulk_analysis_runner import PromptBundle
 from src.app.core.job_cost_estimates import CostForecast
@@ -343,19 +343,55 @@ def test_workspace_bulk_progress_detail_updates_active_progress_widget(
         WorkerProgressDetail(
             run_kind="bulk_map",
             phase="chunk_started",
-            label="Running chunk 3/24",
+            label="Processing chunks",
             percent=12,
             completed=0,
             total=1,
             document_path="folder/record.md",
             chunk_index=3,
             chunk_total=24,
+            chunks_completed=3,
+            chunks_in_flight=2,
         ),
     )
 
     assert controller.tab.active_progress_widget.isHidden() is False
     assert controller.tab.active_progress_bar.value() == 12
-    assert "Chunk 3/24" in controller.tab.active_progress_detail_label.text()
+    detail_text = controller.tab.active_progress_detail_label.text()
+    assert "3/24 chunks" in detail_text
+    assert "2 in flight" in detail_text
+
+    workspace.deleteLater()
+
+
+def test_workspace_open_recovery_dialog_uses_qdialog_accept_code(
+    tmp_path: Path,
+    qt_app: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert qt_app is not None
+
+    manager, group = _create_project_with_group(tmp_path)
+    workspace = ProjectWorkspace()
+    workspace.set_project(manager)
+    QCoreApplication.processEvents()
+
+    controller = workspace.bulk_controller
+    assert controller is not None
+
+    class _FakeRecoveryDialog:
+        def __init__(self, **_kwargs):  # noqa: ANN003
+            self.selected_action = None
+
+        def exec(self) -> int:
+            return QDialog.Accepted
+
+        def selected_documents(self) -> list[str]:
+            return []
+
+    monkeypatch.setattr("src.app.ui.workspace.controllers.bulk.BulkRecoveryDialog", _FakeRecoveryDialog)
+
+    controller.open_recovery_dialog(group)
 
     workspace.deleteLater()
 
