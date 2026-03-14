@@ -6,7 +6,10 @@ import logging
 import json
 from typing import Any, Dict
 
-from src.app.core.llm_catalog import reset_provider_catalog_cache
+from src.app.core.llm_catalog import (
+    refresh_gateway_provider_catalog,
+    reset_provider_catalog_cache,
+)
 from src.app.core.llm_operation_settings import default_provider_catalog_for_transport
 from src.app.workers.llm_backend import (
     PydanticAIGatewayBackend,
@@ -596,6 +599,7 @@ class APIKeyDialog(QDialog):
             if gateway_changed:
                 reset_gateway_access_check_cache()
                 reset_provider_catalog_cache()
+                refresh_gateway_provider_catalog(force=True)
                 gateway_warning = self._validate_saved_gateway_settings(
                     api_key=gateway_effective_key or None,
                     base_url=gateway_base_url or None,

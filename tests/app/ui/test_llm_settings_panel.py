@@ -195,3 +195,31 @@ def test_panel_shows_catalog_details_for_selected_model(qt_app: QApplication) ->
         assert "Output:" in details
     finally:
         panel.deleteLater()
+
+
+def test_gateway_panel_refresh_uses_gateway_catalog_refresh(
+    qt_app: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert qt_app is not None
+    calls = {"gateway": 0, "reset": 0}
+
+    def _refresh_gateway(*, force: bool = False) -> None:
+        assert force is True
+        calls["gateway"] += 1
+
+    monkeypatch.setattr(llm_settings_panel_module, "refresh_gateway_provider_catalog", _refresh_gateway)
+    monkeypatch.setattr(
+        llm_settings_panel_module,
+        "reset_provider_catalog_cache",
+        lambda: calls.__setitem__("reset", calls["reset"] + 1),
+    )
+
+    panel = LLMSettingsPanel(transport="gateway")
+    try:
+        panel._refresh_models_clicked()
+    finally:
+        panel.deleteLater()
+
+    assert calls["gateway"] == 1
+    assert calls["reset"] == 0

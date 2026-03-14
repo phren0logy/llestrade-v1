@@ -10,7 +10,7 @@ import logging
 import os
 import re
 import time
-from threading import Lock
+from threading import Event, Lock, Thread
 from typing import Any, Literal, Optional, Sequence
 
 from genai_prices import UpdatePrices
@@ -66,11 +66,14 @@ _RUNTIME_CONTEXT_WINDOW_CAPS: dict[str, int] = {
 
 _catalog_updater: UpdatePrices | None = None
 _catalog_updater_lock = Lock()
+_gateway_catalog_refresher: "_GatewayCatalogRefresher | None" = None
+_gateway_catalog_refresher_lock = Lock()
 _provider_selector_models: dict[tuple[str, str, str], tuple["LLMModelOption", ...]] = {}
 _provider_selector_models_lock = Lock()
-_gateway_provider_catalogs: dict[str, tuple["_GatewayCatalogProvider", ...]] = {}
+_gateway_provider_catalogs: dict[str, "_CachedGatewayCatalog"] = {}
 _gateway_provider_catalogs_lock = Lock()
-_PROVIDER_CACHE_TTL_SECONDS = 6 * 60 * 60
+_GATEWAY_CATALOG_REFRESH_INTERVAL_SECONDS = 60 * 60
+_GATEWAY_CATALOG_FRESHNESS_SECONDS = 12 * 60 * 60
 _PROVIDER_CACHE_MAX_STALE_SECONDS = 7 * 24 * 60 * 60
 _BEDROCK_ANTHROPIC_ALIASES: dict[str, str] = {
     "anthropic.claude-sonnet-4-5-v1": "claude-sonnet-4-5",
@@ -147,45 +150,129 @@ class _GatewayCatalogProvider:
     models: tuple[LLMModelOption, ...]
 
 
-def start_background_catalog_refresh(*, wait: bool | float = False) -> None:
-    """Start a session-scoped background updater for ``genai-prices``."""
+@dataclass(frozen=True, slots=True)
+class _CachedGatewayCatalog:
+    providers: tuple[_GatewayCatalogProvider, ...]
+    cached_at: float
 
-    global _catalog_updater
+
+class _GatewayCatalogRefresher:
+    """Refresh the gateway model catalog in the background."""
+
+    def __init__(self, *, refresh_interval_seconds: float) -> None:
+        self._refresh_interval_seconds = refresh_interval_seconds
+        self._stop_event = Event()
+        self._refresh_complete = Event()
+        self._thread: Thread | None = None
+
+    def start(self, *, wait: bool | float = False) -> None:
+        if self._thread is not None:
+            raise RuntimeError("Gateway catalog refresher already started")
+
+        self._refresh_complete.clear()
+        self._stop_event.clear()
+        self._thread = Thread(
+            target=self._run,
+            daemon=True,
+            name="llestrade:gateway-catalog-refresh",
+        )
+        self._thread.start()
+
+        if wait:
+            timeout = 30.0 if wait is True else float(wait)
+            self._refresh_complete.wait(timeout)
+
+    def stop(self) -> None:
+        thread = self._thread
+        self._thread = None
+        if thread is None:
+            return
+
+        self._stop_event.set()
+        thread.join()
+
+    def _run(self) -> None:
+        while not self._stop_event.is_set():
+            try:
+                refresh_gateway_provider_catalog(force=True)
+            except Exception:
+                logger.warning("Unable to refresh gateway provider catalog in the background", exc_info=True)
+            finally:
+                self._refresh_complete.set()
+
+            if self._stop_event.wait(self._refresh_interval_seconds):
+                break
+
+
+def start_background_catalog_refresh(*, wait: bool | float = False) -> None:
+    """Start session-scoped background refresh for pricing and gateway metadata."""
+
+    global _catalog_updater, _gateway_catalog_refresher
 
     with _catalog_updater_lock:
         if _catalog_updater is not None:
-            return
-
-        updater = UpdatePrices()
-        try:
-            updater.start(wait=wait)
-        except Exception:
-            logger.warning("Unable to start genai-prices background refresh", exc_info=True)
+            updater = _catalog_updater
+        else:
+            updater = UpdatePrices()
             try:
-                updater.stop()
+                updater.start(wait=wait)
             except Exception:
-                logger.debug("Failed stopping genai-prices updater after startup failure", exc_info=True)
+                logger.warning("Unable to start genai-prices background refresh", exc_info=True)
+                try:
+                    updater.stop()
+                except Exception:
+                    logger.debug("Failed stopping genai-prices updater after startup failure", exc_info=True)
+                updater = None
+            _catalog_updater = updater
+
+    with _gateway_catalog_refresher_lock:
+        if _gateway_catalog_refresher is not None:
             return
 
-        _catalog_updater = updater
+        refresher = _GatewayCatalogRefresher(
+            refresh_interval_seconds=_GATEWAY_CATALOG_REFRESH_INTERVAL_SECONDS,
+        )
+        try:
+            refresher.start(wait=wait)
+        except Exception:
+            logger.warning("Unable to start gateway catalog background refresh", exc_info=True)
+            try:
+                refresher.stop()
+            except Exception:
+                logger.debug("Failed stopping gateway catalog refresher after startup failure", exc_info=True)
+            return
+
+        _gateway_catalog_refresher = refresher
 
 
 def stop_background_catalog_refresh() -> None:
-    """Stop the session-scoped updater if it is running."""
+    """Stop the session-scoped background refreshers if they are running."""
 
-    global _catalog_updater
+    global _catalog_updater, _gateway_catalog_refresher
 
     with _catalog_updater_lock:
         updater = _catalog_updater
         _catalog_updater = None
 
+    with _gateway_catalog_refresher_lock:
+        refresher = _gateway_catalog_refresher
+        _gateway_catalog_refresher = None
+
     if updater is None:
+        pass
+    else:
+        try:
+            updater.stop()
+        except Exception:
+            logger.warning("Unable to stop genai-prices background refresh cleanly", exc_info=True)
+
+    if refresher is None:
         return
 
     try:
-        updater.stop()
+        refresher.stop()
     except Exception:
-        logger.warning("Unable to stop genai-prices background refresh cleanly", exc_info=True)
+        logger.warning("Unable to stop gateway catalog background refresh cleanly", exc_info=True)
 
 
 def provider_option_map(
@@ -416,6 +503,10 @@ def _gateway_catalog_cache_path() -> Any:
     return cache_dir / f"gateway_catalog_{_gateway_catalog_scope()}.json"
 
 
+def _cache_age_seconds(cached_at: float) -> float:
+    return max(time.time() - float(cached_at or 0.0), 0.0)
+
+
 def _load_cached_discovered_models(
     provider_id: str,
     *,
@@ -481,24 +572,29 @@ def _write_cached_discovered_models(
         logger.debug("Unable to write cached model metadata for %s/%s", transport, provider_id, exc_info=True)
 
 
-def _load_cached_gateway_provider_catalog() -> tuple[_GatewayCatalogProvider, ...]:
+def _load_cached_gateway_provider_catalog(
+    *,
+    max_age_seconds: float | None = None,
+) -> _CachedGatewayCatalog | None:
     cache_path = _gateway_catalog_cache_path()
     if not cache_path.exists():
-        return ()
+        return None
     try:
         payload = json.loads(cache_path.read_text(encoding="utf-8"))
     except Exception:
         logger.debug("Unable to read cached gateway provider catalog", exc_info=True)
-        return ()
+        return None
 
     cached_at = float(payload.get("cached_at") or 0)
-    age_seconds = max(time.time() - cached_at, 0.0)
+    age_seconds = _cache_age_seconds(cached_at)
     if age_seconds > _PROVIDER_CACHE_MAX_STALE_SECONDS:
-        return ()
+        return None
+    if max_age_seconds is not None and age_seconds > max_age_seconds:
+        return None
 
     providers_payload = payload.get("providers")
     if not isinstance(providers_payload, list):
-        return ()
+        return None
     providers: list[_GatewayCatalogProvider] = []
     for item in providers_payload:
         if not isinstance(item, dict):
@@ -514,17 +610,20 @@ def _load_cached_gateway_provider_catalog() -> tuple[_GatewayCatalogProvider, ..
                 models=provider.models,
             )
         )
-    return tuple(providers)
+    return _CachedGatewayCatalog(tuple(providers), cached_at=cached_at)
 
 
 def _write_cached_gateway_provider_catalog(
     providers: Sequence[_GatewayCatalogProvider],
+    *,
+    cached_at: float | None = None,
 ) -> None:
     if not providers:
         return
 
+    cache_time = float(cached_at or time.time())
     payload = {
-        "cached_at": time.time(),
+        "cached_at": cache_time,
         "providers": [
             {
                 "provider_id": provider.provider_id,
@@ -542,6 +641,48 @@ def _write_cached_gateway_provider_catalog(
         )
     except Exception:
         logger.debug("Unable to write cached gateway provider catalog", exc_info=True)
+
+
+def _load_in_memory_gateway_provider_catalog(
+    scope: str,
+    *,
+    max_age_seconds: float | None = None,
+) -> _CachedGatewayCatalog | None:
+    with _gateway_provider_catalogs_lock:
+        cached = _gateway_provider_catalogs.get(scope)
+    if cached is None:
+        return None
+    if max_age_seconds is not None and _cache_age_seconds(cached.cached_at) > max_age_seconds:
+        return None
+    return cached
+
+
+def _clear_gateway_selector_models() -> None:
+    with _provider_selector_models_lock:
+        for cache_key in [key for key in _provider_selector_models if key[0] == "gateway"]:
+            _provider_selector_models.pop(cache_key, None)
+
+
+def _store_gateway_provider_catalog(
+    scope: str,
+    providers: Sequence[_GatewayCatalogProvider],
+    *,
+    cached_at: float | None = None,
+) -> tuple[_GatewayCatalogProvider, ...]:
+    cached = _CachedGatewayCatalog(
+        providers=tuple(providers),
+        cached_at=float(cached_at or time.time()),
+    )
+    with _gateway_provider_catalogs_lock:
+        _gateway_provider_catalogs[scope] = cached
+    _clear_gateway_selector_models()
+    return cached.providers
+
+
+def _clear_gateway_provider_catalog(scope: str) -> None:
+    with _gateway_provider_catalogs_lock:
+        _gateway_provider_catalogs.pop(scope, None)
+    _clear_gateway_selector_models()
 
 
 def _read_settings_payload() -> dict[str, Any]:
@@ -755,24 +896,55 @@ def reset_gemini_model_cache() -> None:
     reset_provider_catalog_cache()
 
 
-def _gateway_provider_catalog() -> tuple[_GatewayCatalogProvider, ...]:
+def refresh_gateway_provider_catalog(*, force: bool = False) -> None:
+    """Refresh the cached gateway provider catalog when it is stale or forced."""
+
     scope = _gateway_catalog_scope()
-    with _gateway_provider_catalogs_lock:
-        cached = _gateway_provider_catalogs.get(scope)
-    if cached is not None:
-        return cached
+    in_memory = _load_in_memory_gateway_provider_catalog(scope)
+
+    if not force:
+        if in_memory is not None and _cache_age_seconds(in_memory.cached_at) <= _GATEWAY_CATALOG_FRESHNESS_SECONDS:
+            return
+
+        fresh_disk = _load_cached_gateway_provider_catalog(
+            max_age_seconds=_GATEWAY_CATALOG_FRESHNESS_SECONDS,
+        )
+        if fresh_disk is not None:
+            _store_gateway_provider_catalog(
+                scope,
+                fresh_disk.providers,
+                cached_at=fresh_disk.cached_at,
+            )
+            return
 
     discovered = _discover_gateway_provider_catalog_live()
     if discovered:
-        _write_cached_gateway_provider_catalog(discovered)
-        providers = discovered
-    else:
-        providers = _load_cached_gateway_provider_catalog()
+        cached_at = time.time()
+        _write_cached_gateway_provider_catalog(discovered, cached_at=cached_at)
+        _store_gateway_provider_catalog(scope, discovered, cached_at=cached_at)
+        return
 
-    with _gateway_provider_catalogs_lock:
-        _gateway_provider_catalogs[scope] = tuple(providers)
+    fallback = _load_cached_gateway_provider_catalog()
+    if fallback is None and in_memory is not None and _cache_age_seconds(in_memory.cached_at) <= _PROVIDER_CACHE_MAX_STALE_SECONDS:
+        fallback = in_memory
+    if fallback is not None:
+        age_seconds = _cache_age_seconds(fallback.cached_at)
+        if age_seconds > _GATEWAY_CATALOG_FRESHNESS_SECONDS:
+            logger.info(
+                "Gateway provider catalog refresh failed; using stale cache aged %.1f hours",
+                age_seconds / 3600.0,
+            )
+        _store_gateway_provider_catalog(scope, fallback.providers, cached_at=fallback.cached_at)
+        return
 
-    return tuple(providers)
+    _clear_gateway_provider_catalog(scope)
+
+
+def _gateway_provider_catalog() -> tuple[_GatewayCatalogProvider, ...]:
+    scope = _gateway_catalog_scope()
+    refresh_gateway_provider_catalog(force=False)
+    cached = _load_in_memory_gateway_provider_catalog(scope)
+    return cached.providers if cached is not None else ()
 
 
 def _discover_gateway_provider_catalog_live() -> tuple[_GatewayCatalogProvider, ...]:
@@ -1633,6 +1805,7 @@ __all__ = [
     "default_provider_catalog",
     "default_provider_catalog_for_transport",
     "provider_option_map",
+    "refresh_gateway_provider_catalog",
     "reset_gemini_model_cache",
     "reset_provider_catalog_cache",
     "resolve_catalog_model",

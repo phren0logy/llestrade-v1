@@ -197,6 +197,7 @@ def test_api_key_dialog_resets_gateway_probe_cache_and_warns_on_invalid_gateway_
 
     reset_calls = {"count": 0}
     catalog_reset_calls = {"count": 0}
+    gateway_refresh_calls = {"count": 0}
 
     def _fake_reset() -> None:
         reset_calls["count"] += 1
@@ -204,8 +205,13 @@ def test_api_key_dialog_resets_gateway_probe_cache_and_warns_on_invalid_gateway_
     def _fake_catalog_reset() -> None:
         catalog_reset_calls["count"] += 1
 
+    def _fake_gateway_refresh(*, force: bool = False) -> None:
+        assert force is True
+        gateway_refresh_calls["count"] += 1
+
     monkeypatch.setattr(api_key_dialog_module, "reset_gateway_access_check_cache", _fake_reset)
     monkeypatch.setattr(api_key_dialog_module, "reset_provider_catalog_cache", _fake_catalog_reset)
+    monkeypatch.setattr(api_key_dialog_module, "refresh_gateway_provider_catalog", _fake_gateway_refresh)
     monkeypatch.setattr(
         api_key_dialog_module,
         "default_provider_catalog_for_transport",
@@ -254,6 +260,7 @@ def test_api_key_dialog_resets_gateway_probe_cache_and_warns_on_invalid_gateway_
 
     assert reset_calls["count"] == 1
     assert catalog_reset_calls["count"] == 1
+    assert gateway_refresh_calls["count"] == 1
     assert warnings
     assert "rejected by the gateway" in warnings[0]
 

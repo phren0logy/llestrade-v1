@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
 
 from src.app.core.llm_catalog import (
     LLMReasoningCapabilities,
+    refresh_gateway_provider_catalog,
     reset_provider_catalog_cache,
     resolve_catalog_model,
 )
@@ -357,7 +358,10 @@ class LLMSettingsPanel(QWidget):
     def _refresh_models_clicked(self) -> None:
         current_provider = self.provider_combo.currentData()
         current_model = self.model_combo.currentData()
-        reset_provider_catalog_cache()
+        if self._transport == "gateway":
+            refresh_gateway_provider_catalog(force=True)
+        else:
+            reset_provider_catalog_cache()
         self._reload_catalog()
         provider_index = self.provider_combo.findData(current_provider)
         if provider_index != -1:

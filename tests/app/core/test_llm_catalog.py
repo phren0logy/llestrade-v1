@@ -57,6 +57,16 @@ def reset_gemini_cache() -> None:
     llm_catalog.reset_provider_catalog_cache()
 
 
+def _cached_gateway_catalog(
+    *providers: llm_catalog._GatewayCatalogProvider,
+    cached_at: float,
+) -> llm_catalog._CachedGatewayCatalog:
+    return llm_catalog._CachedGatewayCatalog(
+        providers=tuple(providers),
+        cached_at=cached_at,
+    )
+
+
 def test_runtime_default_model_for_gemini_prefers_stable_pro(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -115,7 +125,7 @@ def test_runtime_default_model_for_gateway_returns_none_without_gateway_catalog(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(llm_catalog, "_discover_gateway_provider_catalog_live", lambda: ())
-    monkeypatch.setattr(llm_catalog, "_load_cached_gateway_provider_catalog", lambda: ())
+    monkeypatch.setattr(llm_catalog, "_load_cached_gateway_provider_catalog", lambda max_age_seconds=None: None)
     monkeypatch.setattr(
         llm_catalog,
         "_snapshot",
@@ -136,6 +146,150 @@ def test_runtime_default_model_for_gateway_returns_none_without_gateway_catalog(
     )
 
     assert llm_catalog.runtime_default_model_for_provider("gemini", transport="gateway") is None
+
+
+def test_refresh_gateway_provider_catalog_uses_fresh_disk_cache_without_live_fetch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = 1_700_000_000.0
+    disk_catalog = _cached_gateway_catalog(
+        llm_catalog._GatewayCatalogProvider(
+            provider_id="gemini",
+            label="Google Gemini",
+            route="bulk",
+            models=(
+                llm_catalog.LLMModelOption(
+                    model_id="gemini-2.5-pro",
+                    label="Gemini 2.5 Pro",
+                    context_window=1_048_576,
+                ),
+            ),
+        ),
+        cached_at=now - 3600,
+    )
+    live_calls = {"count": 0}
+
+    monkeypatch.setattr(llm_catalog, "_gateway_catalog_scope", lambda: "gateway-scope")
+    monkeypatch.setattr(llm_catalog.time, "time", lambda: now)
+    monkeypatch.setattr(
+        llm_catalog,
+        "_load_cached_gateway_provider_catalog",
+        lambda max_age_seconds=None: disk_catalog
+        if max_age_seconds is None or (now - disk_catalog.cached_at) <= max_age_seconds
+        else None,
+    )
+    monkeypatch.setattr(
+        llm_catalog,
+        "_discover_gateway_provider_catalog_live",
+        lambda: live_calls.__setitem__("count", live_calls["count"] + 1) or (),
+    )
+
+    llm_catalog.refresh_gateway_provider_catalog()
+
+    catalog = llm_catalog.default_provider_catalog_for_transport(transport="gateway")
+
+    assert live_calls["count"] == 0
+    assert [provider.provider_id for provider in catalog] == ["gemini"]
+    assert catalog[0].models[0].model_id == "gemini-2.5-pro"
+
+
+def test_refresh_gateway_provider_catalog_fetches_live_when_cache_is_stale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = 1_700_000_000.0
+    stale_catalog = _cached_gateway_catalog(
+        llm_catalog._GatewayCatalogProvider(
+            provider_id="gemini",
+            label="Google Gemini",
+            route="bulk",
+            models=(
+                llm_catalog.LLMModelOption(
+                    model_id="gemini-2.5-flash",
+                    label="Gemini 2.5 Flash",
+                    context_window=1_048_576,
+                ),
+            ),
+        ),
+        cached_at=now - (llm_catalog._GATEWAY_CATALOG_FRESHNESS_SECONDS + 10),
+    )
+    live_catalog = (
+        llm_catalog._GatewayCatalogProvider(
+            provider_id="gemini",
+            label="Google Gemini",
+            route="bulk",
+            models=(
+                llm_catalog.LLMModelOption(
+                    model_id="gemini-2.5-pro",
+                    label="Gemini 2.5 Pro",
+                    context_window=1_048_576,
+                ),
+            ),
+        ),
+    )
+    live_calls = {"count": 0}
+
+    monkeypatch.setattr(llm_catalog, "_gateway_catalog_scope", lambda: "gateway-scope")
+    monkeypatch.setattr(llm_catalog.time, "time", lambda: now)
+    monkeypatch.setattr(
+        llm_catalog,
+        "_load_cached_gateway_provider_catalog",
+        lambda max_age_seconds=None: stale_catalog
+        if max_age_seconds is None
+        else None,
+    )
+    monkeypatch.setattr(llm_catalog, "_write_cached_gateway_provider_catalog", lambda *args, **kwargs: None)
+
+    def _discover_live():
+        live_calls["count"] += 1
+        return live_catalog
+
+    monkeypatch.setattr(llm_catalog, "_discover_gateway_provider_catalog_live", _discover_live)
+
+    llm_catalog.refresh_gateway_provider_catalog()
+
+    resolved = llm_catalog.runtime_default_model_for_provider("gemini", transport="gateway")
+
+    assert live_calls["count"] == 1
+    assert resolved == "gemini-2.5-pro"
+
+
+def test_refresh_gateway_provider_catalog_falls_back_to_stale_cache_when_live_fetch_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = 1_700_000_000.0
+    stale_catalog = _cached_gateway_catalog(
+        llm_catalog._GatewayCatalogProvider(
+            provider_id="anthropic",
+            label="Anthropic Claude",
+            route="bulk",
+            models=(
+                llm_catalog.LLMModelOption(
+                    model_id="claude-sonnet-4-5",
+                    label="Claude Sonnet 4.5",
+                    context_window=200_000,
+                ),
+            ),
+        ),
+        cached_at=now - (llm_catalog._GATEWAY_CATALOG_FRESHNESS_SECONDS + 10),
+    )
+
+    monkeypatch.setattr(llm_catalog, "_gateway_catalog_scope", lambda: "gateway-scope")
+    monkeypatch.setattr(llm_catalog.time, "time", lambda: now)
+    monkeypatch.setattr(
+        llm_catalog,
+        "_load_cached_gateway_provider_catalog",
+        lambda max_age_seconds=None: stale_catalog
+        if max_age_seconds is None
+        else None,
+    )
+    monkeypatch.setattr(llm_catalog, "_discover_gateway_provider_catalog_live", lambda: ())
+
+    llm_catalog.refresh_gateway_provider_catalog()
+
+    catalog = llm_catalog.default_provider_catalog_for_transport(transport="gateway")
+
+    assert [provider.provider_id for provider in catalog] == ["anthropic"]
+    assert catalog[0].models[0].model_id == "claude-sonnet-4-5"
 
 
 def test_gateway_provider_catalog_uses_gateway_payload_without_snapshot_fallback(
