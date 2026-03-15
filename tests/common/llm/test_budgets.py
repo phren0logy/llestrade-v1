@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from src.app.core import llm_catalog
 from src.common.llm.budgets import compute_input_token_budget
 from src.common.llm.request_budget import (
     compute_preflight_input_budget,
     compute_request_input_budget,
     count_request_input_tokens,
     evaluate_request_budget,
+    resolve_request_raw_context_window,
 )
 
 
@@ -46,7 +48,7 @@ def test_compute_request_input_budget_applies_explicit_limit_override() -> None:
         model_id="gpt-5-mini",
         raw_context_window=400_000,
         max_output_tokens=32_000,
-        input_budget_limit=200_000,
+        runtime_input_budget_limit=200_000,
     )
 
     assert raw_context_window == 400_000
@@ -78,3 +80,28 @@ def test_evaluate_request_budget_reports_fit_against_shared_budget() -> None:
     assert evaluation.input_tokens == 52_140
     assert evaluation.fits is False
     assert evaluation.count_mode == "exact"
+
+
+def test_resolve_request_raw_context_window_uses_transport_aware_catalog_lookup(monkeypatch) -> None:
+    captured: dict[str, str] = {}
+
+    def _fake_resolve_model_context_window(provider_id: str, model_id: str | None, *, transport: str = "direct"):
+        captured["provider_id"] = provider_id
+        captured["model_id"] = model_id or ""
+        captured["transport"] = transport
+        return 200_000
+
+    monkeypatch.setattr(llm_catalog, "resolve_model_context_window", _fake_resolve_model_context_window)
+
+    resolved = resolve_request_raw_context_window(
+        provider_id="openai",
+        model_id="o3",
+        transport="gateway",
+    )
+
+    assert resolved == 200_000
+    assert captured == {
+        "provider_id": "openai",
+        "model_id": "o3",
+        "transport": "gateway",
+    }

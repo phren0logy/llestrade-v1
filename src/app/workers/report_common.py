@@ -224,6 +224,7 @@ class ReportWorkerBase(DashboardWorker):
             max_output_tokens=max_output_tokens,
             explicit_context_window=self._context_window,
             minimum_budget=_MIN_REPORT_INPUT_BUDGET,
+            transport=backend_transport_name(self._llm_backend),
         )
         return input_budget
 
@@ -244,6 +245,7 @@ class ReportWorkerBase(DashboardWorker):
             max_output_tokens=max_output_tokens,
             explicit_context_window=self._context_window,
             minimum_budget=_MIN_REPORT_INPUT_BUDGET,
+            transport=backend_transport_name(self._llm_backend),
             exact_token_counter=lambda: self._llm_backend.count_input_tokens(
                 provider,
                 LLMInvocationRequest(

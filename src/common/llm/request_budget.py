@@ -9,6 +9,7 @@ from .budgets import DEFAULT_MIN_INPUT_BUDGET, compute_input_token_budget
 from .tokens import TokenCounter
 
 RequestCountMode = Literal["exact", "estimate"]
+RequestCatalogTransport = Literal["direct", "gateway"]
 DEFAULT_PREFLIGHT_BUDGET_RATIO = 1.0
 OPENAI_PREFLIGHT_BUDGET_RATIO = 0.80
 _OPENAI_PROVIDER_IDS = {"openai", "azure_openai"}
@@ -61,22 +62,20 @@ def resolve_request_raw_context_window(
     provider_id: str,
     model_id: str | None,
     explicit_context_window: int | None = None,
+    transport: RequestCatalogTransport = "direct",
 ) -> int | None:
     if isinstance(explicit_context_window, int) and explicit_context_window > 0:
         return int(explicit_context_window)
 
-    model_key = str(model_id or provider_id or "").strip()
-    if not model_key:
-        return None
-
     try:
-        return int(
-            TokenCounter.get_model_context_window(
-                model_key,
-                ratio=1.0,
-                provider_id=provider_id or None,
-            )
+        from src.app.core.llm_catalog import resolve_model_context_window
+
+        resolved = resolve_model_context_window(
+            provider_id=provider_id,
+            model_id=model_id,
+            transport=transport,
         )
+        return int(resolved) if isinstance(resolved, int) and resolved > 0 else None
     except Exception:
         return None
 
@@ -89,8 +88,17 @@ def compute_request_input_budget(
     explicit_context_window: int | None = None,
     raw_context_window: int | None = None,
     minimum_budget: int = DEFAULT_MIN_INPUT_BUDGET,
+    runtime_input_budget_limit: int | None = None,
     input_budget_limit: int | None = None,
+    transport: RequestCatalogTransport = "direct",
 ) -> tuple[int | None, int | None]:
+    resolved_runtime_limit = (
+        int(runtime_input_budget_limit)
+        if isinstance(runtime_input_budget_limit, int) and runtime_input_budget_limit > 0
+        else int(input_budget_limit)
+        if isinstance(input_budget_limit, int) and input_budget_limit > 0
+        else None
+    )
     resolved_raw_context_window = (
         int(raw_context_window)
         if isinstance(raw_context_window, int) and raw_context_window > 0
@@ -98,6 +106,7 @@ def compute_request_input_budget(
             provider_id=provider_id,
             model_id=model_id,
             explicit_context_window=explicit_context_window,
+            transport=transport,
         )
     )
     input_budget = compute_input_token_budget(
@@ -105,11 +114,11 @@ def compute_request_input_budget(
         max_output_tokens=max_output_tokens,
         minimum_budget=minimum_budget,
     )
-    if isinstance(input_budget_limit, int) and input_budget_limit > 0:
+    if resolved_runtime_limit is not None:
         input_budget = (
-            min(input_budget, input_budget_limit)
+            min(input_budget, resolved_runtime_limit)
             if isinstance(input_budget, int) and input_budget > 0
-            else int(input_budget_limit)
+            else resolved_runtime_limit
         )
     return resolved_raw_context_window, input_budget
 
@@ -177,7 +186,9 @@ def evaluate_request_budget(
     explicit_context_window: int | None = None,
     raw_context_window: int | None = None,
     minimum_budget: int = DEFAULT_MIN_INPUT_BUDGET,
+    runtime_input_budget_limit: int | None = None,
     input_budget_limit: int | None = None,
+    transport: RequestCatalogTransport = "direct",
     exact_token_counter: Callable[[], int | None] | None = None,
 ) -> RequestBudgetEvaluation:
     resolved_raw_context_window, runtime_input_budget = compute_request_input_budget(
@@ -187,7 +198,9 @@ def evaluate_request_budget(
         explicit_context_window=explicit_context_window,
         raw_context_window=raw_context_window,
         minimum_budget=minimum_budget,
+        runtime_input_budget_limit=runtime_input_budget_limit,
         input_budget_limit=input_budget_limit,
+        transport=transport,
     )
     preflight_input_budget = compute_preflight_input_budget(
         provider_id=provider_id,
@@ -215,6 +228,7 @@ def evaluate_request_budget(
 
 __all__ = [
     "RequestBudgetEvaluation",
+    "RequestCatalogTransport",
     "RequestCountMode",
     "compute_preflight_input_budget",
     "compute_request_input_budget",

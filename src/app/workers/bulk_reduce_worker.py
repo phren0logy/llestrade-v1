@@ -41,8 +41,11 @@ from src.app.core.bulk_prompt_context import build_bulk_placeholders
 from src.app.core.placeholders.system import SourceFileContext
 from src.app.core.project_manager import ProjectMetadata
 from src.common.llm.budgets import compute_input_token_budget
-from src.common.llm.request_budget import compute_preflight_input_budget, evaluate_request_budget
-from src.common.llm.tokens import TokenCounter
+from src.common.llm.request_budget import (
+    compute_preflight_input_budget,
+    evaluate_request_budget,
+    resolve_request_raw_context_window,
+)
 from src.config.observability import trace_operation
 from src.common.markdown import (
     PromptReference,
@@ -485,22 +488,13 @@ class BulkReduceWorker(DashboardWorker):
             if self.is_cancelled():
                 raise BulkAnalysisCancelled
 
-            override_window = getattr(self._group, "model_context_window", None)
-            if isinstance(override_window, int) and override_window > 0:
-                from src.common.llm.tokens import TokenCounter
-
-                token_info = TokenCounter.count(
-                    text=combined_content,
-                    provider=provider_cfg.provider_id,
-                    model=provider_cfg.model or "",
-                )
-                token_count = token_info.get("token_count") if token_info.get("success") else len(combined_content) // 4
-                max_tokens = max(int(override_window * 0.5), 4000)
-                needs_chunking = token_count > max_tokens
-            else:
-                needs_chunking, token_count, max_tokens = should_chunk(
-                    combined_content, provider_cfg.provider_id, provider_cfg.model
-                )
+            raw_context_window = self._resolve_raw_context_window(provider_cfg)
+            needs_chunking, token_count, max_tokens = should_chunk(
+                combined_content,
+                provider_cfg.provider_id,
+                provider_cfg.model,
+                raw_context_window=raw_context_window,
+            )
             self.log_message.emit(
                 f"Combined content tokens={token_count}, chunking={'yes' if needs_chunking else 'no'}"
             )
@@ -695,7 +689,8 @@ class BulkReduceWorker(DashboardWorker):
                             user_prompt=prompt,
                             max_output_tokens=32_000,
                             minimum_budget=_MIN_INPUT_TOKEN_BUDGET,
-                            input_budget_limit=input_budget,
+                            runtime_input_budget_limit=input_budget,
+                            transport=backend_transport_name(self._llm_backend),
                             exact_token_counter=lambda: self._llm_backend.count_input_tokens(
                                 provider,
                                 LLMInvocationRequest(
@@ -760,13 +755,14 @@ class BulkReduceWorker(DashboardWorker):
                         _save_manifest(state_manifest_path, current_manifest)
                         recovery_store.save_reduce_manifest(recovery_manifest)
 
-                        result = combine_chunk_summaries_hierarchical(
+                    result = combine_chunk_summaries_hierarchical(
                         chunk_summaries,
                         document_name=self._group.name,
                         metadata=self._metadata,
                         placeholder_values=placeholders_global,
                         provider_id=provider_cfg.provider_id,
                         model=provider_cfg.model,
+                        raw_context_window=raw_context_window,
                         invoke_fn=invoke_combine,
                         is_cancelled_fn=self.is_cancelled,
                         load_batch_fn=load_batch,
@@ -1134,7 +1130,8 @@ class BulkReduceWorker(DashboardWorker):
                 user_prompt=prompt,
                 max_output_tokens=max_tokens,
                 minimum_budget=_MIN_INPUT_TOKEN_BUDGET,
-                input_budget_limit=preflight_input_budget if preflight_input_budget is not None else input_budget,
+                runtime_input_budget_limit=input_budget,
+                transport=backend_transport_name(self._llm_backend),
                 exact_token_counter=lambda: self._llm_backend.count_input_tokens(
                     provider,
                     LLMInvocationRequest(
@@ -1197,23 +1194,46 @@ class BulkReduceWorker(DashboardWorker):
         return content
 
     def _max_input_budget(self, provider_cfg: ProviderConfig, *, max_output_tokens: int) -> int | None:
-        raw_context_window = normalize_context_window_override(
+        raw_context_window = resolve_request_raw_context_window(
             provider_id=provider_cfg.provider_id,
             model_id=provider_cfg.model,
-            context_window=getattr(self._group, "model_context_window", None),
+            explicit_context_window=normalize_context_window_override(
+                provider_id=provider_cfg.provider_id,
+                model_id=provider_cfg.model,
+                context_window=getattr(self._group, "model_context_window", None),
+                transport=backend_transport_name(self._llm_backend),
+            ),
+            transport=backend_transport_name(self._llm_backend),
         )
         if not isinstance(raw_context_window, int) or raw_context_window <= 0:
-            model_key = provider_cfg.model or provider_cfg.provider_id
-            raw_context_window = TokenCounter.get_model_context_window(
-                model_key,
-                ratio=1.0,
-                provider_id=provider_cfg.provider_id,
+            raise RuntimeError(
+                f"Unknown context window for provider={provider_cfg.provider_id} "
+                f"model={provider_cfg.model or ''}. Choose a preset model with metadata or enter a context window."
             )
 
         return compute_input_token_budget(
             raw_context_window=raw_context_window,
             max_output_tokens=max_output_tokens,
             minimum_budget=_MIN_INPUT_TOKEN_BUDGET,
+        )
+
+    def _resolve_raw_context_window(self, provider_cfg: ProviderConfig) -> int:
+        raw_context_window = resolve_request_raw_context_window(
+            provider_id=provider_cfg.provider_id,
+            model_id=provider_cfg.model,
+            explicit_context_window=normalize_context_window_override(
+                provider_id=provider_cfg.provider_id,
+                model_id=provider_cfg.model,
+                context_window=getattr(self._group, "model_context_window", None),
+                transport=backend_transport_name(self._llm_backend),
+            ),
+            transport=backend_transport_name(self._llm_backend),
+        )
+        if isinstance(raw_context_window, int) and raw_context_window > 0:
+            return raw_context_window
+        raise RuntimeError(
+            f"Unknown context window for provider={provider_cfg.provider_id} "
+            f"model={provider_cfg.model or ''}. Choose a preset model with metadata or enter a context window."
         )
 
     def _timestamp(self) -> str:

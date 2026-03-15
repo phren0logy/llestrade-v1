@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart
@@ -590,6 +591,44 @@ def test_bulk_reduce_passes_computed_input_budget_to_backend(
     assert result == "summary"
     assert len(backend.requests) == 1
     assert backend.requests[0].input_tokens_limit == 44_220
+
+
+def test_bulk_reduce_uses_runtime_budget_without_double_applying_openai_preflight(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    group = BulkAnalysisGroup.create("Group")
+    backend = _CapturingBackend(_model_response("summary", model_name="gpt-5-mini", output_tokens=1))
+    worker = BulkReduceWorker(
+        project_dir=tmp_path,
+        group=group,
+        metadata=ProjectMetadata(case_name="Case"),
+        force_rerun=False,
+        llm_backend=backend,
+    )
+
+    captured: dict[str, object] = {}
+
+    def _fake_evaluate_request_budget(**kwargs):  # noqa: ANN001
+        captured.update(kwargs)
+        return SimpleNamespace(fits=True, input_tokens=189_199, preflight_input_budget=193_776)
+
+    monkeypatch.setattr(reduce_module, "evaluate_request_budget", _fake_evaluate_request_budget)
+
+    result = worker._invoke_provider(
+        provider=object(),
+        provider_cfg=ProviderConfig(provider_id="openai", model="gpt-5-mini", temperature=0.1),
+        prompt="Prompt",
+        system_prompt="System",
+        input_budget=242_220,
+        preflight_input_budget=193_776,
+    )
+
+    assert result == "summary"
+    assert captured["runtime_input_budget_limit"] == 242_220
+    assert captured["transport"] == "direct"
+    assert len(backend.requests) == 1
+    assert backend.requests[0].input_tokens_limit == 242_220
 
 
 def test_bulk_reduce_ignores_stale_context_override_for_catalog_model(

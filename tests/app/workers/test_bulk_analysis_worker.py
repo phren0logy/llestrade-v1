@@ -824,6 +824,38 @@ def test_invoke_provider_rejects_over_budget_prompt(tmp_path: Path) -> None:
             context_label="document 'doc.md'",
         )
 
+
+def test_invoke_provider_uses_runtime_budget_without_double_applying_openai_preflight(
+    tmp_path: Path,
+) -> None:
+    group = BulkAnalysisGroup.create("Group")
+    backend = _CountingBackend(token_count=189_199)
+    worker = BulkAnalysisWorker(
+        project_dir=tmp_path,
+        group=group,
+        files=[],
+        metadata=ProjectMetadata(case_name="Case"),
+        force_rerun=True,
+        llm_backend=backend,
+    )
+
+    config = ProviderConfig(provider_id="openai", model="gpt-5-mini")
+
+    result = worker._invoke_provider(
+        object(),
+        config,
+        "user prompt",
+        "system prompt",
+        input_budget=242_220,
+        preflight_input_budget=193_776,
+        context_label="combine summary for 'doc.md'",
+    )
+
+    assert result == "summary"
+    assert backend.invoked is True
+    assert len(backend.requests) == 1
+    assert backend.requests[0].input_tokens_limit == 242_220
+
 def test_process_document_forces_chunking_when_full_prompt_exceeds_budget(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1057,6 +1089,7 @@ def test_bulk_worker_chunked_document_reassembles_parallel_results_in_order(
         run_details={},
         body="body",
         chunks=["chunk-1", "chunk-2", "chunk-3"],
+        raw_context_window=400_000,
         input_budget=100_000,
         preflight_input_budget=80_000,
     )
@@ -1118,6 +1151,7 @@ def test_bulk_worker_passes_runtime_budget_and_count_callback_to_hierarchical_co
         captured["summaries"] = list(summaries)
         captured["input_budget"] = kwargs["input_budget"]
         captured["runtime_input_budget"] = kwargs["runtime_input_budget"]
+        captured["raw_context_window"] = kwargs["raw_context_window"]
         captured["counted"] = kwargs["count_prompt_tokens_fn"]("combine prompt")
         return "combined"
 
@@ -1138,6 +1172,7 @@ def test_bulk_worker_passes_runtime_budget_and_count_callback_to_hierarchical_co
         run_details={},
         body="body",
         chunks=["chunk-1", "chunk-2"],
+        raw_context_window=400_000,
         input_budget=242_220,
         preflight_input_budget=193_776,
     )
@@ -1147,4 +1182,5 @@ def test_bulk_worker_passes_runtime_budget_and_count_callback_to_hierarchical_co
     assert captured["summaries"] == ["summary-1", "summary-2"]
     assert captured["input_budget"] == 193_776
     assert captured["runtime_input_budget"] == 242_220
+    assert captured["raw_context_window"] == 400_000
     assert captured["counted"] == 4321

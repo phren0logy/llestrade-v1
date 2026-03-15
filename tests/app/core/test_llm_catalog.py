@@ -442,6 +442,18 @@ def test_default_provider_catalog_for_transport_uses_live_openai_discovery_with_
     assert resolved.output_price_label == "$12.5/1M"
 
 
+def test_resolve_model_context_window_uses_temporary_openai_fallback_when_metadata_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(llm_catalog, "_iter_selector_models", lambda *_args, **_kwargs: ())
+    monkeypatch.setattr(llm_catalog, "_resolve_snapshot_catalog_model", lambda *_args, **_kwargs: None)
+
+    assert llm_catalog.resolve_model_context_window("openai", "o3") == 200_000
+    assert llm_catalog.resolve_model_context_window("openai", "o4-mini") == 200_000
+    assert llm_catalog.resolve_model_context_window("azure_openai", "o1") == 128_000
+    assert llm_catalog.resolve_model_context_window("anthropic", "unknown-model") is None
+
+
 def test_gateway_model_option_from_payload_uses_gateway_metadata(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

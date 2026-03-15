@@ -36,8 +36,8 @@ from src.common.llm.request_budget import (
     compute_request_input_budget,
     estimate_request_input_tokens,
     evaluate_request_budget,
+    resolve_request_raw_context_window,
 )
-from src.common.llm.tokens import TokenCounter
 from src.app.workers.bulk_analysis_worker import (
     _DEFAULT_MAX_OUTPUT_TOKENS as _BULK_MAX_TOKENS,
     _MIN_CHUNK_TOKEN_TARGET,
@@ -360,22 +360,22 @@ def estimate_bulk_map_cost(
             model_id=provider_config.model,
             context_window=getattr(group, "model_context_window", None),
         )
-        if isinstance(override_window, int) and override_window > 0:
-            raw_context_window = int(override_window)
-            token_count = _token_estimate(body, provider_id=provider_config.provider_id, model_id=provider_config.model)
-            default_chunk_tokens = max(int(raw_context_window * 0.5), _MIN_CHUNK_TOKEN_TARGET)
-            needs_chunking = token_count > default_chunk_tokens
-        else:
-            needs_chunking, token_count, default_chunk_tokens = should_chunk(
-                body,
-                provider_config.provider_id,
-                provider_config.model,
+        raw_context_window = resolve_request_raw_context_window(
+            provider_id=provider_config.provider_id,
+            model_id=provider_config.model,
+            explicit_context_window=override_window if isinstance(override_window, int) and override_window > 0 else None,
+        )
+        if not isinstance(raw_context_window, int) or raw_context_window <= 0:
+            raise RuntimeError(
+                f"Unknown context window for provider={provider_config.provider_id} "
+                f"model={provider_config.model or ''}. Choose a preset model with metadata or enter a context window."
             )
-            raw_context_window = TokenCounter.get_model_context_window(
-                provider_config.model or provider_config.provider_id,
-                ratio=1.0,
-                provider_id=provider_config.provider_id,
-            )
+        needs_chunking, token_count, default_chunk_tokens = should_chunk(
+            body,
+            provider_config.provider_id,
+            provider_config.model,
+            raw_context_window=raw_context_window,
+        )
         _, input_budget = compute_request_input_budget(
             provider_id=provider_config.provider_id,
             model_id=provider_config.model,
@@ -579,6 +579,11 @@ def estimate_bulk_reduce_cost(
         model_id=provider_cfg.model,
         context_window=getattr(group, "model_context_window", None),
     )
+    raw_context_window = resolve_request_raw_context_window(
+        provider_id=provider_cfg.provider_id,
+        model_id=provider_cfg.model,
+        explicit_context_window=raw_context_window if isinstance(raw_context_window, int) and raw_context_window > 0 else None,
+    )
     _, input_budget = compute_request_input_budget(
         provider_id=provider_cfg.provider_id,
         model_id=provider_cfg.model,
@@ -592,7 +597,17 @@ def estimate_bulk_reduce_cost(
         runtime_input_budget=input_budget,
         minimum_budget=_MIN_INPUT_TOKEN_BUDGET,
     ) or _MIN_INPUT_TOKEN_BUDGET
-    needs_chunking, token_count, max_tokens = should_chunk(content, provider_cfg.provider_id, provider_cfg.model)
+    if not isinstance(raw_context_window, int) or raw_context_window <= 0:
+        raise RuntimeError(
+            f"Unknown context window for provider={provider_cfg.provider_id} "
+            f"model={provider_cfg.model or ''}. Choose a preset model with metadata or enter a context window."
+        )
+    needs_chunking, token_count, max_tokens = should_chunk(
+        content,
+        provider_cfg.provider_id,
+        provider_cfg.model,
+        raw_context_window=raw_context_window,
+    )
     recovery = BulkRecoveryStore(project_dir / "bulk_analysis" / (getattr(group, "slug", None) or group.folder_name))
     manifest = recovery.load_reduce_manifest()
     completed_chunks = {

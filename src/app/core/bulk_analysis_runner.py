@@ -11,7 +11,7 @@ from typing import Callable, Dict, Iterable, List, Mapping, Optional, Sequence
 from src.app.core.azure_artifacts import is_azure_raw_artifact
 from src.common.llm.chunking import ChunkingStrategy
 from src.common.llm.request_budget import estimate_request_input_tokens
-from src.common.llm.tokens import TokenCounter
+from src.common.llm.tokens import SAFE_WINDOW_RATIO, TokenCounter
 from src.config.paths import app_base_dir, app_resource_root
 from src.config.prompt_store import get_bundled_dir, get_custom_dir
 
@@ -168,6 +168,8 @@ def should_chunk(
     content: str,
     provider_id: str,
     model_name: Optional[str],
+    *,
+    raw_context_window: int,
 ) -> tuple[bool, int, int]:
     """Return whether chunking is required and the relevant token counts."""
 
@@ -183,10 +185,7 @@ def should_chunk(
         tokens = conservative_estimate
     if not model_name:
         raise RuntimeError("A model must be selected before bulk chunk sizing can be calculated.")
-    context_window = TokenCounter.get_model_context_window(
-        model_name,
-        provider_id=provider_id,
-    )
+    context_window = int(raw_context_window * SAFE_WINDOW_RATIO)
     max_tokens_per_chunk = max(context_window, 4000)
     return tokens > max_tokens_per_chunk, tokens, max_tokens_per_chunk
 
@@ -275,6 +274,7 @@ def combine_chunk_summaries_hierarchical(
     placeholder_values: Mapping[str, str] | None = None,
     provider_id: str,
     model: Optional[str] = None,
+    raw_context_window: int | None = None,
     invoke_fn,
     is_cancelled_fn=None,
     load_batch_fn=None,
@@ -316,15 +316,16 @@ def combine_chunk_summaries_hierarchical(
     # Calculate thresholds from the model's context window with a 65% safety buffer.
     if not model:
         raise RuntimeError("A model must be selected before hierarchical reduction can run.")
-    raw_context_window = TokenCounter.get_model_context_window(
-        model,
-        ratio=1.0,
-        provider_id=provider_id,
+    resolved_raw_context_window = (
+        int(raw_context_window)
+        if isinstance(raw_context_window, int) and raw_context_window > 0
+        else TokenCounter.get_model_context_window(
+            model,
+            ratio=1.0,
+            provider_id=provider_id,
+        )
     )
-    context_window = TokenCounter.get_model_context_window(
-        model,
-        provider_id=provider_id,
-    )
+    context_window = int(resolved_raw_context_window * SAFE_WINDOW_RATIO)
     derived_max_combine_tokens = int(context_window * 0.95)
     max_combine_tokens = (
         int(input_budget)
@@ -341,7 +342,7 @@ def combine_chunk_summaries_hierarchical(
                 max_combine_tokens,
                 runtime_input_budget,
                 context_window,
-                raw_context_window,
+                resolved_raw_context_window,
             )
         else:
             logger.info(
@@ -350,12 +351,12 @@ def combine_chunk_summaries_hierarchical(
                 len(summaries),
                 max_combine_tokens,
                 context_window,
-                raw_context_window,
+                resolved_raw_context_window,
             )
     else:
         logger.info(
             f"Hierarchical reduction starting: {len(summaries)} summaries, "
-            f"max_combine_tokens={max_combine_tokens} (~95% of safe window {context_window}, raw {raw_context_window})"
+            f"max_combine_tokens={max_combine_tokens} (~95% of safe window {context_window}, raw {resolved_raw_context_window})"
         )
 
     # Step 1: Try single-pass combination (existing behavior for small documents)
@@ -564,6 +565,12 @@ def combine_chunk_summaries_hierarchical(
                 metadata=metadata,
                 placeholder_values=placeholder_values,
             )
+            batch_prompt_tokens = _count_prompt_tokens(
+                batch_prompt,
+                provider_id=provider_id,
+                model=model,
+                count_prompt_tokens_fn=count_prompt_tokens_fn,
+            )
 
             # Invoke LLM to combine this batch
             try:
@@ -581,6 +588,82 @@ def combine_chunk_summaries_hierarchical(
                 next_level_summaries.append(batch_result)
                 logger.info(f"Level {level}, batch {batch_idx + 1} completed successfully")
             except Exception as e:
+                if _is_input_budget_exceeded_error(e) and len(batch) > 1:
+                    fallback_budget = max(int(max_combine_tokens * 0.5), 4000)
+                    logger.warning(
+                        "Level %s, batch %s exceeded runtime budget at invocation "
+                        "(prompt=%s, planning budget=%s, runtime budget=%s); retrying with smaller combine budget %s",
+                        level,
+                        batch_idx + 1,
+                        batch_prompt_tokens,
+                        max_combine_tokens,
+                        runtime_input_budget,
+                        fallback_budget,
+                    )
+                    retry_budget = fallback_budget if fallback_budget < max_combine_tokens else None
+                    if retry_budget is not None:
+                        batch_result = combine_chunk_summaries_hierarchical(
+                            batch,
+                            document_name=document_name,
+                            metadata=metadata,
+                            placeholder_values=placeholder_values,
+                            provider_id=provider_id,
+                            model=model,
+                            raw_context_window=resolved_raw_context_window,
+                            invoke_fn=invoke_fn,
+                            is_cancelled_fn=is_cancelled_fn,
+                            input_budget=retry_budget,
+                            runtime_input_budget=runtime_input_budget,
+                            count_prompt_tokens_fn=count_prompt_tokens_fn,
+                        )
+                    else:
+                        retry_batches = _split_batch_for_retry(
+                            batch,
+                            provider_id=provider_id,
+                            model=model,
+                        )
+                        retry_results: List[str] = []
+                        for retry_batch in retry_batches:
+                            if len(retry_batch) == 1:
+                                retry_results.append(retry_batch[0])
+                                continue
+                            retry_results.append(
+                                combine_chunk_summaries_hierarchical(
+                                    retry_batch,
+                                    document_name=document_name,
+                                    metadata=metadata,
+                                    placeholder_values=placeholder_values,
+                                    provider_id=provider_id,
+                                    model=model,
+                                    raw_context_window=resolved_raw_context_window,
+                                    invoke_fn=invoke_fn,
+                                    is_cancelled_fn=is_cancelled_fn,
+                                    input_budget=max_combine_tokens,
+                                    runtime_input_budget=runtime_input_budget,
+                                    count_prompt_tokens_fn=count_prompt_tokens_fn,
+                                )
+                            )
+                        batch_result = combine_chunk_summaries_hierarchical(
+                            retry_results,
+                            document_name=document_name,
+                            metadata=metadata,
+                            placeholder_values=placeholder_values,
+                            provider_id=provider_id,
+                            model=model,
+                            raw_context_window=resolved_raw_context_window,
+                            invoke_fn=invoke_fn,
+                            is_cancelled_fn=is_cancelled_fn,
+                            input_budget=max_combine_tokens,
+                            runtime_input_budget=runtime_input_budget,
+                            count_prompt_tokens_fn=count_prompt_tokens_fn,
+                        )
+                    next_level_summaries.append(batch_result)
+                    logger.info(
+                        "Level %s, batch %s completed successfully after smaller rebatching",
+                        level,
+                        batch_idx + 1,
+                    )
+                    continue
                 # Wrap error with context
                 logger.error(
                     f"Level {level}, batch {batch_idx + 1} failed: {e}",
@@ -612,6 +695,28 @@ def _batch_checksum(batch: List[str]) -> str:
     """Return a stable checksum for a batch of summaries."""
     joined = "\n\n---\n\n".join(batch)
     return hashlib.sha256(joined.encode("utf-8")).hexdigest()
+
+
+def _split_batch_for_retry(
+    batch: Sequence[str],
+    *,
+    provider_id: str,
+    model: Optional[str],
+) -> list[list[str]]:
+    left: list[str] = []
+    right: list[str] = []
+    left_tokens = 0
+    right_tokens = 0
+    for summary in sorted(batch, key=lambda item: _count_tokens(item, provider_id, model), reverse=True):
+        summary_tokens = _count_tokens(summary, provider_id, model)
+        if left_tokens <= right_tokens:
+            left.append(summary)
+            left_tokens += summary_tokens
+        else:
+            right.append(summary)
+            right_tokens += summary_tokens
+    result = [group for group in (left, right) if group]
+    return result if len(result) >= 2 else [list(batch[:1]), list(batch[1:])]
 
 
 def _count_tokens(text: str, provider_id: str, model: Optional[str]) -> int:

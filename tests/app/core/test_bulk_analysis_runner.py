@@ -233,6 +233,41 @@ def test_combine_chunk_summaries_hierarchical_falls_back_after_single_pass_input
     assert len(invoke_calls) == 2
 
 
+def test_combine_chunk_summaries_hierarchical_rebatches_after_runtime_budget_error() -> None:
+    summaries = ["Summary A", "Summary B", "Summary C", "Summary D"]
+    invoke_calls: list[str] = []
+    failed = {"value": False}
+
+    def mock_invoke(prompt: str) -> str:
+        invoke_calls.append(prompt)
+        if prompt.count("Summary") >= 3 and not failed["value"]:
+            failed["value"] = True
+            raise RuntimeError("Prompt exceeds model input budget for combine summary")
+        return "tiny"
+
+    def count_prompt_tokens(prompt: str) -> int:
+        return (prompt.count("Summary") * 30) + 10
+
+    result = runner.combine_chunk_summaries_hierarchical(
+        summaries,
+        document_name="Doc",
+        metadata=None,
+        placeholder_values=None,
+        provider_id="openai",
+        model="gpt-5-mini",
+        raw_context_window=400_000,
+        invoke_fn=mock_invoke,
+        is_cancelled_fn=None,
+        input_budget=100,
+        runtime_input_budget=125,
+        count_prompt_tokens_fn=count_prompt_tokens,
+    )
+
+    assert result == "tiny"
+    assert failed["value"] is True
+    assert len(invoke_calls) >= 3
+
+
 def test_generate_chunks_enforces_hard_cap_for_large_sections() -> None:
     max_tokens = 100
     large_section = "A" * 5000

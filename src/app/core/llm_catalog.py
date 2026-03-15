@@ -63,6 +63,11 @@ _MODEL_FAMILY_MATCHERS: dict[str, tuple[str, ...]] = {
 _RUNTIME_CONTEXT_WINDOW_CAPS: dict[str, int] = {
     "anthropic": 200_000,
 }
+_TEMPORARY_OPENAI_CONTEXT_WINDOW_FALLBACKS: tuple[tuple[str, int], ...] = (
+    ("chatgpt-4o-latest", 128_000),
+    ("o4-mini", 200_000),
+    ("o3", 200_000),
+)
 
 _catalog_updater: UpdatePrices | None = None
 _catalog_updater_lock = Lock()
@@ -434,9 +439,28 @@ def resolve_model_context_window(
     """Return the raw context window for ``model_id`` when the catalog knows it."""
 
     model = resolve_catalog_model(provider_id, model_id, transport=transport)
-    if model is None:
+    if model is not None and _valid_context_window(model.context_window):
+        return int(model.context_window)
+    return _temporary_openai_context_window(provider_id, model_id)
+
+
+def _temporary_openai_context_window(provider_id: str, model_id: str | None) -> int | None:
+    """Temporary fallback for unresolved OpenAI-family context metadata."""
+
+    if provider_id not in {"openai", "azure_openai"}:
         return None
-    return model.context_window
+
+    normalized = str(model_id or "").strip().lower()
+    if not normalized:
+        return None
+
+    if provider_id == "azure_openai" and normalized.startswith("o1"):
+        return 128_000
+
+    for prefix, context_window in _TEMPORARY_OPENAI_CONTEXT_WINDOW_FALLBACKS:
+        if normalized.startswith(prefix):
+            return context_window
+    return None
 
 
 def _runtime_context_window(

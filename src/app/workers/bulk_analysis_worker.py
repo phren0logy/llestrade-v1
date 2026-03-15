@@ -41,6 +41,7 @@ from src.common.llm.request_budget import (
     compute_preflight_input_budget,
     count_request_input_tokens,
     evaluate_request_budget,
+    resolve_request_raw_context_window,
 )
 from src.common.llm.tokens import TokenCounter
 from src.config.observability import trace_operation
@@ -735,32 +736,13 @@ class BulkAnalysisWorker(DashboardWorker):
             dynamic_keys=_DYNAMIC_DOCUMENT_KEYS,
         )
 
-        override_window = normalize_context_window_override(
-            provider_id=provider_config.provider_id,
-            model_id=provider_config.model,
-            context_window=getattr(self._group, "model_context_window", None),
+        raw_context_window = self._resolve_raw_context_window(provider_config)
+        needs_chunking, token_count, default_chunk_tokens = should_chunk(
+            body,
+            provider_config.provider_id,
+            provider_config.model,
+            raw_context_window=raw_context_window,
         )
-        if isinstance(override_window, int) and override_window > 0:
-            raw_context_window = int(override_window)
-            body_token_info = TokenCounter.count(
-                text=body,
-                provider=provider_config.provider_id,
-                model=provider_config.model or "",
-            )
-            token_count = int(body_token_info.get("token_count") or 0) if body_token_info.get("success") else max(len(body) // 3, 1)
-            default_chunk_tokens = max(int(raw_context_window * 0.5), _MIN_CHUNK_TOKEN_TARGET)
-            needs_chunking = token_count > default_chunk_tokens
-        else:
-            needs_chunking, token_count, default_chunk_tokens = should_chunk(
-                body,
-                provider_config.provider_id,
-                provider_config.model,
-            )
-            raw_context_window = TokenCounter.get_model_context_window(
-                provider_config.model or provider_config.provider_id,
-                ratio=1.0,
-                provider_id=provider_config.provider_id,
-            )
 
         input_budget = self._effective_input_budget(
             provider_config,
@@ -944,6 +926,7 @@ class BulkAnalysisWorker(DashboardWorker):
                     run_details=run_details,
                     body=body,
                     chunks=chunks,
+                    raw_context_window=raw_context_window,
                     input_budget=input_budget,
                     preflight_input_budget=preflight_input_budget or input_budget,
                 )
@@ -994,6 +977,7 @@ class BulkAnalysisWorker(DashboardWorker):
         run_details: Dict[str, object],
         body: str,
         chunks: List[str],
+        raw_context_window: int,
         input_budget: int,
         preflight_input_budget: int,
     ) -> tuple[str, Dict[str, object], Dict[str, str]]:
@@ -1329,6 +1313,7 @@ class BulkAnalysisWorker(DashboardWorker):
             placeholder_values=doc_placeholders,
             provider_id=provider_config.provider_id,
             model=provider_config.model,
+            raw_context_window=raw_context_window,
             invoke_fn=invoke_combine,
             is_cancelled_fn=self.is_cancelled,
             load_batch_fn=load_batch,
@@ -1569,6 +1554,26 @@ class BulkAnalysisWorker(DashboardWorker):
             minimum_budget=_MIN_CHUNK_TOKEN_TARGET,
         )
         return budget or _MIN_CHUNK_TOKEN_TARGET
+
+    def _resolve_raw_context_window(self, provider_config: ProviderConfig) -> int:
+        explicit_context_window = normalize_context_window_override(
+            provider_id=provider_config.provider_id,
+            model_id=provider_config.model,
+            context_window=getattr(self._group, "model_context_window", None),
+            transport=backend_transport_name(self._llm_backend),
+        )
+        raw_context_window = resolve_request_raw_context_window(
+            provider_id=provider_config.provider_id,
+            model_id=provider_config.model,
+            explicit_context_window=explicit_context_window,
+            transport=backend_transport_name(self._llm_backend),
+        )
+        if isinstance(raw_context_window, int) and raw_context_window > 0:
+            return raw_context_window
+        raise RuntimeError(
+            f"Unknown context window for provider={provider_config.provider_id} "
+            f"model={provider_config.model or ''}. Choose a preset model with metadata or enter a context window."
+        )
 
     @staticmethod
     def _chunk_target_from_budget(*, input_budget: int, default_chunk_tokens: int) -> int:
@@ -1891,7 +1896,8 @@ class BulkAnalysisWorker(DashboardWorker):
                 user_prompt=prompt,
                 max_output_tokens=max_tokens,
                 minimum_budget=_MIN_CHUNK_TOKEN_TARGET,
-                input_budget_limit=preflight_input_budget if preflight_input_budget is not None else input_budget,
+                runtime_input_budget_limit=input_budget,
+                transport=backend_transport_name(self._llm_backend),
                 exact_token_counter=_exact_token_counter if not defer_exact_backend_preflight else None,
             )
             if not evaluation.fits:
