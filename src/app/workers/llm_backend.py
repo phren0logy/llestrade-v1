@@ -13,7 +13,11 @@ from typing import Any, Literal, Mapping, Optional, Protocol
 import httpx
 from pydantic_ai.settings import ModelSettings
 
-from src.app.core.llm_catalog import default_model_for_provider, resolve_reasoning_capabilities
+from src.app.core.llm_catalog import (
+    LLMReasoningCapabilities,
+    default_model_for_provider,
+    resolve_reasoning_capabilities,
+)
 from src.app.core.llm_operation_settings import LLMReasoningSettings
 
 logger = logging.getLogger(__name__)
@@ -286,6 +290,28 @@ def _normalize_reasoning_settings(
     return LLMReasoningSettings.from_value(reasoning, legacy_use_reasoning=use_reasoning)
 
 
+def _effective_temperature(
+    *,
+    provider_id: str,
+    model: str | None,
+    temperature: float,
+    reasoning: LLMReasoningSettings,
+    model_reasoning_capabilities: LLMReasoningCapabilities,
+) -> float | None:
+    """Normalize provider-specific temperature constraints."""
+
+    if provider_id in {"anthropic", "anthropic_bedrock"} and reasoning.enabled:
+        return 1.0
+    normalized_model = str(model or "").strip().lower()
+    if (
+        provider_id == "gemini"
+        and normalized_model.startswith("gemini-3")
+        and (reasoning.enabled or not model_reasoning_capabilities.can_disable_reasoning)
+    ):
+        return None
+    return temperature
+
+
 def build_model_settings(
     provider_id: str,
     model: Optional[str],
@@ -300,12 +326,22 @@ def build_model_settings(
 
     normalized_reasoning = _normalize_reasoning_settings(reasoning=reasoning, use_reasoning=use_reasoning)
     model_reasoning_capabilities = resolve_reasoning_capabilities(provider_id, model)
-    settings: ModelSettings = dict(base_settings or {})
-    if provider_id not in {"openai", "azure_openai"} or _openai_supports_sampling(
+    effective_temperature = _effective_temperature(
+        provider_id=provider_id,
         model=model,
-        use_reasoning=normalized_reasoning.enabled,
+        temperature=temperature,
+        reasoning=normalized_reasoning,
+        model_reasoning_capabilities=model_reasoning_capabilities,
+    )
+    settings: ModelSettings = dict(base_settings or {})
+    if effective_temperature is not None and (
+        provider_id not in {"openai", "azure_openai"}
+        or _openai_supports_sampling(
+            model=model,
+            use_reasoning=normalized_reasoning.enabled,
+        )
     ):
-        settings["temperature"] = temperature
+        settings["temperature"] = effective_temperature
     settings["max_tokens"] = max_tokens
 
     capabilities = provider_capabilities(provider_id, model)

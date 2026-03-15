@@ -676,9 +676,39 @@ def test_bulk_reduce_applies_reasoning_settings_to_llm_request(tmp_path: Path) -
     )
 
     assert result == "summary"
+    assert backend.requests[0].model_settings["temperature"] == 1.0
     assert backend.requests[0].model_settings["anthropic_thinking"] == {
         "type": "enabled",
         "budget_tokens": 4000,
+    }
+
+
+def test_bulk_reduce_omits_temperature_for_gemini_3_reasoning(tmp_path: Path) -> None:
+    group = BulkAnalysisGroup.create("Group")
+    group.use_reasoning = True
+    backend = _CapturingBackend(
+        _model_response("summary", model_name="gemini-3-flash", output_tokens=1)
+    )
+    worker = BulkReduceWorker(
+        project_dir=tmp_path,
+        group=group,
+        metadata=ProjectMetadata(case_name="Case"),
+        force_rerun=False,
+        llm_backend=backend,
+    )
+
+    result = worker._invoke_provider(
+        provider=object(),
+        provider_cfg=ProviderConfig(provider_id="gemini", model="gemini-3-flash", temperature=0.1),
+        prompt="Prompt",
+        system_prompt="System",
+    )
+
+    assert result == "summary"
+    assert "temperature" not in backend.requests[0].model_settings
+    assert backend.requests[0].model_settings["gemini_thinking_config"] == {
+        "include_thoughts": True,
+        "thinking_level": "MEDIUM",
     }
 
 
