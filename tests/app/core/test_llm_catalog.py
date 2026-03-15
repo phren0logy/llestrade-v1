@@ -359,6 +359,32 @@ def test_gateway_provider_payload_normalizes_google_vertex_to_gemini() -> None:
     assert [model.model_id for model in provider.models] == ["gemini-2.5-pro"]
 
 
+def test_gateway_provider_payload_preserves_missing_context_until_gateway_provides_it() -> None:
+    provider = llm_catalog._gateway_provider_option_from_payload(
+        {
+            "provider_id": "anthropic",
+            "upstream_provider_id": "anthropic",
+            "label": "Anthropic Claude",
+            "models": [
+                {
+                    "model_id": "claude-opus-4-6",
+                }
+            ],
+        }
+    )
+
+    assert provider is not None
+    assert provider.provider_id == "anthropic"
+    assert [model.model_id for model in provider.models] == ["claude-opus-4-6"]
+    model = provider.models[0]
+    assert model.label == "claude-opus-4-6"
+    assert model.context_window is None
+    assert model.input_price_label is None
+    assert model.output_price_label is None
+    assert model.provenance.context is None
+    assert model.provenance.pricing is None
+
+
 def test_resolve_catalog_model_for_gemini_uses_live_context_and_catalog_prices(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -572,7 +598,7 @@ def test_parse_gemini_discovered_model_allows_preview_but_filters_non_text_varia
     assert parsed.context_window == 1_048_576
 
 
-def test_resolve_catalog_model_caps_anthropic_runtime_context_window(
+def test_resolve_catalog_model_uses_anthropic_metadata_context_window(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     snapshot = _FakeSnapshot(
@@ -594,4 +620,4 @@ def test_resolve_catalog_model_caps_anthropic_runtime_context_window(
     resolved = llm_catalog.resolve_catalog_model("anthropic", "claude-sonnet-4-5")
 
     assert resolved is not None
-    assert resolved.context_window == 200_000
+    assert resolved.context_window == 1_000_000

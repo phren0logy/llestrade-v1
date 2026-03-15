@@ -2,6 +2,7 @@ import { env, fetchMock, SELF } from 'cloudflare:test'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import SQL from '../../gateway/limits-schema.sql?raw'
 import { resetCapacityControllerForTest } from '../src/capacity'
+import { resetMetadataCachesForTest } from '../src/metadata'
 
 const RESET_SQL = `\
 DROP TABLE IF EXISTS spend;
@@ -11,6 +12,7 @@ ${SQL}`
 
 beforeEach(async () => {
   resetCapacityControllerForTest()
+  resetMetadataCachesForTest()
   const keys = await env.KV.list()
   if (keys.keys.length !== 0) {
     throw new Error('KV store is not empty before test.')
@@ -22,6 +24,18 @@ beforeEach(async () => {
 afterEach(() => {
   fetchMock.assertNoPendingInterceptors()
 })
+
+function mockPricingSnapshot(payload?: {
+  providers?: Array<{
+    id: string
+    models: Array<Record<string, unknown>>
+  }>
+}) {
+  return fetchMock
+    .get('https://raw.githubusercontent.com')
+    .intercept({ method: 'GET', path: '/pydantic/genai-prices/refs/heads/main/prices/data.json' })
+    .reply(200, payload ?? { providers: [] })
+}
 
 describe('metadata', () => {
   it('requires a valid gateway app key', async () => {
@@ -38,6 +52,25 @@ describe('metadata', () => {
   })
 
   it('returns provider-native OpenAI models', async () => {
+    mockPricingSnapshot({
+      providers: [
+        {
+          id: 'openai',
+          models: [
+            {
+              id: 'gpt-5-mini',
+              context_window: 400000,
+              prices: { input_mtok: 0.25, output_mtok: 2 },
+            },
+            {
+              id: 'gpt-5.4',
+              context_window: 400000,
+              prices: { input_mtok: 1.25, output_mtok: 10 },
+            },
+          ],
+        },
+      ],
+    })
     fetchMock
       .get('http://localhost:8005')
       .intercept({ method: 'GET', path: '/openai/v1/models' })
@@ -65,6 +98,28 @@ describe('metadata', () => {
   })
 
   it('returns a provider-first metadata catalog for the current app key', async () => {
+    mockPricingSnapshot({
+      providers: [
+        {
+          id: 'openai',
+          models: [{ id: 'gpt-5.4', context_window: 400000, prices: { input_mtok: 1.25, output_mtok: 10 } }],
+        },
+        {
+          id: 'anthropic',
+          models: [
+            {
+              id: 'claude-sonnet-4-20250514',
+              context_window: 200000,
+              prices: { input_mtok: 3, output_mtok: 15 },
+            },
+          ],
+        },
+        {
+          id: 'google',
+          models: [{ id: 'gemini-2.5-pro', context_window: 1048576, prices: { input_mtok: 1.25, output_mtok: 10 } }],
+        },
+      ],
+    })
     fetchMock
       .get('http://localhost:8005')
       .intercept({ method: 'GET', path: '/openai/v1/models' })
@@ -133,5 +188,82 @@ describe('metadata', () => {
     expect(payload.providers[0]?.models.map((model) => model.model_id)).toEqual(['claude-sonnet-4-20250514'])
     expect(payload.providers[1]?.models.map((model) => model.model_id)).toEqual(['gemini-2.5-pro'])
     expect(payload.providers[2]?.models.map((model) => model.model_id)).toEqual(['gpt-5.4'])
+  })
+
+  it('enriches Anthropic metadata from the live pricing snapshot', async () => {
+    mockPricingSnapshot({
+      providers: [
+        {
+          id: 'anthropic',
+          models: [
+            {
+              id: 'claude-sonnet-4-6',
+              context_window: 1000000,
+              prices: { input_mtok: { base: 3, tiers: [{ start: 200000, price: 6 }] }, output_mtok: 15 },
+            },
+          ],
+        },
+      ],
+    })
+    fetchMock
+      .get('http://localhost:8005')
+      .intercept({ method: 'GET', path: '/anthropic/v1/models' })
+      .reply(200, {
+        data: [{ id: 'claude-sonnet-4-6', display_name: 'Claude Sonnet 4.6' }],
+      })
+
+    const response = await SELF.fetch('https://example.com/metadata/models?provider=anthropic', {
+      headers: { authorization: 'healthy-key' },
+    })
+    expect(response.status).toBe(200)
+
+    const payload = (await response.json()) as Array<{
+      model_id: string
+      context_window: number | null
+      sources: { context_window: string; pricing: string }
+    }>
+    expect(payload).toEqual([
+      expect.objectContaining({
+        model_id: 'claude-sonnet-4-6',
+        context_window: 1000000,
+        sources: expect.objectContaining({
+          context_window: 'genai-prices',
+          pricing: 'genai-prices',
+        }),
+      }),
+    ])
+  })
+
+  it('falls back to the bundled pricing snapshot when the live pricing fetch fails', async () => {
+    fetchMock
+      .get('https://raw.githubusercontent.com')
+      .intercept({ method: 'GET', path: '/pydantic/genai-prices/refs/heads/main/prices/data.json' })
+      .reply(503, 'unavailable')
+    fetchMock
+      .get('http://localhost:8005')
+      .intercept({ method: 'GET', path: '/anthropic/v1/models' })
+      .reply(200, {
+        data: [{ id: 'claude-sonnet-4-5', display_name: 'Claude Sonnet 4.5' }],
+      })
+
+    const response = await SELF.fetch('https://example.com/metadata/models?provider=anthropic', {
+      headers: { authorization: 'healthy-key' },
+    })
+    expect(response.status).toBe(200)
+
+    const payload = (await response.json()) as Array<{
+      model_id: string
+      context_window: number | null
+      sources: { context_window: string }
+    }>
+    expect(payload).toEqual([
+      expect.objectContaining({
+        model_id: 'claude-sonnet-4-5',
+        context_window: 1000000,
+        sources: expect.objectContaining({
+          context_window: 'genai-prices',
+        }),
+      }),
+    ])
   })
 })

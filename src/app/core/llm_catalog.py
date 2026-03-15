@@ -57,12 +57,6 @@ _MODEL_FAMILY_MATCHERS: dict[str, tuple[str, ...]] = {
     "azure_openai": ("gpt-", "o1", "o3", "o4", "chatgpt-"),
 }
 
-# Anthropic's published 1M context window requires an explicit beta header.
-# The current worker/gateway request path does not send that header, so runtime
-# budgeting must cap Anthropic models to the standard 200k request window.
-_RUNTIME_CONTEXT_WINDOW_CAPS: dict[str, int] = {
-    "anthropic": 200_000,
-}
 _TEMPORARY_OPENAI_CONTEXT_WINDOW_FALLBACKS: tuple[tuple[str, int], ...] = (
     ("chatgpt-4o-latest", 128_000),
     ("o4-mini", 200_000),
@@ -78,7 +72,7 @@ _provider_selector_models_lock = Lock()
 _gateway_provider_catalogs: dict[str, "_CachedGatewayCatalog"] = {}
 _gateway_provider_catalogs_lock = Lock()
 _GATEWAY_CATALOG_REFRESH_INTERVAL_SECONDS = 60 * 60
-_GATEWAY_CATALOG_FRESHNESS_SECONDS = 12 * 60 * 60
+_GATEWAY_CATALOG_FRESHNESS_SECONDS = 60 * 60
 _PROVIDER_CACHE_MAX_STALE_SECONDS = 7 * 24 * 60 * 60
 _BEDROCK_ANTHROPIC_ALIASES: dict[str, str] = {
     "anthropic.claude-sonnet-4-5-v1": "claude-sonnet-4-5",
@@ -468,12 +462,10 @@ def _runtime_context_window(
     model_id: str,
     context_window: int | None,
 ) -> int | None:
+    _ = provider_id, model_id
     if not _valid_context_window(context_window):
         return None
-    cap = _RUNTIME_CONTEXT_WINDOW_CAPS.get(provider_id)
-    if cap is None:
-        return int(context_window)
-    return min(int(context_window), cap)
+    return int(context_window)
 
 
 def _fingerprint(value: str | None) -> str:

@@ -2,7 +2,9 @@ import { findProvider, type Provider as PricingProvider } from '@pydantic/genai-
 import type { ApiKeyInfo, GatewayOptions, ProviderProxy } from '@pydantic/ai-gateway'
 import { hash } from './db'
 
-const MODELS_CACHE_TTL_MS = 6 * 60 * 60 * 1000
+const MODELS_CACHE_TTL_MS = 60 * 60 * 1000
+const PRICING_SNAPSHOT_TTL_MS = 60 * 60 * 1000
+const PRICING_SNAPSHOT_URL = 'https://raw.githubusercontent.com/pydantic/genai-prices/refs/heads/main/prices/data.json'
 const ANTHROPIC_VERSION = '2023-06-01'
 const OPENAI_GENERATIVE_PREFIXES = ['gpt-', 'o1', 'o3', 'o4', 'chatgpt-4o-latest', 'codex-mini'] as const
 const OPENAI_EXCLUDED_TOKENS = [
@@ -81,6 +83,10 @@ interface PricingMetadata {
   source: SourceMarker
 }
 
+interface PricingSnapshotResponse {
+  providers?: PricingProvider[]
+}
+
 interface OpenAIModelResponse {
   id: string
   created?: number
@@ -123,6 +129,19 @@ interface ServiceAccount {
 
 const metadataCache = new Map<string, CacheEntry>()
 const googleTokenCache = new Map<string, { expiresAt: number; token: string }>()
+let pricingSnapshotCache:
+  | {
+      expiresAt: number
+      value?: PricingProvider[]
+      pending?: Promise<PricingProvider[] | null>
+    }
+  | undefined
+
+export function resetMetadataCachesForTest(): void {
+  metadataCache.clear()
+  googleTokenCache.clear()
+  pricingSnapshotCache = undefined
+}
 
 export async function metadataCatalog(request: Request, options: GatewayOptions): Promise<Response> {
   const authResult = await authenticateGatewayAppKey(request, options)
@@ -418,6 +437,7 @@ async function loadOpenAIModels(
   requestedProviderId: string,
   providerProxy: ProviderProxy & { key: string },
 ): Promise<MetadataModelRecord[]> {
+  const pricingProvider = await resolvePricingProvider('openai')
   const baseUrl = stripTrailingSlash(providerProxy.baseUrl)
   const modelsUrl = baseUrl.endsWith('/v1') ? `${baseUrl}/models` : `${baseUrl}/v1/models`
   const response = await fetch(modelsUrl, {
@@ -441,7 +461,7 @@ async function loadOpenAIModels(
         lifecycleStatus: inferLifecycleStatus(model.id),
         providerContextWindow: null,
         providerMaxOutputTokens: null,
-        pricingProviderId: 'openai',
+        pricingProvider,
         reasoning: inferReasoningCapabilities(providerProxy.providerId, model.id),
       }),
     )
@@ -452,6 +472,7 @@ async function loadAnthropicModels(
   requestedProviderId: string,
   providerProxy: ProviderProxy & { key: string },
 ): Promise<MetadataModelRecord[]> {
+  const pricingProvider = await resolvePricingProvider('anthropic')
   const response = await fetch(`${stripTrailingSlash(providerProxy.baseUrl)}/v1/models`, {
     headers: {
       'x-api-key': providerProxy.credentials,
@@ -474,7 +495,7 @@ async function loadAnthropicModels(
       lifecycleStatus: inferLifecycleStatus(model.id),
       providerContextWindow: null,
       providerMaxOutputTokens: null,
-      pricingProviderId: 'anthropic',
+      pricingProvider,
       reasoning: inferReasoningCapabilities(providerProxy.providerId, model.id),
     }),
   )
@@ -485,6 +506,7 @@ async function loadGoogleVertexModels(
   requestedProviderId: string,
   providerProxy: ProviderProxy & { key: string },
 ): Promise<MetadataModelRecord[]> {
+  const pricingProvider = await resolvePricingProvider('google')
   const accessToken = await getGoogleAccessToken(providerProxy.credentials)
   const response = await fetch(
     `${stripTrailingSlash(providerProxy.baseUrl)}/v1beta1/publishers/google/models?pageSize=1000&listAllVersions=true&view=FULL`,
@@ -511,7 +533,7 @@ async function loadGoogleVertexModels(
         lifecycleStatus: inferVertexLifecycle(model),
         providerContextWindow: numberOrNull(model.inputTokenLimit),
         providerMaxOutputTokens: numberOrNull(model.outputTokenLimit),
-        pricingProviderId: 'google',
+        pricingProvider,
         reasoning: inferReasoningCapabilities(providerProxy.providerId, modelId),
       })
     })
@@ -526,10 +548,10 @@ function buildNormalizedRecord(input: {
   lifecycleStatus: LifecycleStatus
   providerContextWindow: number | null
   providerMaxOutputTokens: number | null
-  pricingProviderId: string
+  pricingProvider: PricingProvider | null
   reasoning: ReasoningCapabilities
 }): MetadataModelRecord {
-  const pricing = resolvePricingMetadata(input.pricingProviderId, input.modelId)
+  const pricing = resolvePricingMetadata(input.pricingProvider, input.modelId)
   return {
     provider_id: input.requestedProviderId,
     route: input.route,
@@ -556,8 +578,76 @@ function buildNormalizedRecord(input: {
   }
 }
 
-function resolvePricingMetadata(providerId: string, modelId: string): PricingMetadata {
-  const provider = findProvider({ providerId })
+async function resolvePricingProvider(providerId: string): Promise<PricingProvider | null> {
+  const providers = await getPricingProviders()
+  const liveProvider = providers?.find((provider) => provider.id === providerId)
+  if (liveProvider) {
+    return liveProvider
+  }
+  return findProvider({ providerId })
+}
+
+async function getPricingProviders(): Promise<PricingProvider[] | null> {
+  const now = Date.now()
+  if (pricingSnapshotCache?.value && pricingSnapshotCache.expiresAt > now) {
+    return pricingSnapshotCache.value
+  }
+  if (pricingSnapshotCache?.pending) {
+    return pricingSnapshotCache.pending
+  }
+
+  const previousValue = pricingSnapshotCache?.value ?? []
+  const pending = fetchPricingProviders()
+    .then((providers) => {
+      if (providers && providers.length > 0) {
+        pricingSnapshotCache = {
+          expiresAt: Date.now() + PRICING_SNAPSHOT_TTL_MS,
+          value: providers,
+        }
+        return providers
+      }
+      pricingSnapshotCache = {
+        expiresAt: Date.now() + PRICING_SNAPSHOT_TTL_MS,
+        value: previousValue,
+      }
+      return previousValue
+    })
+    .catch(() => {
+      pricingSnapshotCache = {
+        expiresAt: Date.now() + PRICING_SNAPSHOT_TTL_MS,
+        value: previousValue,
+      }
+      return previousValue
+    })
+    .finally(() => {
+      if (pricingSnapshotCache?.pending === pending) {
+        pricingSnapshotCache = {
+          expiresAt: pricingSnapshotCache.expiresAt,
+          value: pricingSnapshotCache.value,
+        }
+      }
+    })
+
+  pricingSnapshotCache = {
+    expiresAt: now + PRICING_SNAPSHOT_TTL_MS,
+    value: previousValue,
+    pending,
+  }
+  return pending
+}
+
+async function fetchPricingProviders(): Promise<PricingProvider[] | null> {
+  const response = await fetch(PRICING_SNAPSHOT_URL, {
+    signal: AbortSignal.timeout(20_000),
+  })
+  if (!response.ok) {
+    throw new Error(`Pricing snapshot request failed (${response.status})`)
+  }
+  const payload = (await response.json()) as PricingSnapshotResponse
+  return Array.isArray(payload.providers) ? payload.providers : null
+}
+
+function resolvePricingMetadata(provider: PricingProvider | null, modelId: string): PricingMetadata {
   if (!provider) {
     return emptyPricingMetadata()
   }

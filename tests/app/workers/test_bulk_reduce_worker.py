@@ -651,7 +651,7 @@ def test_bulk_reduce_ignores_stale_context_override_for_catalog_model(
         max_output_tokens=32_000,
     )
 
-    assert budget == 110_220
+    assert budget == 638_220
 
 
 def test_bulk_reduce_applies_reasoning_settings_to_llm_request(tmp_path: Path) -> None:
