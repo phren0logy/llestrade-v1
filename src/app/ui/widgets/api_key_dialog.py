@@ -5,6 +5,7 @@ API key configuration dialog for the new UI.
 import logging
 import json
 from typing import Any, Dict
+from urllib.parse import urlparse
 
 from src.app.core.llm_catalog import (
     refresh_gateway_provider_catalog,
@@ -451,7 +452,11 @@ class APIKeyDialog(QDialog):
         # Load Azure DI settings
         azure_di_settings = self.settings.get("azure_di_settings", {})
         if "endpoint" in azure_di_settings:
-            self.azure_di_endpoint.setText(azure_di_settings["endpoint"])
+            normalized_endpoint, _error = self._normalize_https_endpoint(
+                str(azure_di_settings["endpoint"]),
+                label="Azure Document Intelligence",
+            )
+            self.azure_di_endpoint.setText(normalized_endpoint or str(azure_di_settings["endpoint"]))
 
         gateway_settings = self.settings.get("pydantic_ai_gateway_settings", {}) or {}
         base_url = str(gateway_settings.get("base_url") or "").strip()
@@ -535,8 +540,23 @@ class APIKeyDialog(QDialog):
             self.settings.set("azure_openai_settings", azure_settings)
         
         # Save Azure DI settings
-        azure_di_endpoint = self.azure_di_endpoint.text().strip()
+        azure_di_endpoint, azure_di_endpoint_error = self._normalize_https_endpoint(
+            self.azure_di_endpoint.text(),
+            label="Azure Document Intelligence",
+        )
+        if azure_di_endpoint_error:
+            errors.append(azure_di_endpoint_error)
+        azure_di_key = self._effective_secret_field_value(self.azure_di_key)
+        if not azure_di_endpoint_error and azure_di_key and not azure_di_endpoint:
+            errors.append(
+                "Azure Document Intelligence endpoint is required when an API key is set"
+            )
+        elif not azure_di_endpoint_error and azure_di_endpoint and not azure_di_key:
+            errors.append(
+                "Azure Document Intelligence API key is required when an endpoint is set"
+            )
         if azure_di_endpoint:
+            self.azure_di_endpoint.setText(azure_di_endpoint)
             azure_di_settings = {"endpoint": azure_di_endpoint}
             self.settings.set("azure_di_settings", azure_di_settings)
 
@@ -630,6 +650,16 @@ class APIKeyDialog(QDialog):
         if text == APIKeyDialog._MASKED_SECRET:
             return str(field.property("saved_key_value") or "").strip()
         return text
+
+    @staticmethod
+    def _normalize_https_endpoint(value: str, *, label: str) -> tuple[str, str | None]:
+        normalized = str(value or "").strip().rstrip("/")
+        if not normalized:
+            return "", None
+        parsed = urlparse(normalized)
+        if parsed.scheme != "https" or not parsed.netloc:
+            return "", f"{label} endpoint must be a complete https:// URL"
+        return normalized, None
 
     def _validate_saved_gateway_settings(
         self,

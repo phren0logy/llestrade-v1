@@ -342,7 +342,6 @@ class SimplifiedMainWindow(QMainWindow):
         self._teardown_workspace(close_project=True)
         self.project_manager = project_manager
         workspace = self.workspace_controller.create_workspace(project_manager)
-        workspace.set_project(project_manager)
         if hasattr(workspace, "home_requested"):
             workspace.home_requested.connect(self._handle_workspace_home)
         self._display_workspace(workspace)

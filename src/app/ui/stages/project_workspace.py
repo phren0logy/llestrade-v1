@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import Optional, List, Sequence, Set
 
 from PySide6.QtCore import Qt, QTimer, QUrl, Signal
-from shiboken6 import isValid
 from PySide6.QtGui import QDesktopServices, QColor, QBrush
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -50,10 +49,11 @@ from src.app.ui.workspace.qt_flags import (
 )
 from src.app.ui.workspace.services import (
     BulkAnalysisService,
+    ConversionService,
     HighlightsService,
     ReportsService,
 )
-from src.app.workers import ConversionWorker, WorkerCoordinator, get_worker_pool
+from src.app.workers import WorkerCoordinator, get_worker_pool
 from src.app.workers.highlight_worker import HighlightExtractionSummary
 from src.app.workers.llm_backend import PydanticAIDirectBackend, PydanticAIGatewayBackend
 from src.app.workers.llm_backend import backend_transport_name
@@ -88,6 +88,7 @@ class ProjectWorkspace(QWidget):
         self._inflight_sources: set[Path] = set()
         self._conversion_running = False
         self._conversion_total = 0
+        self._conversion_fatal_error: str | None = None
         self._bulk_analysis_tab: BulkAnalysisTab | None = None
         self._bulk_controller: BulkAnalysisController | None = None
         self._bulk_banner: SmartBanner | None = None
@@ -98,6 +99,7 @@ class ProjectWorkspace(QWidget):
         self._reports_controller: ReportsController | None = None
 
         self._documents_controller: DocumentsController | None = None
+        self._conversion_service = ConversionService(self._workers)
         self._highlight_service = HighlightsService(self._workers)
         if self._feature_flags.pydantic_ai_gateway_enabled:
             llm_backend = PydanticAIGatewayBackend()
@@ -724,25 +726,33 @@ class ProjectWorkspace(QWidget):
         self._conversion_running = True
         self._conversion_total = len(jobs)
         self._conversion_errors: List[str] = []
+        self._conversion_fatal_error: str | None = None
         self._rescan_button.setEnabled(False)
         self._counts_label.setText(f"Converting documents (0/{self._conversion_total})…")
         if self._highlights_controller:
             self._highlights_controller.set_conversion_running(True)
 
-        self._inflight_sources.update(job.source_path for job in jobs)
-
         helper = self._project_manager.conversion_settings.helper
         options = dict(self._project_manager.conversion_settings.options or {})
-        worker = ConversionWorker(jobs, helper=helper, options=options)
-        worker.progress.connect(self._on_conversion_progress)
-        worker.file_failed.connect(self._on_conversion_failed)
-        worker.finished.connect(
-            lambda success, failed, w=worker, js=jobs: self._on_conversion_finished(
-                w, js, success, failed
-            )
+        started = self._conversion_service.run(
+            jobs=jobs,
+            helper=helper,
+            options=options,
+            on_progress=self._on_conversion_progress,
+            on_failed=self._on_conversion_failed,
+            on_fatal=self._on_conversion_fatal,
+            on_finished=lambda success, failed, js=jobs: self._on_conversion_finished(
+                None, js, success, failed
+            ),
         )
-        
-        self._workers.start(self._conversion_key(), worker)
+        if not started:
+            self._conversion_running = False
+            self._rescan_button.setEnabled(True)
+            if self._highlights_controller:
+                self._highlights_controller.set_conversion_running(False)
+            return
+
+        self._inflight_sources.update(job.source_path for job in jobs)
 
     def _on_conversion_progress(self, processed: int, total: int, relative_path: str) -> None:
         self._counts_label.setText(f"Converting documents ({processed}/{total})… {relative_path}")
@@ -751,19 +761,17 @@ class ProjectWorkspace(QWidget):
         message = f"{Path(source_path).name}: {error}"
         self._conversion_errors.append(message)
 
+    def _on_conversion_fatal(self, error: str) -> None:
+        self._conversion_fatal_error = error
+        self._counts_label.setText("Stopping conversion due to Azure configuration error…")
+
     def _on_conversion_finished(
         self,
-        worker: ConversionWorker,
+        worker,
         jobs: Sequence[ConversionJob],
         successes: int,
         failures: int,
     ) -> None:
-        stored = self._workers.pop(self._conversion_key())
-        # Always attempt to delete the actual worker and any stored reference safely
-        if worker and isValid(worker):
-            worker.deleteLater()
-        if stored and stored is not worker and isValid(stored):
-            stored.deleteLater()
         for job in jobs:
             self._inflight_sources.discard(job.source_path)
 
@@ -781,7 +789,13 @@ class ProjectWorkspace(QWidget):
         if self._feature_flags.bulk_analysis_groups_enabled:
             self._refresh_bulk_analysis_groups()
             self._auto_run_pending_bulk_groups()
-        if failures:
+        if self._conversion_fatal_error:
+            QMessageBox.critical(
+                self,
+                "Conversion Stopped",
+                self._conversion_fatal_error,
+            )
+        elif failures:
             error_text = "\n".join(self._conversion_errors) or "Unknown errors"
             QMessageBox.warning(
                 self,
@@ -963,8 +977,5 @@ class ProjectWorkspace(QWidget):
     # ------------------------------------------------------------------
     # Worker coordination helpers
     # ------------------------------------------------------------------
-    def _conversion_key(self) -> str:
-        return "conversion:active"
-
     def _bulk_key(self, group_id: str) -> str:
         return f"bulk:{group_id}"

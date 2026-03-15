@@ -69,3 +69,32 @@ def test_update_window_title_uses_case_name(monkeypatch: pytest.MonkeyPatch, qt_
     assert window.windowTitle() == "Llestrade — Case A"
 
     window.deleteLater()
+
+
+def test_activate_workspace_does_not_reapply_project_to_created_workspace(
+    monkeypatch: pytest.MonkeyPatch,
+    qt_app: QApplication,
+) -> None:
+    assert qt_app is not None
+    window = _build_window(monkeypatch)
+
+    class _WorkspaceStub:
+        def __init__(self) -> None:
+            self.set_project_calls = 0
+
+        def set_project(self, _manager) -> None:
+            self.set_project_calls += 1
+
+    workspace = _WorkspaceStub()
+    manager_stub = SimpleNamespace(metadata=SimpleNamespace(case_name="Case A"))
+
+    monkeypatch.setattr(window, "_teardown_workspace", lambda close_project=True: None)
+    monkeypatch.setattr(window, "_display_workspace", lambda _workspace: None)
+    monkeypatch.setattr(window, "_update_window_title", lambda _manager: None)
+    monkeypatch.setattr(window.workspace_controller, "create_workspace", lambda _manager: workspace)
+
+    window._activate_workspace(manager_stub)
+
+    assert workspace.set_project_calls == 0
+
+    window.deleteLater()

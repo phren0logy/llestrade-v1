@@ -11,7 +11,7 @@ from PySide6.QtWidgets import QApplication
 
 from src.app.core.citations import CitationStore
 from src.app.core.conversion_manager import ConversionJob
-from src.app.workers.conversion_worker import ConversionWorker
+from src.app.workers.conversion_worker import ConversionWorker, FatalConversionError
 
 _ = PySide6
 
@@ -165,3 +165,74 @@ def test_index_citations_for_output_creates_project_db(
     store = CitationStore(project_dir)
     ids = store.list_evidence_ids_for_documents(relative_paths=["case/source.md"])
     assert ids
+
+
+def test_azure_credentials_normalize_endpoint_and_reject_invalid_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Settings:
+        def get(self, key, default=None):
+            if key == "azure_di_settings":
+                return {"endpoint": "https://example.cognitiveservices.azure.com/"}
+            return default
+
+        def get_api_key(self, provider):
+            return "secret" if provider == "azure_di" else None
+
+    monkeypatch.setattr("src.app.workers.conversion_worker.SecureSettings", _Settings)
+
+    worker = ConversionWorker([], helper="azure_di")
+    endpoint, key = worker._azure_credentials()
+
+    assert endpoint == "https://example.cognitiveservices.azure.com"
+    assert key == "secret"
+
+    class _InvalidSettings(_Settings):
+        def get(self, key, default=None):
+            if key == "azure_di_settings":
+                return {"endpoint": "http://example"}
+            return default
+
+    monkeypatch.setattr("src.app.workers.conversion_worker.SecureSettings", _InvalidSettings)
+
+    with pytest.raises(FatalConversionError, match="endpoint is invalid"):
+        worker._azure_credentials()
+
+
+def test_conversion_worker_emits_fatal_error_once_and_stops_batch(
+    tmp_path: Path,
+) -> None:
+    first = ConversionJob(
+        source_path=tmp_path / "first.pdf",
+        relative_path="first.pdf",
+        destination_path=tmp_path / "converted" / "first.md",
+        conversion_type="pdf",
+    )
+    second = ConversionJob(
+        source_path=tmp_path / "second.pdf",
+        relative_path="second.pdf",
+        destination_path=tmp_path / "converted" / "second.md",
+        conversion_type="pdf",
+    )
+
+    worker = ConversionWorker([first, second], helper="azure_di")
+    fatal_messages: list[str] = []
+    file_failures: list[tuple[str, str]] = []
+    finished: list[tuple[int, int]] = []
+    seen_jobs: list[str] = []
+
+    def _execute(job: ConversionJob) -> None:
+        seen_jobs.append(job.relative_path)
+        raise FatalConversionError("Azure credentials rejected")
+
+    worker.fatal_error.connect(fatal_messages.append)
+    worker.file_failed.connect(lambda path, error: file_failures.append((path, error)))
+    worker.finished.connect(lambda successes, failures: finished.append((successes, failures)))
+    worker._execute = _execute  # type: ignore[method-assign]
+
+    worker._run()
+
+    assert seen_jobs == ["first.pdf"]
+    assert fatal_messages == ["Azure credentials rejected"]
+    assert file_failures == []
+    assert finished == [(0, 1)]

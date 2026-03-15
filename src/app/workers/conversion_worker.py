@@ -39,11 +39,16 @@ from src.app.core.secure_settings import SecureSettings
 from .base import DashboardWorker
 
 
+class FatalConversionError(RuntimeError):
+    """Raised when a batch should stop immediately due to shared configuration failure."""
+
+
 class ConversionWorker(DashboardWorker):
     """Run conversion jobs on a thread pool."""
 
     progress = Signal(int, int, str)  # completed, total, relative path
     file_failed = Signal(str, str)    # source path, error message
+    fatal_error = Signal(str)         # batch-level fatal error message
     finished = Signal(int, int)       # successful, failed
 
     def __init__(
@@ -70,6 +75,11 @@ class ConversionWorker(DashboardWorker):
                 break
             try:
                 self._execute(job)
+            except FatalConversionError as exc:
+                failures += 1
+                self.logger.error("%s fatal conversion error for %s: %s", self.job_tag, job.source_path, exc)
+                self.fatal_error.emit(str(exc))
+                break
             except Exception as exc:  # noqa: BLE001 - propagate via signal
                 failures += 1
                 self.logger.exception("%s failed %s", self.job_tag, job.source_path)
@@ -253,12 +263,17 @@ class ConversionWorker(DashboardWorker):
 
     def _azure_credentials(self) -> tuple[str, str]:
         settings = SecureSettings()
-        endpoint = (settings.get("azure_di_settings", {}) or {}).get("endpoint", "")
-        key = settings.get_api_key("azure_di")
+        endpoint = str((settings.get("azure_di_settings", {}) or {}).get("endpoint", "") or "").strip().rstrip("/")
+        key = str(settings.get_api_key("azure_di") or "").strip()
         if not endpoint or not key:
-            raise RuntimeError(
+            raise FatalConversionError(
                 "Azure Document Intelligence credentials are not configured. "
                 "Set the endpoint and API key in Settings → Azure Services."
+            )
+        if not endpoint.startswith("https://"):
+            raise FatalConversionError(
+                "Azure Document Intelligence endpoint is invalid. "
+                "Update the endpoint in Settings → Azure Services."
             )
         return endpoint, key
 
@@ -271,21 +286,39 @@ class ConversionWorker(DashboardWorker):
         key: str,
     ) -> tuple[str | None, str]:
         try:
-            from src.core.pdf_utils import process_pdf_with_azure
+            from src.core.pdf_utils import (
+                AzureDocumentIntelligenceAuthError,
+                AzureDocumentIntelligenceConfigurationError,
+                process_pdf_with_azure,
+            )
         except ImportError as exc:  # pragma: no cover
             raise RuntimeError(
                 "Azure Document Intelligence dependencies are not installed. "
                 "Install azure-ai-documentintelligence to enable this helper."
             ) from exc
 
-        return process_pdf_with_azure(
-            str(source_path),
-            str(output_dir),
-            str(json_dir) if json_dir is not None else None,
-            str(output_dir),
-            endpoint,
-            key,
-        )
+        try:
+            return process_pdf_with_azure(
+                str(source_path),
+                str(output_dir),
+                str(json_dir) if json_dir is not None else None,
+                str(output_dir),
+                endpoint,
+                key,
+            )
+        except AzureDocumentIntelligenceAuthError as exc:
+            raise FatalConversionError(
+                "Azure Document Intelligence rejected the saved credentials. "
+                "Update the API key and endpoint in Settings → Azure Services and retry.\n\n"
+                f"Endpoint: {endpoint}\n"
+                "This is separate from any F0 size/page warnings."
+            ) from exc
+        except AzureDocumentIntelligenceConfigurationError as exc:
+            raise FatalConversionError(
+                "Azure Document Intelligence settings are invalid. "
+                "Update the endpoint and API key in Settings → Azure Services and retry.\n\n"
+                f"Details: {exc}"
+            ) from exc
 
     def _azure_raw_sidecar_paths(self, job: ConversionJob) -> tuple[Path, Path]:
         base = job.destination_path

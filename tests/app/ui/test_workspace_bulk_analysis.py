@@ -215,6 +215,44 @@ def test_workspace_conversion_finish_auto_runs_pending_groups(
     workspace.deleteLater()
 
 
+def test_workspace_conversion_finish_shows_single_fatal_error(
+    tmp_path: Path,
+    qt_app: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert qt_app is not None
+
+    manager, _group = _create_project_with_group(tmp_path)
+    pool = _CaptureThreadPool()
+    monkeypatch.setattr(project_workspace, "get_worker_pool", lambda: pool)
+
+    workspace = ProjectWorkspace()
+    workspace.set_project(manager)
+    QCoreApplication.processEvents()
+
+    criticals: list[str] = []
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "critical",
+        lambda _parent, _title, message: criticals.append(message) or QMessageBox.Ok,
+    )
+    monkeypatch.setattr(
+        QMessageBox,
+        "warning",
+        lambda _parent, _title, message: warnings.append(message) or QMessageBox.Ok,
+    )
+
+    workspace._conversion_errors = ["sample.pdf: generic failure"]
+    workspace._conversion_fatal_error = "Azure credentials rejected"
+    workspace._on_conversion_finished(worker=None, jobs=[], successes=0, failures=1)
+
+    assert criticals == ["Azure credentials rejected"]
+    assert warnings == []
+
+    workspace.deleteLater()
+
+
 class _StubBulkAnalysisWorker(QObject, QRunnable):
     """Bulk-analysis worker stub that supports cancellation flow."""
 

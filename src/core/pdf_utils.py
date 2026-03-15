@@ -16,6 +16,72 @@ from azure.ai.documentintelligence.models import AnalyzeResult, DocumentContentF
 
 # Azure Document Intelligence imports
 from azure.core.credentials import AzureKeyCredential
+from azure.core.exceptions import (
+    ClientAuthenticationError,
+    HttpResponseError,
+    ServiceRequestError,
+    ServiceResponseError,
+)
+
+
+class AzureDocumentIntelligenceError(RuntimeError):
+    """Base exception for Azure Document Intelligence processing failures."""
+
+
+class AzureDocumentIntelligenceAuthError(AzureDocumentIntelligenceError):
+    """Raised when Azure rejects the supplied credentials."""
+
+
+class AzureDocumentIntelligenceConfigurationError(AzureDocumentIntelligenceError):
+    """Raised when Azure DI configuration is missing or malformed."""
+
+
+def _normalize_azure_endpoint(endpoint: str | None) -> str:
+    return str(endpoint or "").strip().rstrip("/")
+
+
+def _validate_azure_endpoint(endpoint: str | None) -> str:
+    normalized = _normalize_azure_endpoint(endpoint)
+    if not normalized:
+        raise AzureDocumentIntelligenceConfigurationError(
+            "Azure Document Intelligence endpoint is required."
+        )
+    if not normalized.startswith("https://"):
+        raise AzureDocumentIntelligenceConfigurationError(
+            f"Invalid Azure Document Intelligence endpoint: {normalized}"
+        )
+    return normalized
+
+
+def _status_code_from_exception(exc: Exception) -> int | None:
+    status = getattr(exc, "status_code", None)
+    if isinstance(status, int):
+        return status
+    response = getattr(exc, "response", None)
+    response_status = getattr(response, "status_code", None)
+    if isinstance(response_status, int):
+        return response_status
+    return None
+
+
+def _wrap_non_retryable_azure_error(label: str, exc: Exception) -> Exception:
+    if isinstance(exc, ClientAuthenticationError):
+        return AzureDocumentIntelligenceAuthError(
+            f"Azure Document Intelligence authentication failed for {label}: {exc}"
+        )
+
+    if isinstance(exc, HttpResponseError):
+        status_code = _status_code_from_exception(exc)
+        if status_code in {401, 403}:
+            return AzureDocumentIntelligenceAuthError(
+                f"Azure Document Intelligence authentication failed for {label}: {exc}"
+            )
+        if status_code is not None and 400 <= status_code < 500 and status_code not in {408, 429}:
+            return AzureDocumentIntelligenceConfigurationError(
+                f"Azure Document Intelligence request was rejected for {label}: {exc}"
+            )
+
+    return exc
 
 
 def get_pdf_page_count(pdf_path):
@@ -231,15 +297,11 @@ def process_pdf_with_azure(
         key = os.getenv("AZURE_KEY")
 
         if not endpoint or not key:
-            raise ValueError(
+            raise AzureDocumentIntelligenceConfigurationError(
                 "Azure endpoint and key must be provided or set as environment variables"
             )
 
-    # Validate the endpoint format
-    if not endpoint.startswith("https://"):
-        raise ValueError(
-            f"Invalid Azure endpoint format: {endpoint}. It should be a complete URL starting with https://"
-        )
+    endpoint = _validate_azure_endpoint(endpoint)
 
     # Create output directories if needed
     if not markdown_dir:
@@ -285,6 +347,9 @@ def process_pdf_with_azure(
             )
             break  # Successfully created the client
         except Exception as e:
+            wrapped = _wrap_non_retryable_azure_error("client initialization", e)
+            if wrapped is not e:
+                raise wrapped from e
             if attempt == max_retries:
                 raise Exception(
                     f"Failed to initialize Azure Document Intelligence client after {max_retries} attempts: {str(e)}"
@@ -302,47 +367,34 @@ def process_pdf_with_azure(
     # Check the file size (Azure has different limits based on tier)
     file_size_mb = os.path.getsize(pdf_path) / (1024 * 1024)
 
-    # We'll assume S0 tier by default, but provide helpful error messages
-    # S0 (paid) tier: 500 MB
-    # F0 (free) tier: 4 MB
+    # Assume S0 tier for dashboard conversion runs.
     MAX_SIZE_MB = 500
 
     if file_size_mb > MAX_SIZE_MB:
         raise Exception(
             f"PDF file is too large for Azure Document Intelligence: {file_size_mb:.1f}MB "
-            f"(S0 tier max: 500MB, F0 tier max: 4MB). "
+            f"(S0 tier max: 500MB). "
             f"Consider splitting the file or using a different processing method."
         )
-    elif file_size_mb > 4:
-        # This might still fail if using F0 tier
-        print(
-            f"Warning: File size ({file_size_mb:.1f}MB) exceeds F0 tier limit (4MB). "
-            f"Processing will only succeed if using S0 tier."
-        )
 
-    # Check page count (Azure has a 1000 page limit)
+    # Check page count against the S0 limit.
+    MAX_PAGES = 2000
+
     try:
         page_count = get_pdf_page_count(pdf_path)
-        MAX_PAGES = 1000
-
-        if page_count > 2:
-            # F0 tier only processes first 2 pages
-            print(
-                f"Warning: PDF has {page_count} pages. Note that F0 tier will only process the first 2 pages."
-            )
     except Exception as e:
         # If we can't get page count, we'll still try to process
         print(
             f"Warning: Couldn't determine page count: {str(e)}. Continuing with processing."
         )
 
-    # If page count exceeds Azure's 1000 page limit, process in ranges with overlap and combine
-    if "page_count" in locals() and page_count is not None and page_count > 1000:
+    # If page count exceeds Azure's S0 page limit, process in ranges with overlap and combine.
+    if "page_count" in locals() and page_count is not None and page_count > MAX_PAGES:
         combined, chunk_json = _azure_markdown_chunked(
             client=document_intelligence_client,
             pdf_path=pdf_path,
             total_pages=page_count,
-            max_pages=1000,
+            max_pages=MAX_PAGES,
             overlap=5,
         )
         # Save combined markdown
@@ -356,7 +408,7 @@ def process_pdf_with_azure(
                     {
                         "mode": "chunked",
                         "page_count": page_count,
-                        "chunk_size": 1000,
+                        "chunk_size": MAX_PAGES,
                         "overlap": 5,
                         "chunks": chunk_json,
                     },
@@ -398,6 +450,11 @@ def process_pdf_with_azure(
                     print(f"Received Azure Document Intelligence {label} results")
                     return result
                 except Exception as e:
+                    wrapped = _wrap_non_retryable_azure_error(label, e)
+                    if wrapped is not e:
+                        raise wrapped from e
+                    if isinstance(e, (ServiceRequestError, ServiceResponseError)):
+                        pass
                     if attempt == max_proc_retries:
                         raise Exception(
                             f"Failed to process PDF for {label} after {max_proc_retries} attempts: {str(e)}"
@@ -437,6 +494,8 @@ def process_pdf_with_azure(
 
         return json_path, markdown_path
 
+    except AzureDocumentIntelligenceError:
+        raise
     except Exception as e:
         raise Exception(f"Error processing {pdf_path} with Azure: {str(e)}")
 
