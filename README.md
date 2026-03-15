@@ -407,9 +407,16 @@ scripts/run_pytest_pr.sh
 # Run optional live-provider suite (requires provider API keys)
 scripts/run_pytest_live.sh
 
+# Override the env file used for live-provider runs
+LLESTRADE_LIVE_ENV_FILE=.env.live scripts/run_pytest_live.sh
+
 # Run a specific test file
 scripts/run_pytest.sh tests/app/ui/test_file_tracker.py -v
 ```
+
+If `.env.live` exists, `scripts/run_pytest_live.sh` runs pytest through
+`op run --env-file=.env.live`. That file may contain plain values or `op://...`
+1Password references.
 
 ### Code Style
 

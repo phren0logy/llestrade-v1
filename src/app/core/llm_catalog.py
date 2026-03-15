@@ -10,8 +10,9 @@ import logging
 import os
 import re
 import time
-from threading import Event, Lock, Thread
+from threading import Event, Lock, Thread, local
 from typing import Any, Literal, Optional, Sequence
+from contextlib import contextmanager
 
 from genai_prices import UpdatePrices
 from genai_prices.data_snapshot import DataSnapshot, get_snapshot
@@ -71,6 +72,7 @@ _provider_selector_models: dict[tuple[str, str, str], tuple["LLMModelOption", ..
 _provider_selector_models_lock = Lock()
 _gateway_provider_catalogs: dict[str, "_CachedGatewayCatalog"] = {}
 _gateway_provider_catalogs_lock = Lock()
+_secure_settings_lookup_state = local()
 _GATEWAY_CATALOG_REFRESH_INTERVAL_SECONDS = 60 * 60
 _GATEWAY_CATALOG_FRESHNESS_SECONDS = 60 * 60
 _PROVIDER_CACHE_MAX_STALE_SECONDS = 7 * 24 * 60 * 60
@@ -473,6 +475,20 @@ def _fingerprint(value: str | None) -> str:
     if not normalized:
         return "default"
     return sha256(normalized.encode("utf-8")).hexdigest()[:16]
+
+
+def _secure_settings_lookup_suspended() -> bool:
+    return bool(getattr(_secure_settings_lookup_state, "suspended", False))
+
+
+@contextmanager
+def suspend_secure_settings_lookup():
+    previous = _secure_settings_lookup_suspended()
+    _secure_settings_lookup_state.suspended = True
+    try:
+        yield
+    finally:
+        _secure_settings_lookup_state.suspended = previous
 
 
 def _cache_scope(provider_id: str, *, transport: CatalogTransport) -> str:
@@ -1526,50 +1542,18 @@ def _resolve_api_key(provider_id: str, *, env_vars: Sequence[str]) -> str | None
         if env_key and env_key.strip():
             return env_key.strip()
 
-    try:
-        import keyring
-        from src.app.core.secure_settings import keyring_service_name
-
-        provider_aliases = (provider_id,)
-        if provider_id == "gemini":
-            provider_aliases = ("gemini", "google")
-        elif provider_id == "azure_openai":
-            provider_aliases = ("azure_openai", "azure")
-        elif provider_id == "pydantic_ai_gateway":
-            provider_aliases = ("pydantic_ai_gateway",)
-        service_name = keyring_service_name()
-        for alias in provider_aliases:
-            key = keyring.get_password(service_name, f"api_key_{alias}")
-            if key:
-                return key
-    except Exception:
-        logger.debug("Unable to load %s API key from keyring", provider_id, exc_info=True)
-
-    settings_path = app_config_dir() / "app_settings.json"
-    if not settings_path.exists():
+    if _secure_settings_lookup_suspended():
         return None
 
     try:
-        payload = json.loads(settings_path.read_text(encoding="utf-8"))
-    except Exception:
-        logger.debug("Unable to read %s API key from settings file", provider_id, exc_info=True)
-        return None
+        from src.app.core.secure_settings import SecureSettings
 
-    api_keys = payload.get("api_keys")
-    if not isinstance(api_keys, dict):
-        return None
-
-    provider_aliases = (provider_id,)
-    if provider_id == "gemini":
-        provider_aliases = ("gemini", "google")
-    elif provider_id == "azure_openai":
-        provider_aliases = ("azure_openai", "azure")
-    elif provider_id == "pydantic_ai_gateway":
-        provider_aliases = ("pydantic_ai_gateway",)
-    for alias in provider_aliases:
-        key = api_keys.get(alias)
-        if isinstance(key, str) and key.strip():
+        settings = SecureSettings()
+        key = settings.get_api_key(provider_id)
+        if key and key.strip():
             return key.strip()
+    except Exception:
+        logger.debug("Unable to load %s API key from SecureSettings", provider_id, exc_info=True)
     return None
 
 

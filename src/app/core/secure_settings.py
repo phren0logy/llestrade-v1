@@ -5,21 +5,21 @@ Handles API keys and sensitive configuration using OS keychain.
 
 import json
 import logging
-from pathlib import Path
 import os
 from datetime import datetime
-from typing import Dict, Optional, Any
+from pathlib import Path
 from threading import Lock
+from typing import Any, Dict, Optional, Tuple
 
 try:
     import keyring
     KEYRING_AVAILABLE = True
 except ImportError:
     KEYRING_AVAILABLE = False
-    logging.warning("keyring module not available - API keys will be stored in plain text")
+    logging.warning("keyring module not available - secure keychain storage is unavailable")
 
 from PySide6.QtCore import QObject, Signal, QSettings
-from src.app.core.llm_catalog import default_model_for_provider
+from src.app.core.llm_catalog import default_model_for_provider, suspend_secure_settings_lookup
 from src.config.paths import app_config_dir
 
 # Shared cache so multiple SecureSettings instances reuse a single keychain lookup.
@@ -28,13 +28,53 @@ _CACHE_LOCK = Lock()
 _CACHE_MISS = object()
 _LEGACY_SETTINGS_ENV_VAR = "FRD_SETTINGS_DIR"
 _KEYRING_SERVICE_ENV_VAR = "LLESTRADE_KEYRING_SERVICE_NAME"
+_QSETTINGS_PATH_ENV_VAR = "LLESTRADE_QSETTINGS_PATH"
+_KEYCHAIN_ACCOUNT = "app_secrets"
+_LEGACY_KEYCHAIN_SERVICE_NAME = "Llestrade"
+_PROVIDER_CANONICAL_NAMES = {
+    "azure": "azure_openai",
+    "google": "gemini",
+}
+_LEGACY_KEYCHAIN_PROVIDERS: Tuple[str, ...] = (
+    "anthropic",
+    "azure",
+    "azure_di",
+    "azure_openai",
+    "gemini",
+    "google",
+    "pydantic_ai_gateway",
+)
 
 
-def keyring_service_name(default: str = "Llestrade") -> str:
+class SecureKeyStorageError(RuntimeError):
+    """Raised when secure keychain storage is unavailable or inconsistent."""
+
+
+def keyring_service_name(default: str = "LLestrade") -> str:
     override = os.getenv(_KEYRING_SERVICE_ENV_VAR)
     if override and override.strip():
         return override.strip()
     return default
+
+
+def reset_api_key_cache() -> None:
+    """Clear the shared SecureSettings API key cache."""
+    with _CACHE_LOCK:
+        _GLOBAL_API_KEY_CACHE.clear()
+
+
+def _canonical_provider_name(provider: str) -> str:
+    normalized = str(provider or "").strip()
+    return _PROVIDER_CANONICAL_NAMES.get(normalized, normalized)
+
+
+def _provider_aliases(provider: str) -> Tuple[str, ...]:
+    canonical = _canonical_provider_name(provider)
+    aliases = [canonical]
+    for alias, resolved in _PROVIDER_CANONICAL_NAMES.items():
+        if resolved == canonical:
+            aliases.append(alias)
+    return tuple(dict.fromkeys(aliases))
 
 
 class SecureSettings(QObject):
@@ -43,7 +83,7 @@ class SecureSettings(QObject):
     settings_changed = Signal()
     api_key_changed = Signal(str)  # provider name
     
-    SERVICE_NAME = "Llestrade"
+    SERVICE_NAME = "LLestrade"
     SETTINGS_FILE = "app_settings.json"
     
     def __init__(self, settings_dir: Optional[Path] = None):
@@ -70,10 +110,16 @@ class SecureSettings(QObject):
         self._settings = self._load_settings()
         
         # Qt settings for UI preferences
-        self.qt_settings = QSettings(
-            os.getenv("LLESTRADE_QSETTINGS_ORG", "Llestrade"),
-            os.getenv("LLESTRADE_QSETTINGS_APP", "Settings"),
-        )
+        qsettings_path = os.getenv(_QSETTINGS_PATH_ENV_VAR)
+        if qsettings_path and qsettings_path.strip():
+            qt_settings_path = Path(qsettings_path).expanduser()
+            qt_settings_path.parent.mkdir(parents=True, exist_ok=True)
+            self.qt_settings = QSettings(str(qt_settings_path), QSettings.IniFormat)
+        else:
+            self.qt_settings = QSettings(
+                os.getenv("LLESTRADE_QSETTINGS_ORG", "Llestrade"),
+                os.getenv("LLESTRADE_QSETTINGS_APP", "Settings"),
+            )
         
     def _load_settings(self) -> Dict[str, Any]:
         """Load settings from JSON file."""
@@ -99,10 +145,12 @@ class SecureSettings(QObject):
     
     def _get_default_settings(self) -> Dict[str, Any]:
         """Get default settings."""
+        with suspend_secure_settings_lookup():
+            default_model = default_model_for_provider("anthropic") or ""
         return {
             "version": "1.0",
             "llm_provider": "anthropic",
-            "llm_model": default_model_for_provider("anthropic") or "",
+            "llm_model": default_model,
             "pydantic_ai_gateway_settings": {
                 "base_url": None,
                 "route": None,
@@ -137,94 +185,226 @@ class SecureSettings(QObject):
         }
     
     # API Key Management (Secure)
-    def _store_api_key_in_settings_file(self, provider: str, api_key: str) -> bool:
-        """Persist API key in the JSON settings store when keyring is unavailable."""
+    def _cache_key(self, provider: str) -> tuple[str, str]:
+        return self.service_name, _canonical_provider_name(provider)
 
-        self.logger.warning(f"Storing API key for {provider} in settings file (not secure)")
-        if "api_keys" not in self._settings:
-            self._settings["api_keys"] = {}
-        self._settings["api_keys"][provider] = api_key
-        self._save_settings()
-        with _CACHE_LOCK:
-            self._api_key_cache[(self.service_name, provider)] = api_key
-        self.api_key_changed.emit(provider)
-        return True
+    def _legacy_settings_bundle(self) -> Dict[str, str]:
+        api_keys = self._settings.get("api_keys", {})
+        if not isinstance(api_keys, dict):
+            return {}
+        bundle: Dict[str, str] = {}
+        for provider, value in api_keys.items():
+            if isinstance(provider, str) and isinstance(value, str) and value.strip():
+                bundle.setdefault(_canonical_provider_name(provider), value.strip())
+        return bundle
+
+    def _migration_service_names(self) -> tuple[str, ...]:
+        if self.service_name == self.SERVICE_NAME:
+            return (self.service_name, _LEGACY_KEYCHAIN_SERVICE_NAME)
+        if self.service_name == _LEGACY_KEYCHAIN_SERVICE_NAME:
+            return (self.service_name, self.SERVICE_NAME)
+        return (self.service_name,)
+
+    def _read_keyring_bundle(self, service_name: str | None = None) -> Dict[str, str]:
+        if not KEYRING_AVAILABLE:
+            return {}
+        try:
+            raw = keyring.get_password(service_name or self.service_name, _KEYCHAIN_ACCOUNT)
+        except Exception as exc:  # pragma: no cover - backend-specific
+            raise SecureKeyStorageError(f"Failed to read keychain bundle: {exc}") from exc
+        if not raw:
+            return {}
+        try:
+            payload = json.loads(raw)
+        except Exception as exc:
+            raise SecureKeyStorageError("Keychain bundle is not valid JSON") from exc
+        if not isinstance(payload, dict):
+            raise SecureKeyStorageError("Keychain bundle must be a JSON object")
+
+        bundle: Dict[str, str] = {}
+        for provider, value in payload.items():
+            if isinstance(provider, str) and isinstance(value, str) and value.strip():
+                bundle[_canonical_provider_name(provider)] = value.strip()
+        return bundle
+
+    def _write_keyring_bundle(self, bundle: Dict[str, str]) -> Dict[str, str]:
+        if not KEYRING_AVAILABLE:
+            raise SecureKeyStorageError("System keychain support is unavailable")
+        sanitized = {
+            _canonical_provider_name(provider): value.strip()
+            for provider, value in bundle.items()
+            if isinstance(provider, str) and isinstance(value, str) and value.strip()
+        }
+        try:
+            if sanitized:
+                keyring.set_password(
+                    self.service_name,
+                    _KEYCHAIN_ACCOUNT,
+                    json.dumps(sanitized, sort_keys=True),
+                )
+            else:
+                keyring.delete_password(self.service_name, _KEYCHAIN_ACCOUNT)
+        except Exception as exc:  # pragma: no cover - backend-specific
+            raise SecureKeyStorageError(f"Failed to write keychain bundle: {exc}") from exc
+
+        stored = self._read_keyring_bundle(self.service_name)
+        if stored != sanitized:
+            raise SecureKeyStorageError("Keychain bundle verification failed after save")
+        return stored
+
+    def _collect_legacy_keyring_entries(self) -> tuple[Dict[str, str], list[tuple[str, str]]]:
+        collected: Dict[str, str] = {}
+        stale_entries: list[tuple[str, str]] = []
+        if not KEYRING_AVAILABLE:
+            return collected, stale_entries
+
+        for service_name in self._migration_service_names():
+            if service_name != self.service_name:
+                try:
+                    legacy_bundle = self._read_keyring_bundle(service_name)
+                except SecureKeyStorageError:
+                    legacy_bundle = {}
+                if legacy_bundle:
+                    for provider, value in legacy_bundle.items():
+                        collected.setdefault(provider, value)
+                    stale_entries.append((service_name, _KEYCHAIN_ACCOUNT))
+
+            for provider in _LEGACY_KEYCHAIN_PROVIDERS:
+                account = f"api_key_{provider}"
+                try:
+                    value = keyring.get_password(service_name, account)
+                except Exception:  # pragma: no cover - backend-specific
+                    continue
+                if not value or not value.strip():
+                    continue
+                collected.setdefault(_canonical_provider_name(provider), value.strip())
+                stale_entries.append((service_name, account))
+        return collected, stale_entries
+
+    def _delete_keyring_entry(self, service_name: str, account: str) -> None:
+        if not KEYRING_AVAILABLE:
+            return
+        try:
+            keyring.delete_password(service_name, account)
+        except Exception:
+            pass
+
+    def _remove_legacy_settings_key(self, provider: str) -> bool:
+        api_keys = self._settings.get("api_keys")
+        if not isinstance(api_keys, dict):
+            return False
+        changed = False
+        for alias in _provider_aliases(provider):
+            if alias in api_keys:
+                del api_keys[alias]
+                changed = True
+        if changed:
+            if api_keys:
+                self._settings["api_keys"] = api_keys
+            else:
+                self._settings.pop("api_keys", None)
+            self._save_settings()
+        return changed
+
+    def _load_keyring_bundle(self) -> Dict[str, str]:
+        if not KEYRING_AVAILABLE:
+            return {}
+        bundle = self._read_keyring_bundle(self.service_name)
+        legacy_bundle, stale_entries = self._collect_legacy_keyring_entries()
+
+        changed = False
+        for provider, value in legacy_bundle.items():
+            if provider not in bundle:
+                bundle[provider] = value
+                changed = True
+
+        if changed:
+            bundle = self._write_keyring_bundle(bundle)
+
+        if stale_entries and bundle:
+            for service_name, account in stale_entries:
+                self._delete_keyring_entry(service_name, account)
+
+        return bundle
 
     def set_api_key(self, provider: str, api_key: str) -> bool:
         """Store API key securely in OS keychain."""
         if not api_key:
             return self.remove_api_key(provider)
-            
-        if KEYRING_AVAILABLE:
-            try:
-                keyring.set_password(
-                    self.service_name,
-                    f"api_key_{provider}",
-                    api_key
-                )
-                with _CACHE_LOCK:
-                    self._api_key_cache[(self.service_name, provider)] = api_key
-                self.api_key_changed.emit(provider)
-                self.logger.info(f"API key for {provider} stored securely")
-                return True
-            except Exception as e:
-                self.logger.error(f"Failed to store API key securely: {e}")
-                return self._store_api_key_in_settings_file(provider, api_key)
-        else:
-            return self._store_api_key_in_settings_file(provider, api_key)
+        canonical_provider = _canonical_provider_name(provider)
+
+        bundle = self._load_keyring_bundle()
+        bundle[canonical_provider] = api_key
+        stored_bundle = self._write_keyring_bundle(bundle)
+        stored_value = stored_bundle.get(canonical_provider)
+        if stored_value != api_key:
+            raise SecureKeyStorageError(
+                f"Keychain verification mismatch while saving {canonical_provider}"
+            )
+
+        self._remove_legacy_settings_key(canonical_provider)
+        with _CACHE_LOCK:
+            self._api_key_cache[self._cache_key(canonical_provider)] = stored_value
+        self.api_key_changed.emit(canonical_provider)
+        self.logger.info("API key for %s stored securely in keychain bundle", canonical_provider)
+        return True
     
     def get_api_key(self, provider: str) -> Optional[str]:
         """Retrieve API key from OS keychain."""
-        cache_key = (self.service_name, provider)
+        canonical_provider = _canonical_provider_name(provider)
+        cache_key = self._cache_key(canonical_provider)
         with _CACHE_LOCK:
             cached = self._api_key_cache.get(cache_key, _CACHE_MISS)
             if cached is not _CACHE_MISS:
                 return cached
 
-            # Cache miss: hit the keychain (or fallback) while holding the lock
             key: Optional[str] = None
             if KEYRING_AVAILABLE:
                 try:
-                    key = keyring.get_password(self.service_name, f"api_key_{provider}")
+                    bundle = self._load_keyring_bundle()
+                    key = bundle.get(canonical_provider)
                     if key:
                         self._api_key_cache[cache_key] = key
                         return key
-                except Exception as e:
-                    self.logger.error(f"Failed to retrieve API key: {e}")
+                except Exception as exc:
+                    self.logger.error("Failed to retrieve API key from keychain bundle: %s", exc)
 
-            # Fallback to settings file
-            api_keys = self._settings.get("api_keys", {})
-            key = api_keys.get(provider)
+            # Backward-compatible fallback for legacy plaintext settings files.
+            key = self._legacy_settings_bundle().get(canonical_provider)
             self._api_key_cache[cache_key] = key
             return key
     
     def remove_api_key(self, provider: str) -> bool:
         """Remove API key from OS keychain."""
+        canonical_provider = _canonical_provider_name(provider)
         success = False
-        
+
         if KEYRING_AVAILABLE:
-            try:
-                keyring.delete_password(
-                    self.service_name,
-                    f"api_key_{provider}"
-                )
+            bundle = self._load_keyring_bundle()
+            if canonical_provider in bundle:
+                del bundle[canonical_provider]
+                self._write_keyring_bundle(bundle)
                 success = True
-            except Exception:
-                pass  # Key might not exist
-        
-        # Also remove from settings file
-        if "api_keys" in self._settings and provider in self._settings["api_keys"]:
-            del self._settings["api_keys"][provider]
-            self._save_settings()
+            for service_name in self._migration_service_names():
+                for alias in _provider_aliases(canonical_provider):
+                    account = f"api_key_{alias}"
+                    try:
+                        if keyring.get_password(service_name, account):
+                            success = True
+                    except Exception:
+                        pass
+                    self._delete_keyring_entry(service_name, account)
+
+        if self._remove_legacy_settings_key(canonical_provider):
             success = True
-        
+
         # Clear cache
         with _CACHE_LOCK:
-            self._api_key_cache.pop((self.service_name, provider), None)
-        
+            self._api_key_cache.pop(self._cache_key(canonical_provider), None)
+
         if success:
-            self.api_key_changed.emit(provider)
-            
+            self.api_key_changed.emit(canonical_provider)
+
         return success
     
     def has_api_key(self, provider: str) -> bool:

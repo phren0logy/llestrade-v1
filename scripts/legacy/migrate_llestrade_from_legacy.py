@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 One-time migration script: move legacy Forensic Report Drafter data to Llestrade paths
-and migrate keyring namespace from "ForensicReportDrafter" to "Llestrade".
+and migrate keyring secrets from "ForensicReportDrafter" into the bundled "LLestrade"
+keychain entry.
 
 Moves (if present):
 - ~/.forensic_report_drafter/prompts -> ~/Documents/llestrade/prompts
@@ -10,7 +11,8 @@ Moves (if present):
 - ~/.forensic_report_drafter/crashes -> ~/Documents/llestrade/crashes
 
 Keyring:
-- Copies api keys from service "ForensicReportDrafter" to "Llestrade" for providers:
+- Copies api keys from service "ForensicReportDrafter" into the bundled "LLestrade"
+  keychain entry for providers:
   anthropic, gemini, azure_openai, azure_di
   (use --remove-legacy-keys to delete legacy entries after copy)
 
@@ -65,25 +67,27 @@ def migrate_keyring(*, dry_run: bool = False, remove_legacy: bool = False) -> li
     actions: list[str] = []
     try:
         import keyring  # type: ignore
+        from src.app.core.secure_settings import SecureSettings
     except Exception:
         return [
             "keyring not available; skipping API key migration",
             "Install 'keyring' if you want to migrate keys via this script.",
         ]
 
+    secure_settings = SecureSettings()
     providers = ["anthropic", "gemini", "azure_openai", "azure_di"]
     for provider in providers:
         legacy_key = keyring.get_password("ForensicReportDrafter", f"api_key_{provider}")
         if not legacy_key:
             actions.append(f"No legacy key for {provider}")
             continue
-        existing = keyring.get_password("Llestrade", f"api_key_{provider}")
+        existing = secure_settings.get_api_key(provider)
         if existing:
-            actions.append(f"Llestrade key already set for {provider}; skipping copy")
+            actions.append(f"LLestrade key already set for {provider}; skipping copy")
         else:
-            actions.append(f"Copy keyring entry {provider}: ForensicReportDrafter -> Llestrade")
+            actions.append(f"Copy keyring entry {provider}: ForensicReportDrafter -> LLestrade bundle")
             if not dry_run:
-                keyring.set_password("Llestrade", f"api_key_{provider}", legacy_key)
+                secure_settings.set_api_key(provider, legacy_key)
         if remove_legacy and not dry_run:
             try:
                 keyring.delete_password("ForensicReportDrafter", f"api_key_{provider}")
@@ -94,7 +98,7 @@ def migrate_keyring(*, dry_run: bool = False, remove_legacy: bool = False) -> li
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Migrate legacy data to Llestrade paths and keyring")
+    parser = argparse.ArgumentParser(description="Migrate legacy data to Llestrade paths and bundled keychain storage")
     parser.add_argument("--dry-run", action="store_true", help="Print actions without making changes")
     parser.add_argument("--remove-legacy-keys", action="store_true", help="Delete old keyring entries after copying")
     parser.add_argument("--yes", action="store_true", help="Run without interactive confirmation")
@@ -126,4 +130,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

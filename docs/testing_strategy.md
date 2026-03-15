@@ -21,6 +21,12 @@ Live-provider tests are skipped by default unless `RUN_LIVE_PROVIDER_TESTS=1`.
 - `scripts/run_pytest_pr.sh` for deterministic PR-equivalent checks.
 - `scripts/run_pytest_live.sh` for optional real-provider validation.
 
+Live-provider notes:
+- Normal pytest runs use isolated test settings, isolated QSettings, and a fake keyring backend.
+- `scripts/run_pytest_live.sh` prefers `.env.live` when present.
+- `.env.live` may contain plain env vars or `op://...` 1Password references; the script resolves them with `op run --env-file=.env.live`.
+- Live-provider tests no longer read credentials from the app keychain.
+
 ## CI Lanes
 - `tests-pr-deterministic.yml`: required deterministic suite with coverage artifact.
 - `tests-live-providers.yml`: optional lane via `workflow_dispatch` or PR label `run-live-provider-tests`.

@@ -17,6 +17,7 @@ debug_summarization_*.log
 # Virtual environments and environment variables
 .venv
 .env
+.env.live
 
 # macOS
 .DS_Store

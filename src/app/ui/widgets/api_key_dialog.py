@@ -62,7 +62,7 @@ class APIKeyDialog(QDialog):
         # Description
         desc = QLabel(
             "Configure your API keys and service endpoints. "
-            "Keys are stored securely in your system's keychain when available."
+            "Keys are stored securely in your system's keychain."
         )
         desc.setWordWrap(True)
         layout.addWidget(desc)

@@ -10,7 +10,7 @@ from PySide6.QtWidgets import QApplication, QMessageBox, QPushButton
 _ = PySide6
 
 import src.app.ui.widgets.api_key_dialog as api_key_dialog_module
-from src.app.core.secure_settings import SecureSettings
+from src.app.core.secure_settings import SecureKeyStorageError, SecureSettings
 from src.app.ui.widgets.api_key_dialog import APIKeyDialog
 
 
@@ -175,6 +175,40 @@ def test_api_key_dialog_reports_mismatched_saved_key(
 
     assert warnings
     assert "does not match the value entered" in warnings[0]
+
+
+def test_api_key_dialog_reports_secure_storage_failure(
+    tmp_path: Path,
+    qt_app: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert qt_app is not None
+    monkeypatch.setenv("LLESTRADE_SETTINGS_DIR", str(tmp_path / "settings"))
+    monkeypatch.setattr(QMessageBox, "information", lambda *args, **kwargs: QMessageBox.Ok)
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "warning",
+        lambda _parent, _title, message: warnings.append(message) or QMessageBox.Ok,
+    )
+
+    settings = SecureSettings()
+
+    def _fail_set_api_key(provider: str, api_key: str) -> bool:
+        _ = provider, api_key
+        raise SecureKeyStorageError("keychain write failed")
+
+    monkeypatch.setattr(settings, "set_api_key", _fail_set_api_key)
+
+    dialog = APIKeyDialog(settings)
+    try:
+        dialog.gateway_api_key.setText("gateway-key-expected")
+        dialog.save_keys()
+    finally:
+        dialog.deleteLater()
+
+    assert warnings
+    assert "Error saving pydantic_ai_gateway: keychain write failed" in warnings[0]
 
 
 def test_api_key_dialog_resets_gateway_probe_cache_and_warns_on_invalid_gateway_key(

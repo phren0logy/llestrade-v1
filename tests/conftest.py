@@ -4,13 +4,66 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
 
+try:
+    import keyring
+    from keyring.backend import KeyringBackend
+except Exception:  # pragma: no cover - test environment bootstrap
+    keyring = None
+    KeyringBackend = object  # type: ignore[assignment]
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+_SESSION_TEST_ROOT = Path(tempfile.mkdtemp(prefix="llestrade-pytest-"))
+
+
+class _MemoryKeyring(KeyringBackend):
+    priority = 1
+
+    def __init__(self) -> None:
+        self._store: dict[tuple[str, str], str] = {}
+
+    def clear(self) -> None:
+        self._store.clear()
+
+    def get_password(self, service: str, username: str) -> str | None:
+        return self._store.get((service, username))
+
+    def set_password(self, service: str, username: str, password: str) -> None:
+        self._store[(service, username)] = password
+
+    def delete_password(self, service: str, username: str) -> None:
+        self._store.pop((service, username), None)
+
+
+_TEST_KEYRING = _MemoryKeyring() if keyring is not None else None
+
+
+def _session_env_paths() -> tuple[Path, Path]:
+    user_root = _SESSION_TEST_ROOT / "user_root"
+    settings_dir = _SESSION_TEST_ROOT / "settings"
+    user_root.mkdir(parents=True, exist_ok=True)
+    settings_dir.mkdir(parents=True, exist_ok=True)
+    return user_root, settings_dir
+
+
+def _install_test_environment() -> None:
+    user_root, settings_dir = _session_env_paths()
+    os.environ["LLESTRADE_USER_ROOT"] = str(user_root)
+    os.environ["LLESTRADE_SETTINGS_DIR"] = str(settings_dir)
+    os.environ["LLESTRADE_KEYRING_SERVICE_NAME"] = "LLestradeTests"
+    os.environ["LLESTRADE_QSETTINGS_ORG"] = "LLestradeTests"
+    os.environ["LLESTRADE_QSETTINGS_APP"] = "Settings-session"
+    os.environ["LLESTRADE_QSETTINGS_PATH"] = str(settings_dir / "qt_settings.ini")
+
+
+_install_test_environment()
 
 
 def _env_flag(name: str, *, default: bool = False) -> bool:
@@ -22,6 +75,13 @@ def _env_flag(name: str, *, default: bool = False) -> bool:
 
 def _live_provider_enabled() -> bool:
     return _env_flag("RUN_LIVE_PROVIDER_TESTS", default=False)
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    _ = config
+    _install_test_environment()
+    if keyring is not None and _TEST_KEYRING is not None:
+        keyring.set_keyring(_TEST_KEYRING)
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
@@ -74,6 +134,11 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
 @pytest.fixture(autouse=True)
 def _isolate_settings_dir(tmp_path, monkeypatch: pytest.MonkeyPatch):
     """Keep tests from writing into the user's real settings/profile directories."""
+    from src.app.core.secure_settings import reset_api_key_cache
+
+    if _TEST_KEYRING is not None:
+        _TEST_KEYRING.clear()
+    reset_api_key_cache()
 
     user_root = tmp_path / "user_root"
     user_root.mkdir()
@@ -81,10 +146,14 @@ def _isolate_settings_dir(tmp_path, monkeypatch: pytest.MonkeyPatch):
     settings_dir.mkdir()
     monkeypatch.setenv("LLESTRADE_USER_ROOT", str(user_root))
     monkeypatch.setenv("LLESTRADE_SETTINGS_DIR", str(settings_dir))
-    monkeypatch.setenv("LLESTRADE_KEYRING_SERVICE_NAME", f"LlestradeTests-{tmp_path.name}")
-    monkeypatch.setenv("LLESTRADE_QSETTINGS_ORG", "LlestradeTests")
+    monkeypatch.setenv("LLESTRADE_KEYRING_SERVICE_NAME", f"LLestradeTests-{tmp_path.name}")
+    monkeypatch.setenv("LLESTRADE_QSETTINGS_ORG", "LLestradeTests")
     monkeypatch.setenv("LLESTRADE_QSETTINGS_APP", f"Settings-{tmp_path.name}")
+    monkeypatch.setenv("LLESTRADE_QSETTINGS_PATH", str(settings_dir / "qt_settings.ini"))
     yield
+    if _TEST_KEYRING is not None:
+        _TEST_KEYRING.clear()
+    reset_api_key_cache()
 
 
 @pytest.fixture(autouse=True)
@@ -115,8 +184,8 @@ def _stub_gateway_preflight_for_ui_tests(request: pytest.FixtureRequest, monkeyp
 
 
 @pytest.fixture(scope="session", autouse=True)
-def _env_keys_from_keychain():
-    """Populate API key environment variables from keychain/.env if missing.
+def _env_keys_from_dotenv():
+    """Populate live-provider env vars from dotenv files when explicitly enabled.
 
     This is only enabled for live-provider runs (RUN_LIVE_PROVIDER_TESTS=1).
     """
@@ -124,31 +193,11 @@ def _env_keys_from_keychain():
         yield
         return
 
-    # First try to load values from a local .env if present
+    # First try to load values from local dotenv files if present.
     try:
         from dotenv import load_dotenv
-        load_dotenv()
+        load_dotenv(ROOT / ".env.live", override=False)
+        load_dotenv(ROOT / ".env", override=False)
     except Exception:
-        pass
-
-    # If env vars are still missing, try OS keychain via SecureSettings
-    try:
-        from src.app.core.secure_settings import SecureSettings
-
-        settings = SecureSettings()
-
-        gemini = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
-        if not gemini:
-            gemini = settings.get_api_key("gemini") or settings.get_api_key("google")
-        if gemini and not os.environ.get("GEMINI_API_KEY") and not os.environ.get("GOOGLE_API_KEY"):
-            os.environ["GEMINI_API_KEY"] = gemini
-
-        anthropic = os.environ.get("ANTHROPIC_API_KEY")
-        if not anthropic:
-            anthropic = settings.get_api_key("anthropic")
-        if anthropic and not os.environ.get("ANTHROPIC_API_KEY"):
-            os.environ["ANTHROPIC_API_KEY"] = anthropic
-    except Exception:
-        # Keychain may not be available in some CI/sandboxed environments
         pass
     yield
