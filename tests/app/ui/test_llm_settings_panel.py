@@ -169,6 +169,46 @@ def test_panel_exposes_provider_native_reasoning_controls(qt_app: QApplication) 
         panel.deleteLater()
 
 
+def test_panel_reasoning_toggle_persists_when_enabled(qt_app: QApplication) -> None:
+    assert qt_app is not None
+    panel = LLMSettingsPanel()
+    try:
+        state_index = panel.reasoning_state_combo.findData("on")
+        assert state_index != -1
+
+        panel.reasoning_state_combo.setCurrentIndex(state_index)
+        qt_app.processEvents()
+
+        settings, error = panel.current_settings()
+
+        assert error is None
+        assert settings is not None
+        assert panel.reasoning_state_combo.currentData() == "on"
+        assert settings.reasoning.state == "on"
+        assert settings.use_reasoning is True
+    finally:
+        panel.deleteLater()
+
+
+def test_panel_set_settings_restores_reasoning_state(qt_app: QApplication) -> None:
+    assert qt_app is not None
+    panel = LLMSettingsPanel()
+    try:
+        panel.set_settings(
+            LLMOperationSettings(
+                provider_id="anthropic",
+                model_id="claude-sonnet-4-5",
+                reasoning={"state": "on", "budget_tokens": 4096},
+            )
+        )
+        qt_app.processEvents()
+
+        assert panel.reasoning_state_combo.currentData() == "on"
+        assert panel.reasoning_budget_spin.value() == 4096
+    finally:
+        panel.deleteLater()
+
+
 def test_panel_advanced_reasoning_starts_collapsed(qt_app: QApplication) -> None:
     assert qt_app is not None
     panel = LLMSettingsPanel()

@@ -13,6 +13,7 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 
 _ = PySide6
 
+from src.app.core import llm_catalog
 from src.app.core.llm_catalog import default_model_for_provider
 from src.app.core.bulk_analysis_groups import BulkAnalysisGroup
 from src.app.core.conversion_manager import ConversionJob
@@ -20,6 +21,7 @@ from src.app.core.project_manager import ProjectManager, ProjectMetadata
 from src.app.ui.dialogs.new_project_dialog import NewProjectDialog
 from src.app.ui.dialogs.project_metadata_dialog import ProjectMetadataDialog
 from src.app.ui.dialogs.bulk_analysis_group_dialog import BulkAnalysisGroupDialog
+from src.app.ui.widgets import llm_settings_panel as llm_settings_panel_module
 from src.app.workers.conversion_worker import ConversionWorker
 from src.app.core.file_tracker import FileTracker
 from src.app.ui.stages.project_workspace import ProjectWorkspace
@@ -32,6 +34,57 @@ def qt_app() -> QApplication:
     if app is None:
         app = QApplication([])
     return app
+
+
+@pytest.fixture(autouse=True)
+def stub_llm_catalog(monkeypatch: pytest.MonkeyPatch) -> None:
+    anthropic_reasoning = llm_catalog.LLMReasoningCapabilities(
+        supports_reasoning_controls=True,
+        can_disable_reasoning=True,
+        controls=("toggle", "budget"),
+        budget_step=1024,
+        default_state="off",
+    )
+    providers = (
+        llm_catalog.LLMProviderOption(
+            provider_id="anthropic",
+            label="Anthropic Claude",
+            models=(
+                llm_catalog.LLMModelOption(
+                    model_id="claude-sonnet-4-5",
+                    label="Claude Sonnet 4.5",
+                    context_window=200_000,
+                    input_price_label="$3/1M",
+                    output_price_label="$15/1M",
+                    reasoning_capabilities=anthropic_reasoning,
+                ),
+                llm_catalog.LLMModelOption(
+                    model_id="claude-opus-4-1",
+                    label="Claude Opus 4.1",
+                    context_window=200_000,
+                    input_price_label="$15/1M",
+                    output_price_label="$75/1M",
+                    reasoning_capabilities=anthropic_reasoning,
+                ),
+            ),
+        ),
+    )
+    model_lookup = {
+        (provider.provider_id, model.model_id): model
+        for provider in providers
+        for model in provider.models
+    }
+
+    monkeypatch.setattr(
+        llm_settings_panel_module,
+        "default_provider_catalog_for_transport",
+        lambda include_azure=False, transport="direct": providers,
+    )
+    monkeypatch.setattr(
+        llm_settings_panel_module,
+        "resolve_catalog_model",
+        lambda provider_id, model_id, transport="direct": model_lookup.get((provider_id, str(model_id or "").strip())),
+    )
 
 
 def test_new_project_dialog_collects_helper_and_preview(tmp_path: Path, qt_app: QApplication) -> None:
@@ -369,6 +422,70 @@ def test_bulk_group_dialog_marks_legacy_group_without_provider_invalid(
         assert "saved provider" in error.lower()
     finally:
         dialog.deleteLater()
+
+
+def test_bulk_group_dialog_llm_settings_section_has_room(tmp_path: Path, qt_app: QApplication) -> None:
+    assert qt_app is not None
+    projects_root = tmp_path / "projects"
+    projects_root.mkdir()
+    manager = ProjectManager()
+    manager.create_project(projects_root, ProjectMetadata(case_name="Bulk Layout"))
+
+    converted_root = manager.project_dir / "converted_documents" / "folder"
+    converted_root.mkdir(parents=True)
+    (converted_root / "doc.md").write_text("content", encoding="utf-8")
+
+    dialog = BulkAnalysisGroupDialog(manager.project_dir)
+    try:
+        dialog.show()
+        qt_app.processEvents()
+
+        assert dialog.minimumWidth() == 760
+        assert dialog.llm_settings_group.title() == "LLM Settings"
+        assert dialog.llm_settings_panel.width() >= 420
+    finally:
+        dialog.deleteLater()
+
+
+def test_bulk_group_dialog_persists_enabled_reasoning(tmp_path: Path, qt_app: QApplication) -> None:
+    assert qt_app is not None
+    projects_root = tmp_path / "projects"
+    projects_root.mkdir()
+    manager = ProjectManager()
+    manager.create_project(projects_root, ProjectMetadata(case_name="Reasoning Restore"))
+
+    converted_root = manager.project_dir / "converted_documents" / "folder"
+    converted_root.mkdir(parents=True)
+    (converted_root / "doc.md").write_text("content", encoding="utf-8")
+
+    dialog = BulkAnalysisGroupDialog(manager.project_dir)
+    try:
+        dialog.name_edit.setText("Reasoning Group")
+        folder_item = dialog.file_tree.topLevelItem(0)
+        assert folder_item is not None
+        file_item = folder_item.child(0)
+        assert file_item is not None
+        file_item.setCheckState(0, Qt.Checked)
+
+        state_index = dialog.reasoning_state_combo.findData("on")
+        assert state_index != -1
+        dialog.reasoning_state_combo.setCurrentIndex(state_index)
+        qt_app.processEvents()
+
+        group = dialog._build_group_instance()
+
+        assert group is not None
+        assert group.use_reasoning is True
+        assert group.reasoning.get("state") == "on"
+    finally:
+        dialog.deleteLater()
+
+    reopened = BulkAnalysisGroupDialog(manager.project_dir, existing_group=group)
+    try:
+        qt_app.processEvents()
+        assert reopened.reasoning_state_combo.currentData() == "on"
+    finally:
+        reopened.deleteLater()
 
 
 def test_bulk_group_dialog_requires_combined_inputs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, qt_app: QApplication) -> None:

@@ -99,6 +99,9 @@ class BulkAnalysisGroupDialog(QDialog):
     # ------------------------------------------------------------------
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
+        layout.setSpacing(10)
+        self.setMinimumWidth(760)
+
         form = QFormLayout()
 
         self.name_edit = QLineEdit()
@@ -193,6 +196,8 @@ class BulkAnalysisGroupDialog(QDialog):
         self.preview_prompt_button.clicked.connect(self._preview_prompt)
         form.addRow("", self.preview_prompt_button)
 
+        layout.addLayout(form)
+
         self.llm_settings_panel = LLMSettingsPanel(parent=self, transport=self._llm_transport)
         self.provider_combo = self.llm_settings_panel.provider_combo
         self.model_combo = self.llm_settings_panel.model_combo
@@ -201,20 +206,24 @@ class BulkAnalysisGroupDialog(QDialog):
         self.custom_context_label = self.llm_settings_panel.custom_context_label
         self.custom_context_spin = self.llm_settings_panel.custom_context_spin
         self.reasoning_state_combo = self.llm_settings_panel.reasoning_state_combo
-        form.addRow("LLM Settings", self.llm_settings_panel)
+        self.llm_settings_group = QGroupBox("LLM Settings")
+        llm_layout = QVBoxLayout(self.llm_settings_group)
+        llm_layout.setContentsMargins(12, 8, 12, 12)
+        llm_layout.addWidget(self.llm_settings_panel)
+        layout.addWidget(self.llm_settings_group)
 
         # Combined options
+        combined_form = QFormLayout()
         self.order_combo = QComboBox()
         self.order_combo.addItem("By path", "path")
         self.order_combo.addItem("By modified time", "mtime")
-        form.addRow("Combined Order", self.order_combo)
+        combined_form.addRow("Combined Order", self.order_combo)
 
         self.output_template_edit = QLineEdit()
         self.output_template_edit.setPlaceholderText("combined_{timestamp}.md")
         self.output_template_edit.setText("combined_{timestamp}.md")
-        form.addRow("Output Template", self.output_template_edit)
-
-        layout.addLayout(form)
+        combined_form.addRow("Output Template", self.output_template_edit)
+        layout.addLayout(combined_form)
         self._refresh_placeholder_requirements()
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -224,6 +233,7 @@ class BulkAnalysisGroupDialog(QDialog):
 
         # Initial visibility
         self._on_operation_changed()
+
     def _is_allowed_file(self, path: Path) -> bool:
         """Return True if the file should be selectable (only .md or .txt)."""
         try:

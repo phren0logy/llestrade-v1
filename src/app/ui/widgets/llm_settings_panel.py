@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
+    QSizePolicy,
     QSpinBox,
     QToolButton,
     QVBoxLayout,
@@ -159,13 +160,15 @@ class LLMSettingsPanel(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
 
         provider_row = QHBoxLayout()
         provider_row.setContentsMargins(0, 0, 0, 0)
         provider_row.addWidget(QLabel("Provider:"))
         self.provider_combo = QComboBox()
         self.provider_combo.setEditable(False)
-        provider_row.addWidget(self.provider_combo)
+        self.provider_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        provider_row.addWidget(self.provider_combo, 1)
         layout.addLayout(provider_row)
 
         model_row = QHBoxLayout()
@@ -173,7 +176,8 @@ class LLMSettingsPanel(QWidget):
         model_row.addWidget(QLabel("Model:"))
         self.model_combo = QComboBox()
         self.model_combo.setEditable(False)
-        model_row.addWidget(self.model_combo)
+        self.model_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        model_row.addWidget(self.model_combo, 1)
         self.refresh_models_button = QPushButton("Refresh")
         self.refresh_models_button.setAutoDefault(False)
         model_row.addWidget(self.refresh_models_button)
@@ -184,8 +188,9 @@ class LLMSettingsPanel(QWidget):
         self.custom_model_label = QLabel("Custom model id:")
         self.custom_model_edit = QLineEdit()
         self.custom_model_edit.setPlaceholderText("Enter a provider-specific model id")
+        self.custom_model_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         custom_row.addWidget(self.custom_model_label)
-        custom_row.addWidget(self.custom_model_edit)
+        custom_row.addWidget(self.custom_model_edit, 1)
         layout.addLayout(custom_row)
 
         context_row = QHBoxLayout()
@@ -217,23 +222,26 @@ class LLMSettingsPanel(QWidget):
         reasoning_row.setContentsMargins(0, 0, 0, 0)
         reasoning_row.addWidget(QLabel("Reasoning:"))
         self.reasoning_state_combo = QComboBox()
-        reasoning_row.addWidget(self.reasoning_state_combo)
+        self.reasoning_state_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        reasoning_row.addWidget(self.reasoning_state_combo, 1)
         layout.addLayout(reasoning_row)
 
         effort_row = QHBoxLayout()
         effort_row.setContentsMargins(0, 0, 0, 0)
         self.reasoning_effort_label = QLabel("Effort:")
         self.reasoning_effort_combo = QComboBox()
+        self.reasoning_effort_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         effort_row.addWidget(self.reasoning_effort_label)
-        effort_row.addWidget(self.reasoning_effort_combo)
+        effort_row.addWidget(self.reasoning_effort_combo, 1)
         layout.addLayout(effort_row)
 
         level_row = QHBoxLayout()
         level_row.setContentsMargins(0, 0, 0, 0)
         self.reasoning_level_label = QLabel("Level:")
         self.reasoning_level_combo = QComboBox()
+        self.reasoning_level_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         level_row.addWidget(self.reasoning_level_label)
-        level_row.addWidget(self.reasoning_level_combo)
+        level_row.addWidget(self.reasoning_level_combo, 1)
         layout.addLayout(level_row)
 
         budget_row = QHBoxLayout()
@@ -409,13 +417,13 @@ class LLMSettingsPanel(QWidget):
         )
 
     def _set_reasoning_settings(self, settings: LLMReasoningSettings) -> None:
-        self._update_reasoning_controls()
         desired_state = settings.state or ("on" if settings.enabled else "off")
         state_index = self.reasoning_state_combo.findData(desired_state)
         if state_index != -1:
             self.reasoning_state_combo.blockSignals(True)
             self.reasoning_state_combo.setCurrentIndex(state_index)
             self.reasoning_state_combo.blockSignals(False)
+        self._update_reasoning_controls()
         effort_index = self.reasoning_effort_combo.findData(settings.effort)
         if effort_index != -1:
             self.reasoning_effort_combo.blockSignals(True)
@@ -432,18 +440,32 @@ class LLMSettingsPanel(QWidget):
 
     def _update_reasoning_controls(self) -> None:
         capabilities = self._current_reasoning_capabilities()
+        previous_state = str(self.reasoning_state_combo.currentData() or "").strip().lower()
+        previous_effort = str(self.reasoning_effort_combo.currentData() or "").strip().lower()
+        previous_level = str(self.reasoning_level_combo.currentData() or "").strip().upper()
+        previous_budget = int(self.reasoning_budget_spin.value())
+        default_state = str(capabilities.default_state or "off").strip().lower()
+        if default_state not in {"on", "off"}:
+            default_state = "off"
 
         self.reasoning_state_combo.blockSignals(True)
         self.reasoning_state_combo.clear()
         if not capabilities.supports_reasoning_controls:
             self.reasoning_state_combo.addItem("Not supported", "off")
             self.reasoning_state_combo.setEnabled(False)
+            target_state = "off"
         else:
             self.reasoning_state_combo.addItem("Off", "off")
             self.reasoning_state_combo.addItem("On", "on")
             self.reasoning_state_combo.setEnabled(capabilities.can_disable_reasoning)
             if not capabilities.can_disable_reasoning:
-                index = self.reasoning_state_combo.findData("on")
+                target_state = "on"
+            elif previous_state in {"off", "on"}:
+                target_state = previous_state
+            else:
+                target_state = default_state
+            index = self.reasoning_state_combo.findData(target_state)
+            if index != -1:
                 self.reasoning_state_combo.setCurrentIndex(index)
         self.reasoning_state_combo.blockSignals(False)
 
@@ -456,7 +478,10 @@ class LLMSettingsPanel(QWidget):
         self.reasoning_effort_combo.clear()
         for effort in capabilities.allowed_efforts:
             self.reasoning_effort_combo.addItem(effort.title(), effort)
-        if self.reasoning_effort_combo.count() > 0 and self.reasoning_effort_combo.currentIndex() < 0:
+        effort_index = self.reasoning_effort_combo.findData(previous_effort)
+        if effort_index != -1:
+            self.reasoning_effort_combo.setCurrentIndex(effort_index)
+        elif self.reasoning_effort_combo.count() > 0 and self.reasoning_effort_combo.currentIndex() < 0:
             self.reasoning_effort_combo.setCurrentIndex(0)
         self.reasoning_effort_combo.blockSignals(False)
         show_effort = enabled and bool(capabilities.allowed_efforts)
@@ -467,19 +492,25 @@ class LLMSettingsPanel(QWidget):
         self.reasoning_level_combo.clear()
         for level in capabilities.allowed_levels:
             self.reasoning_level_combo.addItem(level.title(), level)
-        if self.reasoning_level_combo.count() > 0 and self.reasoning_level_combo.currentIndex() < 0:
+        level_index = self.reasoning_level_combo.findData(previous_level)
+        if level_index != -1:
+            self.reasoning_level_combo.setCurrentIndex(level_index)
+        elif self.reasoning_level_combo.count() > 0 and self.reasoning_level_combo.currentIndex() < 0:
             self.reasoning_level_combo.setCurrentIndex(0)
         self.reasoning_level_combo.blockSignals(False)
         show_level = enabled and bool(capabilities.allowed_levels)
         self.reasoning_level_label.setVisible(show_level)
         self.reasoning_level_combo.setVisible(show_level)
 
+        self.reasoning_budget_spin.blockSignals(True)
         if capabilities.budget_min is not None or capabilities.budget_max is not None:
             self.reasoning_budget_spin.setRange(
                 int(capabilities.budget_min or 0),
                 int(capabilities.budget_max or 256_000),
             )
             self.reasoning_budget_spin.setSingleStep(int(capabilities.budget_step or 1_024))
+        self.reasoning_budget_spin.setValue(previous_budget)
+        self.reasoning_budget_spin.blockSignals(False)
         show_budget = enabled and "budget" in capabilities.controls
         self.reasoning_budget_label.setVisible(show_budget)
         self.reasoning_budget_spin.setVisible(show_budget)
