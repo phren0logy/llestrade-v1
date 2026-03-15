@@ -25,16 +25,16 @@ afterEach(() => {
   fetchMock.assertNoPendingInterceptors()
 })
 
-function mockPricingSnapshot(payload?: {
-  providers?: Array<{
+function mockPricingSnapshot(
+  payload?: Array<{
     id: string
     models: Array<Record<string, unknown>>
-  }>
-}) {
+  }>,
+) {
   return fetchMock
     .get('https://raw.githubusercontent.com')
     .intercept({ method: 'GET', path: '/pydantic/genai-prices/refs/heads/main/prices/data.json' })
-    .reply(200, payload ?? { providers: [] })
+    .reply(200, payload ?? [])
 }
 
 describe('metadata', () => {
@@ -52,25 +52,23 @@ describe('metadata', () => {
   })
 
   it('returns provider-native OpenAI models', async () => {
-    mockPricingSnapshot({
-      providers: [
-        {
-          id: 'openai',
-          models: [
-            {
-              id: 'gpt-5-mini',
-              context_window: 400000,
-              prices: { input_mtok: 0.25, output_mtok: 2 },
-            },
-            {
-              id: 'gpt-5.4',
-              context_window: 400000,
-              prices: { input_mtok: 1.25, output_mtok: 10 },
-            },
-          ],
-        },
-      ],
-    })
+    mockPricingSnapshot([
+      {
+        id: 'openai',
+        models: [
+          {
+            id: 'gpt-5-mini',
+            context_window: 400000,
+            prices: { input_mtok: 0.25, output_mtok: 2 },
+          },
+          {
+            id: 'gpt-5.4',
+            context_window: 400000,
+            prices: { input_mtok: 1.25, output_mtok: 10 },
+          },
+        ],
+      },
+    ])
     fetchMock
       .get('http://localhost:8005')
       .intercept({ method: 'GET', path: '/openai/v1/models' })
@@ -98,28 +96,26 @@ describe('metadata', () => {
   })
 
   it('returns a provider-first metadata catalog for the current app key', async () => {
-    mockPricingSnapshot({
-      providers: [
-        {
-          id: 'openai',
-          models: [{ id: 'gpt-5.4', context_window: 400000, prices: { input_mtok: 1.25, output_mtok: 10 } }],
-        },
-        {
-          id: 'anthropic',
-          models: [
-            {
-              id: 'claude-sonnet-4-20250514',
-              context_window: 200000,
-              prices: { input_mtok: 3, output_mtok: 15 },
-            },
-          ],
-        },
-        {
-          id: 'google',
-          models: [{ id: 'gemini-2.5-pro', context_window: 1048576, prices: { input_mtok: 1.25, output_mtok: 10 } }],
-        },
-      ],
-    })
+    mockPricingSnapshot([
+      {
+        id: 'openai',
+        models: [{ id: 'gpt-5.4', context_window: 400000, prices: { input_mtok: 1.25, output_mtok: 10 } }],
+      },
+      {
+        id: 'anthropic',
+        models: [
+          {
+            id: 'claude-sonnet-4-20250514',
+            context_window: 200000,
+            prices: { input_mtok: 3, output_mtok: 15 },
+          },
+        ],
+      },
+      {
+        id: 'google',
+        models: [{ id: 'gemini-2.5-pro', context_window: 1048576, prices: { input_mtok: 1.25, output_mtok: 10 } }],
+      },
+    ])
     fetchMock
       .get('http://localhost:8005')
       .intercept({ method: 'GET', path: '/openai/v1/models' })
@@ -191,20 +187,18 @@ describe('metadata', () => {
   })
 
   it('enriches Anthropic metadata from the live pricing snapshot', async () => {
-    mockPricingSnapshot({
-      providers: [
-        {
-          id: 'anthropic',
-          models: [
-            {
-              id: 'claude-sonnet-4-6',
-              context_window: 1000000,
-              prices: { input_mtok: { base: 3, tiers: [{ start: 200000, price: 6 }] }, output_mtok: 15 },
-            },
-          ],
-        },
-      ],
-    })
+    mockPricingSnapshot([
+      {
+        id: 'anthropic',
+        models: [
+          {
+            id: 'claude-sonnet-4-6',
+            context_window: 1000000,
+            prices: { input_mtok: { base: 3, tiers: [{ start: 200000, price: 6 }] }, output_mtok: 15 },
+          },
+        ],
+      },
+    ])
     fetchMock
       .get('http://localhost:8005')
       .intercept({ method: 'GET', path: '/anthropic/v1/models' })

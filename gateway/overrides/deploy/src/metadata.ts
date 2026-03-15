@@ -83,9 +83,7 @@ interface PricingMetadata {
   source: SourceMarker
 }
 
-interface PricingSnapshotResponse {
-  providers?: PricingProvider[]
-}
+type PricingSnapshotResponse = PricingProvider[] | { providers?: PricingProvider[] }
 
 interface OpenAIModelResponse {
   id: string
@@ -644,6 +642,9 @@ async function fetchPricingProviders(): Promise<PricingProvider[] | null> {
     throw new Error(`Pricing snapshot request failed (${response.status})`)
   }
   const payload = (await response.json()) as PricingSnapshotResponse
+  if (Array.isArray(payload)) {
+    return payload
+  }
   return Array.isArray(payload.providers) ? payload.providers : null
 }
 
