@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 from PySide6.QtCore import QCoreApplication, QObject, QRunnable, Signal
 from PySide6.QtGui import QFontDatabase
-from PySide6.QtWidgets import QApplication, QDialog, QPushButton, QMessageBox
+from PySide6.QtWidgets import QApplication, QDialog, QFileDialog, QPushButton, QMessageBox
 
 from src.app.core.bulk_analysis_runner import PromptBundle
 from src.app.core.job_cost_estimates import CostForecast
@@ -286,6 +286,7 @@ class _StubBulkAnalysisWorker(QObject, QRunnable):
         metadata: ProjectMetadata | None,
         default_provider: tuple[str, str | None],
         force_rerun: bool = False,
+        preserve_recovery_on_signature_mismatch: bool = False,
         placeholder_values: dict[str, str] | None = None,
         project_name: str = "",
         estimate_summary=None,  # noqa: ANN001
@@ -297,6 +298,7 @@ class _StubBulkAnalysisWorker(QObject, QRunnable):
         self.group = group
         self.cancel_called = False
         self.force_rerun = force_rerun
+        self.preserve_recovery_on_signature_mismatch = preserve_recovery_on_signature_mismatch
 
     def run(self) -> None:  # pragma: no cover - trivial stub
         self.log_message.emit("started")
@@ -970,5 +972,267 @@ def test_combined_run_blocks_when_gateway_route_is_missing(
     assert run_called["value"] is False
     assert warnings
     assert "route/provider mapping is not available" in warnings[0]
+
+    workspace.deleteLater()
+
+
+def test_bulk_map_run_prompt_change_resume_keeps_remaining_docs(
+    tmp_path: Path,
+    qt_app: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert qt_app is not None
+
+    manager, group = _create_project_with_group(tmp_path)
+    workspace = ProjectWorkspace()
+    workspace.set_project(manager)
+    QCoreApplication.processEvents()
+
+    controller = workspace.bulk_controller
+    assert controller is not None
+
+    metrics = WorkspaceGroupMetrics(
+        group_id=group.group_id,
+        name=group.name,
+        slug=group.slug or group.folder_name,
+        converted_files=("folder/record.md",),
+        converted_count=1,
+        bulk_analysis_total=0,
+        pending_bulk_analysis=1,
+        pending_files=("folder/record.md",),
+        operation="per_document",
+    )
+
+    monkeypatch.setattr(controller, "_resolve_group_metrics", lambda _group_id: metrics)
+    monkeypatch.setattr(controller, "_analyse_placeholders", lambda _group: (None, set(), set()))
+    monkeypatch.setattr(
+        controller,
+        "_forecast_map_run",
+        lambda *_args, **_kwargs: CostForecast(available=True, best_estimate=1.0, ceiling=2.0),
+    )
+    monkeypatch.setattr(controller, "_verify_gateway_before_run", lambda **_kwargs: True)
+    monkeypatch.setattr(
+        controller,
+        "_load_map_recovery_manifest",
+        lambda _group: {
+            "prompt_state": {
+                "system": {"logical_name": "prompt.md", "content_hash": "old", "missing": False},
+                "user": {"logical_name": "user.md", "content_hash": "same", "missing": False},
+            }
+        },
+    )
+    monkeypatch.setattr(
+        "src.app.ui.workspace.controllers.bulk.capture_bulk_prompt_state",
+        lambda *_args, **_kwargs: {
+            "system": {"logical_name": "prompt.md", "content_hash": "new", "missing": False},
+            "user": {"logical_name": "user.md", "content_hash": "same", "missing": False},
+        },
+    )
+
+    replies = iter((QMessageBox.Yes, QMessageBox.Yes))
+    monkeypatch.setattr(QMessageBox, "question", lambda *args, **kwargs: next(replies))
+
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(controller._service, "run_map", lambda **kwargs: captured.update(kwargs) or True)
+
+    assert controller.start_map_run(group, force_rerun=False) is True
+    assert captured["preserve_recovery_on_signature_mismatch"] is True
+    assert captured["force_rerun"] is False
+
+    workspace.deleteLater()
+
+
+def test_bulk_map_run_missing_prompt_defaults_to_restart_with_replacement(
+    tmp_path: Path,
+    qt_app: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert qt_app is not None
+
+    manager, group = _create_project_with_group(tmp_path)
+    workspace = ProjectWorkspace()
+    workspace.set_project(manager)
+    QCoreApplication.processEvents()
+
+    controller = workspace.bulk_controller
+    assert controller is not None
+
+    metrics = WorkspaceGroupMetrics(
+        group_id=group.group_id,
+        name=group.name,
+        slug=group.slug or group.folder_name,
+        converted_files=("folder/record.md",),
+        converted_count=1,
+        bulk_analysis_total=0,
+        pending_bulk_analysis=1,
+        pending_files=("folder/record.md",),
+        operation="per_document",
+    )
+
+    replacement_prompt = manager.project_dir / "prompts" / "replacement_system.md"
+    replacement_prompt.parent.mkdir(parents=True, exist_ok=True)
+    replacement_prompt.write_text("replacement", encoding="utf-8")
+
+    monkeypatch.setattr(controller, "_resolve_group_metrics", lambda _group_id: metrics)
+    monkeypatch.setattr(controller, "_analyse_placeholders", lambda _group: (None, set(), set()))
+    monkeypatch.setattr(
+        controller,
+        "_forecast_map_run",
+        lambda *_args, **_kwargs: CostForecast(available=True, best_estimate=1.0, ceiling=2.0),
+    )
+    monkeypatch.setattr(controller, "_verify_gateway_before_run", lambda **_kwargs: True)
+    monkeypatch.setattr(
+        controller,
+        "_load_map_recovery_manifest",
+        lambda _group: {
+            "prompt_state": {
+                "system": {"logical_name": "missing.md", "content_hash": "old", "missing": False},
+            }
+        },
+    )
+
+    def fake_capture(_project_dir, candidate_group, _metadata):
+        if candidate_group.system_prompt_path == str(replacement_prompt):
+            return {
+                "system": {"logical_name": replacement_prompt.name, "content_hash": "new", "missing": False},
+                "user": {"logical_name": "user.md", "content_hash": "same", "missing": False},
+            }
+        return {
+            "system": {"logical_name": "missing.md", "content_hash": "old", "missing": True},
+            "user": {"logical_name": "user.md", "content_hash": "same", "missing": False},
+        }
+
+    monkeypatch.setattr("src.app.ui.workspace.controllers.bulk.capture_bulk_prompt_state", fake_capture)
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *args, **kwargs: (str(replacement_prompt), "Markdown Files (*.md)"))
+    replies = iter((QMessageBox.No, QMessageBox.Yes))
+    monkeypatch.setattr(QMessageBox, "question", lambda *args, **kwargs: next(replies))
+
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(controller._service, "run_map", lambda **kwargs: captured.update(kwargs) or True)
+
+    assert controller.start_map_run(group, force_rerun=False) is True
+    assert captured["force_rerun"] is True
+    assert captured["preserve_recovery_on_signature_mismatch"] is False
+    assert captured["group"].system_prompt_path == str(replacement_prompt)
+
+    workspace.deleteLater()
+
+
+def test_bulk_map_auto_run_skips_when_prompt_recovery_needs_review(
+    tmp_path: Path,
+    qt_app: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert qt_app is not None
+
+    manager, group = _create_project_with_group(tmp_path)
+    workspace = ProjectWorkspace()
+    workspace.set_project(manager)
+    QCoreApplication.processEvents()
+
+    controller = workspace.bulk_controller
+    assert controller is not None
+
+    metrics = WorkspaceGroupMetrics(
+        group_id=group.group_id,
+        name=group.name,
+        slug=group.slug or group.folder_name,
+        converted_files=("folder/record.md",),
+        converted_count=1,
+        bulk_analysis_total=0,
+        pending_bulk_analysis=1,
+        pending_files=("folder/record.md",),
+        operation="per_document",
+    )
+
+    monkeypatch.setattr(controller, "_resolve_group_metrics", lambda _group_id: metrics)
+    monkeypatch.setattr(
+        controller,
+        "_load_map_recovery_manifest",
+        lambda _group: {"prompt_state": {"system": {"logical_name": "prompt.md", "content_hash": "old", "missing": False}}},
+    )
+    monkeypatch.setattr(
+        "src.app.ui.workspace.controllers.bulk.capture_bulk_prompt_state",
+        lambda *_args, **_kwargs: {"system": {"logical_name": "prompt.md", "content_hash": "new", "missing": False}},
+    )
+
+    logs: list[str] = []
+    monkeypatch.setattr(controller, "_handle_log", lambda _gid, message: logs.append(message))
+    run_called = {"value": False}
+    monkeypatch.setattr(controller._service, "run_map", lambda **_kwargs: run_called.__setitem__("value", True) or True)
+
+    assert controller.start_map_run(group, force_rerun=False, interactive=False) is False
+    assert run_called["value"] is False
+    assert logs
+    assert "prompt recovery requires manual review" in logs[0]
+
+    workspace.deleteLater()
+
+
+def test_combined_run_prompt_change_forces_restart(
+    tmp_path: Path,
+    qt_app: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert qt_app is not None
+
+    manager, group = _create_project_with_combined_group(tmp_path)
+    workspace = ProjectWorkspace()
+    workspace.set_project(manager)
+    QCoreApplication.processEvents()
+
+    controller = workspace.bulk_controller
+    assert controller is not None
+
+    metrics = WorkspaceGroupMetrics(
+        group_id=group.group_id,
+        name=group.name,
+        slug=group.slug or group.folder_name,
+        converted_files=(),
+        converted_count=0,
+        bulk_analysis_total=0,
+        pending_bulk_analysis=0,
+        pending_files=(),
+        operation="combined",
+        combined_input_count=1,
+        combined_latest_path="bulk_analysis/combined-demo/reduce/combined.md",
+        combined_latest_at=None,
+        combined_is_stale=False,
+        combined_last_run_input_count=1,
+    )
+
+    monkeypatch.setattr(controller, "_resolve_group_metrics", lambda _group_id: metrics)
+    monkeypatch.setattr(controller, "_analyse_placeholders", lambda _group: (None, set(), set()))
+    monkeypatch.setattr(
+        controller,
+        "_forecast_combined_run",
+        lambda *_args, **_kwargs: CostForecast(available=True, best_estimate=1.0, ceiling=2.0),
+    )
+    monkeypatch.setattr(controller, "_verify_gateway_before_run", lambda **_kwargs: True)
+    monkeypatch.setattr(
+        controller,
+        "_load_reduce_recovery_manifest",
+        lambda _group: {
+            "prompt_state": {
+                "system": {"logical_name": "prompt.md", "content_hash": "old", "missing": False},
+            }
+        },
+    )
+    monkeypatch.setattr(
+        "src.app.ui.workspace.controllers.bulk.capture_bulk_prompt_state",
+        lambda *_args, **_kwargs: {
+            "system": {"logical_name": "prompt.md", "content_hash": "new", "missing": False},
+        },
+    )
+
+    replies = iter((QMessageBox.Yes, QMessageBox.Yes, QMessageBox.Yes))
+    monkeypatch.setattr(QMessageBox, "question", lambda *args, **kwargs: next(replies))
+
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(controller._service, "run_combined", lambda **kwargs: captured.update(kwargs) or True)
+
+    controller.start_combined_run(group, force_rerun=False)
+
+    assert captured["force_rerun"] is True
 
     workspace.deleteLater()

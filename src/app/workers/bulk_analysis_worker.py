@@ -20,7 +20,7 @@ from PySide6.QtCore import Signal
 from src.app.core.bulk_analysis_groups import BulkAnalysisGroup
 from src.app.core.llm_catalog import calculate_usage_cost
 from src.app.core.llm_operation_settings import normalize_context_window_override
-from src.app.core.bulk_recovery import BulkRecoveryStore
+from src.app.core.bulk_recovery import BulkRecoveryStore, build_bulk_prompt_state, bulk_prompt_recovery_signature
 from src.app.core.bulk_analysis_runner import (
     BulkAnalysisCancelled,
     BulkAnalysisDocument,
@@ -200,7 +200,7 @@ def _manifest_path(project_dir: Path, group: BulkAnalysisGroup) -> Path:
 
 
 def _default_manifest() -> Dict[str, object]:
-    return {"version": _MANIFEST_VERSION, "signature": None, "documents": {}}
+    return {"version": _MANIFEST_VERSION, "signature": None, "prompt_state": None, "documents": {}}
 
 
 def _load_manifest(path: Path) -> Dict[str, object]:
@@ -221,6 +221,7 @@ def _load_manifest(path: Path) -> Dict[str, object]:
     return {
         "version": data.get("version", _MANIFEST_VERSION),
         "signature": data.get("signature"),
+        "prompt_state": data.get("prompt_state"),
         "documents": documents,
     }
 
@@ -229,6 +230,7 @@ def _save_manifest(path: Path, manifest: Dict[str, object]) -> None:
     payload = {
         "version": _MANIFEST_VERSION,
         "signature": manifest.get("signature"),
+        "prompt_state": manifest.get("prompt_state"),
         "documents": manifest.get("documents", {}),
     }
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -336,6 +338,7 @@ class BulkAnalysisWorker(DashboardWorker):
         metadata: Optional[ProjectMetadata],
         default_provider: Tuple[str, Optional[str]] = ("anthropic", None),
         force_rerun: bool = False,
+        preserve_recovery_on_signature_mismatch: bool = False,
         placeholder_values: Mapping[str, str] | None = None,
         project_name: str = "",
         estimate_summary: Mapping[str, object] | None = None,
@@ -349,6 +352,7 @@ class BulkAnalysisWorker(DashboardWorker):
         self._metadata = metadata
         self._default_provider = default_provider
         self._force_rerun = force_rerun
+        self._preserve_recovery_on_signature_mismatch = preserve_recovery_on_signature_mismatch
         self._base_placeholders = dict(placeholder_values or {})
         self._project_name = project_name
         self._estimate_summary = dict(estimate_summary or {})
@@ -554,13 +558,29 @@ class BulkAnalysisWorker(DashboardWorker):
                 self._metadata,
                 placeholder_values=self._base_placeholders,
             )
+            prompt_state = build_bulk_prompt_state(
+                self._project_dir,
+                self._group,
+                system_template=bundle.system_template,
+                user_template=bundle.user_template,
+            )
             slug = getattr(self._group, "slug", None) or self._group.folder_name
             legacy_checkpoint_mgr = CheckpointManager(
                 self._project_dir / "bulk_analysis" / slug / "map" / "checkpoints"
             )
             recovery_store = BulkRecoveryStore(self._project_dir / "bulk_analysis" / slug)
             signature = {
-                "prompt_hash": prompt_hash,
+                "prompt_recovery_hash": bulk_prompt_recovery_signature(
+                    prompt_state,
+                    provider_id=provider_config.provider_id,
+                    model=provider_config.model,
+                    operation=self._group.operation,
+                    use_reasoning=self._group.use_reasoning,
+                    model_context_window=self._group.model_context_window,
+                    placeholder_requirements=self._group.placeholder_requirements,
+                    metadata=self._metadata,
+                    placeholder_values=self._base_placeholders,
+                ),
                 "placeholders": _stable_placeholders(self._serialise_placeholders(global_placeholders)),
             }
             manifest_path = _manifest_path(self._project_dir, self._group)
@@ -570,13 +590,20 @@ class BulkAnalysisWorker(DashboardWorker):
                 legacy_manifest=manifest,
             )
             recovery_manifest = recovery_store.load_map_manifest()
-            if manifest.get("version") != _MANIFEST_VERSION or manifest.get("signature") != signature:
+            if manifest.get("version") != _MANIFEST_VERSION or (
+                manifest.get("signature") != signature and not self._preserve_recovery_on_signature_mismatch
+            ):
                 manifest = _default_manifest()
-            if self._force_rerun or recovery_manifest.get("signature") != signature:
+            if self._force_rerun or (
+                recovery_manifest.get("signature") != signature
+                and not self._preserve_recovery_on_signature_mismatch
+            ):
                 recovery_store.clear_map()
                 recovery_manifest = recovery_store.load_map_manifest()
             manifest["signature"] = signature
+            manifest["prompt_state"] = prompt_state
             recovery_manifest["signature"] = signature
+            recovery_manifest["prompt_state"] = prompt_state
             recovery_manifest["status"] = "running"
             entries = manifest.setdefault("documents", {})  # type: ignore[arg-type]
             recovery_manifest.setdefault("documents", {})  # type: ignore[arg-type]
@@ -600,10 +627,18 @@ class BulkAnalysisWorker(DashboardWorker):
                 )
                 output_exists = document.output_path.exists()
                 recovery_needs_work = _map_recovery_needs_work(recovery_entry)
+                prompt_hash_for_skip = prompt_hash
+                if (
+                    self._preserve_recovery_on_signature_mismatch
+                    and not recovery_needs_work
+                    and isinstance(entry, dict)
+                    and entry.get("prompt_hash")
+                ):
+                    prompt_hash_for_skip = str(entry.get("prompt_hash"))
                 if (
                     not self._force_rerun
                     and not recovery_needs_work
-                    and not _should_process_document(entry, source_mtime, prompt_hash, output_exists)
+                    and not _should_process_document(entry, source_mtime, prompt_hash_for_skip, output_exists)
                 ):
                     skipped += 1
                     self.log_message.emit(f"Skipping {document.relative_path} (unchanged)")

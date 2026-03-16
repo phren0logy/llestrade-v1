@@ -227,6 +227,7 @@ def test_manifest_roundtrip(tmp_path: Path) -> None:
     manifest = {
         "version": 2,
         "signature": None,
+        "prompt_state": None,
         "documents": {
             "doc.md": {
                 "source_mtime": 1.23,
@@ -709,6 +710,85 @@ def test_bulk_worker_retries_chunked_document_after_provider_limit_error(
     assert chunk_targets[0] == 96_888
     assert chunk_targets[0] > chunk_targets[1]
     assert invoke_calls[0] == "chunk 1/1 for 'converted_documents/doc.md'"
+
+
+def test_bulk_worker_preserves_completed_documents_when_prompt_changes_on_continue_remaining(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_dir = tmp_path
+    source_path = project_dir / "converted_documents" / "doc.md"
+    source_path.parent.mkdir(parents=True, exist_ok=True)
+    source_path.write_text("body", encoding="utf-8")
+
+    output_path = project_dir / "bulk_analysis" / "group" / "converted_documents" / "doc_analysis.md"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text("existing summary", encoding="utf-8")
+
+    group = BulkAnalysisGroup.create("Group")
+    group.provider_id = "anthropic"
+    group.model = "claude-sonnet-4-5"
+    group.system_prompt_path = "new_system.md"
+
+    document_rel = "converted_documents/doc.md"
+    source_mtime = round(source_path.stat().st_mtime, 6)
+
+    manifest_path = _manifest_path(project_dir, group)
+    _save_manifest(
+        manifest_path,
+        {
+            "version": 2,
+            "signature": {"prompt_recovery_hash": "old", "placeholders": {}},
+            "prompt_state": {
+                "system": {"logical_name": "old_system.md", "content_hash": "old"},
+                "user": {"logical_name": "document_bulk_analysis_prompt", "content_hash": "old"},
+            },
+            "documents": {
+                document_rel: {
+                    "source_mtime": source_mtime,
+                    "prompt_hash": "old-prompt-hash",
+                    "ran_at": "2026-03-16T00:00:00+00:00",
+                }
+            },
+        },
+    )
+
+    recovery_store = worker_module.BulkRecoveryStore(project_dir / "bulk_analysis" / group.folder_name)
+    recovery_manifest = recovery_store.load_map_manifest()
+    recovery_manifest["signature"] = {"prompt_recovery_hash": "old", "placeholders": {}}
+    recovery_manifest["documents"] = {
+        document_rel: {
+            "status": "complete",
+            "chunks": {},
+            "batches": {},
+        }
+    }
+    recovery_store.save_map_manifest(recovery_manifest)
+
+    monkeypatch.setattr(
+        worker_module,
+        "load_prompts",
+        lambda *_args, **_kwargs: PromptBundle("System changed", "User {document_content}"),
+    )
+
+    worker = BulkAnalysisWorker(
+        project_dir=project_dir,
+        group=group,
+        files=[document_rel],
+        metadata=ProjectMetadata(case_name="Case"),
+        force_rerun=False,
+        preserve_recovery_on_signature_mismatch=True,
+        llm_backend=_NoNativeBackend(),
+    )
+
+    monkeypatch.setattr(worker, "_create_provider", lambda _config: object())
+    monkeypatch.setattr(worker, "_process_document", lambda *args, **kwargs: pytest.fail("completed doc should skip"))  # type: ignore[misc]
+
+    worker._run()
+
+    updated_manifest = _load_manifest(manifest_path)
+    assert updated_manifest["documents"][document_rel]["prompt_hash"] == "old-prompt-hash"
+    assert output_path.read_text(encoding="utf-8") == "existing summary"
 
 
 def test_bulk_worker_retries_chunked_document_after_usage_limit_error(

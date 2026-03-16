@@ -2,14 +2,24 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import json
 import shutil
 import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import TYPE_CHECKING, Any, Iterable, Mapping
+
+from src.app.core.bulk_analysis_groups import BulkAnalysisGroup
+from src.config.paths import app_base_dir, app_resource_root
+from src.config.prompt_store import get_bundled_dir, get_custom_dir
+
+if TYPE_CHECKING:
+    from src.app.core.project_manager import ProjectMetadata
 
 RECOVERY_VERSION = 1
+DEFAULT_BULK_SYSTEM_PROMPT_IDENTIFIER = "document_analysis_system_prompt"
+DEFAULT_BULK_USER_PROMPT_IDENTIFIER = "document_bulk_analysis_prompt"
 
 
 def _utcnow() -> str:
@@ -18,6 +28,215 @@ def _utcnow() -> str:
 
 def _sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
+class BulkPromptCompatibility:
+    kind: str
+    roles: tuple[str, ...]
+
+
+def _normalize_prompt_path(value: str | None) -> str:
+    return str(value or "").strip()
+
+
+def _logical_prompt_name(configured_path: str, identifier: str) -> str:
+    if configured_path:
+        return Path(configured_path).name or configured_path
+    return identifier
+
+
+def _explicit_prompt_search_paths(project_dir: Path, prompt_path: str) -> list[Path]:
+    candidate = Path(prompt_path).expanduser()
+    if candidate.is_absolute():
+        return [candidate]
+
+    search_paths: list[Path] = []
+    if project_dir:
+        search_paths.append((project_dir / candidate).resolve())
+    bundle_root = app_base_dir()
+    resource_root = app_resource_root()
+    app_root = resource_root.parent
+    search_paths.extend(
+        [
+            (bundle_root / candidate).resolve(),
+            (app_root / candidate).resolve(),
+            (resource_root / candidate).resolve(),
+        ]
+    )
+    try:
+        custom_dir = get_custom_dir()
+        search_paths.append((custom_dir / candidate).resolve())
+        search_paths.append((custom_dir / candidate.name).resolve())
+    except Exception:
+        pass
+    try:
+        bundled_dir = get_bundled_dir()
+        search_paths.append((bundled_dir / candidate).resolve())
+        search_paths.append((bundled_dir / candidate.name).resolve())
+    except Exception:
+        pass
+    return search_paths
+
+
+def resolve_bulk_prompt_path(project_dir: Path, prompt_path: str | None) -> Path | None:
+    normalized = _normalize_prompt_path(prompt_path)
+    if not normalized:
+        return None
+
+    seen: set[Path] = set()
+    for path in _explicit_prompt_search_paths(project_dir, normalized):
+        if path in seen:
+            continue
+        seen.add(path)
+        if path.exists():
+            return path
+    return None
+
+
+def _default_prompt_path(identifier: str) -> Path | None:
+    filename = f"{identifier}.md"
+    for root in (get_custom_dir(), get_bundled_dir()):
+        candidate = root / filename
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def build_bulk_prompt_state(
+    project_dir: Path,
+    group: BulkAnalysisGroup,
+    *,
+    system_template: str,
+    user_template: str,
+) -> dict[str, dict[str, Any]]:
+    def _build_role_state(role: str, configured_path: str, identifier: str, content: str) -> dict[str, Any]:
+        normalized = _normalize_prompt_path(configured_path)
+        resolved = resolve_bulk_prompt_path(project_dir, normalized) if normalized else _default_prompt_path(identifier)
+        return {
+            "role": role,
+            "configured_path": normalized,
+            "identifier": None if normalized else identifier,
+            "logical_name": _logical_prompt_name(normalized, identifier),
+            "resolved_path": str(resolved) if resolved is not None else None,
+            "exists": bool(resolved is not None or not normalized),
+            "missing": bool(normalized and resolved is None),
+            "content_hash": _sha256(content or ""),
+        }
+
+    return {
+        "system": _build_role_state(
+            "system",
+            group.system_prompt_path,
+            DEFAULT_BULK_SYSTEM_PROMPT_IDENTIFIER,
+            system_template,
+        ),
+        "user": _build_role_state(
+            "user",
+            group.user_prompt_path,
+            DEFAULT_BULK_USER_PROMPT_IDENTIFIER,
+            user_template,
+        ),
+    }
+
+
+def capture_bulk_prompt_state(
+    project_dir: Path,
+    group: BulkAnalysisGroup,
+    metadata: ProjectMetadata | None,
+) -> dict[str, dict[str, Any]]:
+    from src.app.core.bulk_analysis_runner import load_prompts
+
+    bundle = load_prompts(project_dir, group, metadata)
+    return build_bulk_prompt_state(
+        project_dir,
+        group,
+        system_template=bundle.system_template,
+        user_template=bundle.user_template,
+    )
+
+
+def bulk_prompt_recovery_signature(
+    prompt_state: Mapping[str, Mapping[str, Any]],
+    *,
+    provider_id: str,
+    model: str | None,
+    operation: str,
+    use_reasoning: bool,
+    model_context_window: int | None,
+    placeholder_requirements: Mapping[str, bool] | None,
+    metadata: ProjectMetadata | None,
+    placeholder_values: Mapping[str, str] | None = None,
+) -> str:
+    metadata_summary: dict[str, str] = {}
+    if metadata is not None:
+        metadata_summary = {
+            "case_name": metadata.case_name,
+            "subject_name": metadata.subject_name,
+            "date_of_birth": metadata.date_of_birth,
+            "case_description": metadata.case_description,
+        }
+
+    payload: dict[str, Any] = {
+        "prompt_identity": {
+            role: {
+                "logical_name": str((state or {}).get("logical_name") or ""),
+                "identifier": (state or {}).get("identifier"),
+            }
+            for role, state in sorted(prompt_state.items())
+        },
+        "provider_id": provider_id,
+        "model": model,
+        "group_operation": operation,
+        "use_reasoning": use_reasoning,
+        "model_context_window": model_context_window,
+        "metadata": metadata_summary,
+        "placeholder_requirements": dict(placeholder_requirements or {}),
+    }
+    if placeholder_values:
+        payload["placeholders"] = {k: placeholder_values.get(k, "") for k in sorted(placeholder_values)}
+    return _sha256(json.dumps(payload, sort_keys=True))
+
+
+def classify_bulk_prompt_compatibility(
+    previous_state: Mapping[str, Mapping[str, Any]] | None,
+    current_state: Mapping[str, Mapping[str, Any]],
+    *,
+    fallback_prompt_hash_mismatch: bool = False,
+) -> BulkPromptCompatibility:
+    missing_roles: list[str] = []
+    replaced_roles: list[str] = []
+    changed_roles: list[str] = []
+
+    for role, current in current_state.items():
+        if bool((current or {}).get("missing")):
+            missing_roles.append(role)
+            continue
+
+        previous = dict((previous_state or {}).get(role) or {})
+        if not previous:
+            continue
+
+        previous_name = str(previous.get("logical_name") or "")
+        current_name = str((current or {}).get("logical_name") or "")
+        if previous_name and current_name and previous_name != current_name:
+            replaced_roles.append(role)
+            continue
+
+        previous_hash = str(previous.get("content_hash") or "")
+        current_hash = str((current or {}).get("content_hash") or "")
+        if previous_hash and current_hash and previous_hash != current_hash:
+            changed_roles.append(role)
+
+    if missing_roles:
+        return BulkPromptCompatibility(kind="missing", roles=tuple(sorted(missing_roles)))
+    if replaced_roles:
+        return BulkPromptCompatibility(kind="replaced", roles=tuple(sorted(replaced_roles)))
+    if changed_roles:
+        return BulkPromptCompatibility(kind="same_identity_changed", roles=tuple(sorted(changed_roles)))
+    if fallback_prompt_hash_mismatch:
+        return BulkPromptCompatibility(kind="same_identity_changed", roles=("system", "user"))
+    return BulkPromptCompatibility(kind="unchanged", roles=())
 
 
 def _read_json(path: Path) -> dict[str, Any] | None:

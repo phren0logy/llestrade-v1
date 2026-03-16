@@ -18,7 +18,7 @@ from src.app.core.azure_artifacts import is_azure_raw_artifact
 from src.app.core.bulk_analysis_groups import BulkAnalysisGroup
 from src.app.core.llm_catalog import calculate_usage_cost
 from src.app.core.llm_operation_settings import normalize_context_window_override
-from src.app.core.bulk_recovery import BulkRecoveryStore
+from src.app.core.bulk_recovery import BulkRecoveryStore, build_bulk_prompt_state, bulk_prompt_recovery_signature
 from src.app.core.bulk_analysis_runner import (
     BulkAnalysisCancelled,
     PromptBundle,
@@ -109,6 +109,7 @@ def _default_manifest() -> Dict[str, object]:
     return {
         "version": _MANIFEST_VERSION,
         "signature": None,
+        "prompt_state": None,
         "chunks": {"count": 0, "done": [], "checksums": {}},
         "batches": {},
         "finalized": False,
@@ -129,6 +130,7 @@ def _load_manifest(path: Path) -> Dict[str, object]:
     return {
         "version": data.get("version", _MANIFEST_VERSION),
         "signature": data.get("signature"),
+        "prompt_state": data.get("prompt_state"),
         "placeholders": data.get("placeholders"),
         "chunks": chunks,
         "batches": batches,
@@ -140,6 +142,7 @@ def _save_manifest(path: Path, manifest: Dict[str, object]) -> None:
     payload = {
         "version": _MANIFEST_VERSION,
         "signature": manifest.get("signature"),
+        "prompt_state": manifest.get("prompt_state"),
         "placeholders": manifest.get("placeholders"),
         "chunks": manifest.get("chunks", {"count": 0, "done": [], "checksums": {}}),
         "batches": manifest.get("batches", {}),
@@ -417,6 +420,12 @@ class BulkReduceWorker(DashboardWorker):
                 self._metadata,
                 placeholder_values=self._base_placeholders,
             )
+            prompt_state = build_bulk_prompt_state(
+                self._project_dir,
+                self._group,
+                system_template=bundle.system_template,
+                user_template=bundle.user_template,
+            )
 
             provider = self._create_provider(provider_cfg)
             if provider is None:
@@ -427,7 +436,17 @@ class BulkReduceWorker(DashboardWorker):
             previous = _load_manifest(state_manifest_path)
             signature_placeholders = _stable_placeholders(self._serialise_placeholders(placeholders_global))
             signature = {
-                "prompt_hash": prompt_hash,
+                "prompt_recovery_hash": bulk_prompt_recovery_signature(
+                    prompt_state,
+                    provider_id=provider_cfg.provider_id,
+                    model=provider_cfg.model,
+                    operation=self._group.operation,
+                    use_reasoning=self._group.use_reasoning,
+                    model_context_window=self._group.model_context_window,
+                    placeholder_requirements=self._group.placeholder_requirements,
+                    metadata=self._metadata,
+                    placeholder_values=self._base_placeholders,
+                ),
                 "inputs": signature_inputs,
                 "placeholders": signature_placeholders,
             }
@@ -450,7 +469,7 @@ class BulkReduceWorker(DashboardWorker):
 
             same_inputs = (
                 previous.get("version") == _MANIFEST_VERSION
-                and previous_sig.get("prompt_hash") == prompt_hash
+                and previous_sig.get("prompt_recovery_hash") == signature.get("prompt_recovery_hash")
                 and _paths(previous_sig) == _paths({"inputs": signature_inputs})
             )
 
@@ -466,11 +485,13 @@ class BulkReduceWorker(DashboardWorker):
             recovery_complete = bool(recovery_manifest.get("finalized")) and str(recovery_manifest.get("status") or "") == "complete"
             current_manifest = previous
             current_manifest["signature"] = signature
+            current_manifest["prompt_state"] = prompt_state
             current_manifest.setdefault("chunks", {"count": 0, "done": [], "checksums": {}})
             current_manifest.setdefault("batches", {})
             current_manifest["finalized"] = False
             manifest = current_manifest
             recovery_manifest["signature"] = signature
+            recovery_manifest["prompt_state"] = prompt_state
 
             if not self._force_rerun and same_inputs and was_finalized and recovery_complete:
                 self.log_message.emit("Combined inputs unchanged; skipping run.")

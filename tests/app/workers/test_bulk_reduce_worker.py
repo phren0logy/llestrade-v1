@@ -217,6 +217,10 @@ def test_bulk_reduce_worker_force_rerun(tmp_path: Path, qtbot, monkeypatch: pyte
     force_worker._run()
     assert call_count["value"] == 2
 
+    recovery_manifest = reduce_module.BulkRecoveryStore(project_dir / "bulk_analysis" / group.folder_name).load_reduce_manifest()
+    assert recovery_manifest["prompt_state"]["system"]["logical_name"] == "document_analysis_system_prompt"
+    assert "prompt_recovery_hash" in recovery_manifest["signature"]
+
 
 def test_bulk_reduce_worker_applies_placeholder_values(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     project_dir = tmp_path

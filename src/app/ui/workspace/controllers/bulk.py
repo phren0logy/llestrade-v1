@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Set, TYPE_CHECKING
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QDialog,
+    QFileDialog,
     QMessageBox,
     QTableWidgetItem,
     QTreeWidgetItem,
@@ -17,7 +19,12 @@ from PySide6.QtWidgets import (
 from src.app.core.bulk_analysis_groups import BulkAnalysisGroup
 from src.app.core.bulk_analysis_runner import load_prompts
 from src.app.core.file_tracker import WorkspaceGroupMetrics, WorkspaceMetrics
-from src.app.core.bulk_recovery import BulkRecoveryStore
+from src.app.core.bulk_recovery import (
+    BulkPromptCompatibility,
+    BulkRecoveryStore,
+    capture_bulk_prompt_state,
+    classify_bulk_prompt_compatibility,
+)
 from src.app.core.job_cost_estimates import (
     CostForecast,
     estimate_bulk_map_cost,
@@ -372,6 +379,17 @@ class BulkAnalysisController:
             self._on_refresh_groups()
             return False
 
+        preserve_recovery_on_signature_mismatch = False
+        prepared = self._prepare_map_prompt_recovery(
+            group,
+            interactive=interactive,
+            force_rerun=force_rerun,
+            selected_files=selected_files,
+        )
+        if prepared is None:
+            return False
+        group, force_rerun, selected_files, preserve_recovery_on_signature_mismatch = prepared
+
         if selected_files is not None:
             files = list(selected_files)
             if not files:
@@ -465,6 +483,7 @@ class BulkAnalysisController:
             metadata=manager.metadata,
             default_provider=provider_default,
             force_rerun=force_rerun,
+            preserve_recovery_on_signature_mismatch=preserve_recovery_on_signature_mismatch,
             placeholder_values=manager.project_placeholder_values(),
             project_name=manager.project_name,
             estimate_summary=forecast.to_dict() if forecast.available else None,
@@ -513,6 +532,11 @@ class BulkAnalysisController:
                 f"Combined operation for '{group.name}' is already in progress.",
             )
             return
+
+        prepared_group, force_rerun = self._prepare_combined_prompt_recovery(group, force_rerun=force_rerun)
+        if prepared_group is None:
+            return
+        group = prepared_group
 
         metrics = self._resolve_group_metrics(gid)
         if not metrics:
@@ -644,6 +668,207 @@ class BulkAnalysisController:
         mode_label = "force" if force_rerun else "standard"
         self._handle_log(gid, f"Starting combined operation for '{group.name}' ({mode_label}).")
         self._on_refresh_groups()
+
+    def _recovery_store(self, group: BulkAnalysisGroup) -> BulkRecoveryStore | None:
+        manager = self._project_manager
+        if not manager or not manager.project_dir:
+            return None
+        slug = getattr(group, "slug", None) or group.folder_name
+        return BulkRecoveryStore(manager.project_dir / "bulk_analysis" / slug)
+
+    def _load_map_recovery_manifest(self, group: BulkAnalysisGroup) -> dict | None:
+        store = self._recovery_store(group)
+        return store.load_map_manifest() if store is not None else None
+
+    def _load_reduce_recovery_manifest(self, group: BulkAnalysisGroup) -> dict | None:
+        store = self._recovery_store(group)
+        return store.load_reduce_manifest() if store is not None else None
+
+    @staticmethod
+    def _prompt_role_label(role: str) -> str:
+        return "system prompt" if role == "system" else "user prompt"
+
+    def _choose_replacement_prompt(self, group: BulkAnalysisGroup, role: str) -> str | None:
+        manager = self._project_manager
+        if not manager or not manager.project_dir:
+            return None
+        current_path = group.system_prompt_path if role == "system" else group.user_prompt_path
+        start_dir = ""
+        if current_path:
+            candidate = Path(current_path).expanduser()
+            if not candidate.is_absolute():
+                candidate = (manager.project_dir / candidate).resolve()
+            start_dir = str(candidate.parent if candidate.parent.exists() else manager.project_dir)
+        else:
+            start_dir = str(manager.project_dir)
+        selected, _ = QFileDialog.getOpenFileName(
+            self._workspace,
+            f"Select Replacement {self._prompt_role_label(role).title()}",
+            start_dir,
+            "Markdown Files (*.md);;All Files (*)",
+        )
+        return selected or None
+
+    def _save_group_prompt_paths(
+        self,
+        group: BulkAnalysisGroup,
+        *,
+        system_prompt_path: str | None = None,
+        user_prompt_path: str | None = None,
+    ) -> BulkAnalysisGroup:
+        manager = self._project_manager
+        if not manager:
+            return group
+        if system_prompt_path is not None:
+            group.system_prompt_path = system_prompt_path
+        if user_prompt_path is not None:
+            group.user_prompt_path = user_prompt_path
+        saved = manager.save_bulk_analysis_group(group)
+        self._on_refresh_metrics()
+        self._on_refresh_groups()
+        return saved
+
+    def _prompt_recovery_continue_choice(
+        self,
+        *,
+        title: str,
+        message: str,
+        default_restart: bool,
+    ) -> int:
+        buttons = QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel
+        default_button = QMessageBox.No if default_restart else QMessageBox.Yes
+        return QMessageBox.question(
+            self._workspace,
+            title,
+            message,
+            buttons,
+            default_button,
+        )
+
+    def _repair_missing_prompt_roles(
+        self,
+        group: BulkAnalysisGroup,
+        compatibility: BulkPromptCompatibility,
+    ) -> BulkAnalysisGroup | None:
+        replacements: dict[str, str] = {}
+        for role in compatibility.roles:
+            selected = self._choose_replacement_prompt(group, role)
+            if not selected:
+                return None
+            replacements[role] = selected
+        return self._save_group_prompt_paths(
+            group,
+            system_prompt_path=replacements.get("system"),
+            user_prompt_path=replacements.get("user"),
+        )
+
+    def _prepare_map_prompt_recovery(
+        self,
+        group: BulkAnalysisGroup,
+        *,
+        interactive: bool,
+        force_rerun: bool,
+        selected_files: Sequence[str] | None,
+    ) -> tuple[BulkAnalysisGroup, bool, Sequence[str] | None, bool] | None:
+        manager = self._project_manager
+        manifest = self._load_map_recovery_manifest(group)
+        if not manager or not manager.project_dir or not manifest:
+            return group, force_rerun, selected_files, False
+
+        previous_state = manifest.get("prompt_state")
+        current_state = capture_bulk_prompt_state(manager.project_dir, group, manager.metadata)
+        compatibility = classify_bulk_prompt_compatibility(previous_state, current_state)
+        if compatibility.kind == "unchanged":
+            return group, force_rerun, selected_files, False
+        if not interactive:
+            self._handle_log(
+                group.group_id,
+                f"Skipping '{group.name}': prompt recovery requires manual review ({compatibility.kind}).",
+            )
+            return None
+
+        if compatibility.kind == "missing":
+            repaired_group = self._repair_missing_prompt_roles(group, compatibility)
+            if repaired_group is None:
+                return None
+            group = repaired_group
+            current_state = capture_bulk_prompt_state(manager.project_dir, group, manager.metadata)
+            compatibility = classify_bulk_prompt_compatibility(previous_state, current_state)
+        if force_rerun:
+            return group, True, None, False
+
+        role_labels = ", ".join(self._prompt_role_label(role) for role in compatibility.roles) or "bulk prompt"
+        if compatibility.kind == "same_identity_changed":
+            reply = self._prompt_recovery_continue_choice(
+                title="Bulk Recovery Prompt Changed",
+                message=(
+                    f"The saved {role_labels} changed since the last run for '{group.name}'.\n\n"
+                    "Choose Resume to keep completed documents and rerun only the remaining work, "
+                    "or Restart All to rerun the entire group with the updated prompt."
+                ),
+                default_restart=False,
+            )
+            if reply == QMessageBox.Cancel:
+                return None
+            if reply == QMessageBox.No:
+                return group, True, None, False
+            return group, force_rerun, selected_files, True
+
+        reply = self._prompt_recovery_continue_choice(
+            title="Bulk Recovery Prompt Replaced",
+            message=(
+                f"The saved {role_labels} changed identity for '{group.name}'.\n\n"
+                "Choose Continue Remaining to keep completed documents and rerun only unfinished work with the "
+                "current prompt, or Restart All to rerun the entire group."
+            ),
+            default_restart=True,
+        )
+        if reply == QMessageBox.Cancel:
+            return None
+        if reply == QMessageBox.Yes:
+            return group, force_rerun, selected_files, True
+        return group, True, None, False
+
+    def _prepare_combined_prompt_recovery(
+        self,
+        group: BulkAnalysisGroup,
+        *,
+        force_rerun: bool,
+    ) -> tuple[BulkAnalysisGroup | None, bool]:
+        manager = self._project_manager
+        manifest = self._load_reduce_recovery_manifest(group)
+        if not manager or not manager.project_dir or not manifest:
+            return group, force_rerun
+
+        previous_state = manifest.get("prompt_state")
+        current_state = capture_bulk_prompt_state(manager.project_dir, group, manager.metadata)
+        compatibility = classify_bulk_prompt_compatibility(previous_state, current_state)
+        if compatibility.kind == "unchanged":
+            return group, force_rerun
+        if compatibility.kind == "missing":
+            repaired_group = self._repair_missing_prompt_roles(group, compatibility)
+            if repaired_group is None:
+                return None, force_rerun
+            group = repaired_group
+            current_state = capture_bulk_prompt_state(manager.project_dir, group, manager.metadata)
+            compatibility = classify_bulk_prompt_compatibility(previous_state, current_state)
+        if force_rerun:
+            return group, True
+
+        role_labels = ", ".join(self._prompt_role_label(role) for role in compatibility.roles) or "bulk prompt"
+        reply = QMessageBox.question(
+            self._workspace,
+            "Combined Recovery Prompt Changed",
+            (
+                f"The saved {role_labels} changed for '{group.name}'.\n\n"
+                "Combined recovery cannot safely resume after a prompt change. Restart the combined stage?"
+            ),
+            QMessageBox.Yes | QMessageBox.Cancel,
+            QMessageBox.Yes,
+        )
+        if reply != QMessageBox.Yes:
+            return None, force_rerun
+        return group, True
 
     def cancel_run(self, group: BulkAnalysisGroup) -> None:
         if not self._feature_enabled:

@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from src.app.core.bulk_recovery import BulkRecoveryStore
+from src.app.core.bulk_recovery import (
+    BulkPromptCompatibility,
+    BulkRecoveryStore,
+    classify_bulk_prompt_compatibility,
+)
 
 
 def test_mark_map_chunk_compromised_quarantines_payload_and_clears_batches(tmp_path: Path) -> None:
@@ -70,3 +74,44 @@ def test_mark_reduce_chunk_compromised_quarantines_payload_and_invalidates_batch
     assert updated["batches"] == {}
     assert not store.reduce_chunk_path(1).exists()
     assert not store.reduce_batch_path(1, 1).exists()
+
+
+def test_classify_bulk_prompt_compatibility_detects_same_identity_content_change() -> None:
+    previous = {
+        "system": {"logical_name": "system.md", "content_hash": "old", "missing": False},
+        "user": {"logical_name": "user.md", "content_hash": "same", "missing": False},
+    }
+    current = {
+        "system": {"logical_name": "system.md", "content_hash": "new", "missing": False},
+        "user": {"logical_name": "user.md", "content_hash": "same", "missing": False},
+    }
+
+    compatibility = classify_bulk_prompt_compatibility(previous, current)
+
+    assert compatibility == BulkPromptCompatibility(kind="same_identity_changed", roles=("system",))
+
+
+def test_classify_bulk_prompt_compatibility_detects_missing_prompt() -> None:
+    previous = {
+        "system": {"logical_name": "system.md", "content_hash": "old", "missing": False},
+    }
+    current = {
+        "system": {"logical_name": "system.md", "content_hash": "old", "missing": True},
+    }
+
+    compatibility = classify_bulk_prompt_compatibility(previous, current)
+
+    assert compatibility == BulkPromptCompatibility(kind="missing", roles=("system",))
+
+
+def test_classify_bulk_prompt_compatibility_detects_replaced_prompt() -> None:
+    previous = {
+        "user": {"logical_name": "old-user.md", "content_hash": "same", "missing": False},
+    }
+    current = {
+        "user": {"logical_name": "new-user.md", "content_hash": "same", "missing": False},
+    }
+
+    compatibility = classify_bulk_prompt_compatibility(previous, current)
+
+    assert compatibility == BulkPromptCompatibility(kind="replaced", roles=("user",))
