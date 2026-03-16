@@ -137,6 +137,12 @@ def _request_cost(provider_id: str, model_id: str | None, *, input_tokens: int, 
     return float(value) if value is not None else None
 
 
+def _chunk_chars_per_token(provider_id: str) -> int:
+    if provider_id in {"anthropic", "anthropic_bedrock"}:
+        return 3
+    return 4
+
+
 def _sum_costs(costs: Iterable[float | None]) -> float | None:
     total = 0.0
     seen = False
@@ -355,6 +361,7 @@ def estimate_bulk_map_cost(
     for document in documents:
         body, _, source_context = worker._load_document(document)
         doc_placeholders = worker._build_document_placeholders(global_placeholders, source_context)
+        map_max_tokens = worker._map_max_output_tokens(provider_config)
         override_window = normalize_context_window_override(
             provider_id=provider_config.provider_id,
             model_id=provider_config.model,
@@ -380,7 +387,7 @@ def estimate_bulk_map_cost(
             provider_id=provider_config.provider_id,
             model_id=provider_config.model,
             raw_context_window=raw_context_window,
-            max_output_tokens=_BULK_MAX_TOKENS,
+            max_output_tokens=map_max_tokens,
             minimum_budget=_MIN_CHUNK_TOKEN_TARGET,
         )
         input_budget = compute_preflight_input_budget(
@@ -402,7 +409,7 @@ def estimate_bulk_map_cost(
             system_prompt=system_prompt,
             user_prompt=full_prompt,
             raw_context_window=raw_context_window,
-            max_output_tokens=_BULK_MAX_TOKENS,
+            max_output_tokens=map_max_tokens,
             minimum_budget=_MIN_CHUNK_TOKEN_TARGET,
         )
         full_prompt_tokens = full_request.input_tokens
@@ -430,7 +437,7 @@ def estimate_bulk_map_cost(
                     output_tokens=_estimate_output_tokens(
                         full_prompt_tokens,
                         kind="bulk_chunk",
-                        max_tokens=_BULK_MAX_TOKENS,
+                        max_tokens=map_max_tokens,
                         mode="best",
                     ),
                 )
@@ -443,7 +450,7 @@ def estimate_bulk_map_cost(
                     output_tokens=_estimate_output_tokens(
                         full_prompt_tokens,
                         kind="bulk_chunk",
-                        max_tokens=_BULK_MAX_TOKENS,
+                        max_tokens=map_max_tokens,
                         mode="ceiling",
                     ),
                 )
@@ -463,6 +470,7 @@ def estimate_bulk_map_cost(
                 input_budget=input_budget,
                 default_chunk_tokens=default_chunk_tokens,
             ),
+            max_tokens=map_max_tokens,
         )
         best_summary_tokens: list[int] = []
         ceiling_summary_tokens: list[int] = []
@@ -482,12 +490,12 @@ def estimate_bulk_map_cost(
                 system_prompt=system_prompt,
                 user_prompt=prompt,
                 raw_context_window=raw_context_window,
-                max_output_tokens=_BULK_MAX_TOKENS,
+                max_output_tokens=map_max_tokens,
                 minimum_budget=_MIN_CHUNK_TOKEN_TARGET,
             )
             input_tokens = input_tokens.input_tokens
-            best_out = _estimate_output_tokens(input_tokens, kind="bulk_chunk", max_tokens=_BULK_MAX_TOKENS, mode="best")
-            ceiling_out = _estimate_output_tokens(input_tokens, kind="bulk_chunk", max_tokens=_BULK_MAX_TOKENS, mode="ceiling")
+            best_out = _estimate_output_tokens(input_tokens, kind="bulk_chunk", max_tokens=map_max_tokens, mode="best")
+            ceiling_out = _estimate_output_tokens(input_tokens, kind="bulk_chunk", max_tokens=map_max_tokens, mode="ceiling")
             best_summary_tokens.append(best_out)
             ceiling_summary_tokens.append(ceiling_out)
             if force_rerun or str(idx) not in completed_chunks:
@@ -656,7 +664,11 @@ def estimate_bulk_reduce_cost(
             projected_total_ceiling=spent_actual + ceiling,
         )
 
-    chunks = generate_chunks(content, max_tokens)
+    chunks = generate_chunks(
+        content,
+        max_tokens,
+        chars_per_token=_chunk_chars_per_token(provider_cfg.provider_id),
+    )
     best_costs: list[float | None] = []
     ceiling_costs: list[float | None] = []
     best_summary_tokens: list[int] = []

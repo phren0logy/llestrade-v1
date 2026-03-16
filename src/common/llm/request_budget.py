@@ -134,12 +134,28 @@ def estimate_request_input_tokens(
     if not combined_prompt:
         return 0
 
-    token_info = TokenCounter.count(
+    return estimate_text_input_tokens(
         text=combined_prompt,
+        provider_id=provider_id,
+        model_id=model_id,
+    )
+
+
+def estimate_text_input_tokens(
+    *,
+    text: str,
+    provider_id: str,
+    model_id: str | None,
+) -> int:
+    if not text:
+        return 0
+
+    token_info = TokenCounter.count(
+        text=text,
         provider=provider_id,
         model=model_id or "",
     )
-    conservative = max(len(combined_prompt) // 3, 1)
+    conservative = max(len(text) // 3, 1)
     if token_info.get("success"):
         counted = int(token_info.get("token_count") or 0)
         if provider_id in {"anthropic", "anthropic_bedrock"}:
@@ -233,6 +249,7 @@ __all__ = [
     "compute_preflight_input_budget",
     "compute_request_input_budget",
     "count_request_input_tokens",
+    "estimate_text_input_tokens",
     "estimate_request_input_tokens",
     "evaluate_request_budget",
     "preflight_budget_ratio",

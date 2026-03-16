@@ -19,17 +19,19 @@ class ChunkingStrategy:
         max_tokens: int,
         headers_to_split_on: Optional[List[Tuple[str, str]]] = None,
         strip_headers: bool = True,
-        overlap: int = 200
+        overlap: int = 200,
+        chars_per_token: int = 4,
     ) -> List[str]:
         """
         Split markdown text by headers, respecting token limits.
         
         Args:
             text: The markdown text to split
-            max_tokens: Maximum tokens per chunk (using 4 chars per token estimate)
+            max_tokens: Maximum tokens per chunk
             headers_to_split_on: List of (header_level, header_name) tuples
             strip_headers: Whether to strip headers from chunk content
             overlap: Number of characters to overlap between chunks
+            chars_per_token: Character heuristic used to derive the initial hard cap
             
         Returns:
             List of text chunks
@@ -53,7 +55,7 @@ class ChunkingStrategy:
         header_splits = splitter.split_text(text)
         
         # Convert max_tokens to approximate character limit
-        max_chars = max_tokens * 4  # Rough estimate of 4 chars per token
+        max_chars = max(max_tokens * max(chars_per_token, 1), 1)
         
         # Process the splits to respect token limits
         chunks = []
@@ -113,7 +115,8 @@ class ChunkingStrategy:
     def simple_overlap(
         text: str,
         max_tokens: int,
-        overlap: int = 200
+        overlap: int = 200,
+        chars_per_token: int = 4,
     ) -> List[str]:
         """
         Simple overlapping chunk strategy (character-based).
@@ -127,7 +130,7 @@ class ChunkingStrategy:
             List of text chunks
         """
         # Convert tokens to characters (rough estimate)
-        max_chars = max_tokens * 4
+        max_chars = max(max_tokens * max(chars_per_token, 1), 1)
         
         chunks = []
         start = 0

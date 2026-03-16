@@ -84,6 +84,12 @@ _DYNAMIC_REDUCE_KEYS: frozenset[str] = frozenset(
 )
 
 
+def _chunk_chars_per_token(provider_id: str) -> int:
+    if provider_id in {"anthropic", "anthropic_bedrock"}:
+        return 3
+    return 4
+
+
 def _prompt_body_from_text(raw: str) -> str:
     """Return prompt-ready content with managed YAML frontmatter removed."""
 
@@ -541,7 +547,11 @@ class BulkReduceWorker(DashboardWorker):
                     "items": {},
                 }
             else:
-                chunks = generate_chunks(combined_content, max_tokens)
+                chunks = generate_chunks(
+                    combined_content,
+                    max_tokens,
+                    chars_per_token=_chunk_chars_per_token(provider_cfg.provider_id),
+                )
                 if not chunks:
                     prompt = render_user_prompt(
                         bundle,

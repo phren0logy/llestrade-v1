@@ -16,9 +16,9 @@ from src.app.core.report_inputs import category_display_name
 from src.common.llm.budgets import compute_input_token_budget
 from src.common.llm.request_budget import (
     compute_request_input_budget,
+    estimate_text_input_tokens,
     evaluate_request_budget,
 )
-from src.common.llm.tokens import TokenCounter
 from src.common.markdown import PromptReference, SourceReference, compute_file_checksum
 
 from .base import DashboardWorker
@@ -139,15 +139,10 @@ class ReportWorkerBase(DashboardWorker):
             lines.append(section_header)
             lines.append(content.strip())
             lines.append("")
-            token_info = TokenCounter.count(
+            token_count = estimate_text_input_tokens(
                 text=content,
-                provider=self._provider_id,
-                model=self._custom_model or self._model,
-            )
-            token_count = (
-                int(token_info.get("token_count"))
-                if token_info.get("success") and token_info.get("token_count") is not None
-                else max(len(content) // 4, 1)
+                provider_id=self._provider_id,
+                model_id=self._custom_model or self._model,
             )
             metadata.append(
                 {
