@@ -111,10 +111,6 @@ describe('metadata', () => {
           },
         ],
       },
-      {
-        id: 'google',
-        models: [{ id: 'gemini-2.5-pro', context_window: 1048576, prices: { input_mtok: 1.25, output_mtok: 10 } }],
-      },
     ])
     fetchMock
       .get('http://localhost:8005')
@@ -128,34 +124,6 @@ describe('metadata', () => {
       .intercept({ method: 'GET', path: '/anthropic/v1/models' })
       .reply(200, {
         data: [{ id: 'claude-sonnet-4-20250514', display_name: 'Claude Sonnet 4' }],
-      })
-
-    fetchMock
-      .get('https://oauth2.googleapis.com')
-      .intercept({ method: 'POST', path: '/token' })
-      .reply(200, {
-        access_token: 'vertex-token',
-        expires_in: 300,
-      })
-
-    fetchMock
-      .get('https://us-central1-aiplatform.googleapis.com')
-      .intercept({
-        method: 'GET',
-        path: '/v1beta1/publishers/google/models?pageSize=1000&listAllVersions=true&view=FULL',
-        headers: { Authorization: 'Bearer vertex-token' },
-      })
-      .reply(200, {
-        publisherModels: [
-          {
-            name: 'publishers/google/models/gemini-2.5-pro',
-            displayName: 'Gemini 2.5 Pro',
-            launchStage: 'GA',
-            inputTokenLimit: 1048576,
-            outputTokenLimit: 65536,
-            supportedActions: ['generateContent'],
-          },
-        ],
       })
 
     const response = await SELF.fetch('https://example.com/metadata/catalog', {
@@ -173,17 +141,87 @@ describe('metadata', () => {
       }>
     }
 
-    expect(payload.providers.map((provider) => provider.provider_id)).toEqual(['anthropic', 'gemini', 'openai'])
-    expect(payload.providers.map((provider) => provider.route)).toEqual(['anthropic', 'google-vertex', 'openai'])
-    expect(payload.providers.map((provider) => provider.upstream_provider_id)).toEqual([
+    expect(payload.providers.map((provider) => provider.provider_id)).toEqual([
       'anthropic',
-      'google-vertex',
+      'anthropic_bedrock',
       'openai',
     ])
-    expect(payload.providers.map((provider) => provider.label)).toEqual(['Anthropic', 'Google Gemini', 'OpenAI'])
+    expect(payload.providers.map((provider) => provider.route)).toEqual(['anthropic', 'bedrock', 'openai'])
+    expect(payload.providers.map((provider) => provider.upstream_provider_id)).toEqual([
+      'anthropic',
+      'bedrock',
+      'openai',
+    ])
+    expect(payload.providers.map((provider) => provider.label)).toEqual([
+      'Anthropic',
+      'AWS Bedrock (Claude)',
+      'OpenAI',
+    ])
     expect(payload.providers[0]?.models.map((model) => model.model_id)).toEqual(['claude-sonnet-4-20250514'])
-    expect(payload.providers[1]?.models.map((model) => model.model_id)).toEqual(['gemini-2.5-pro'])
+    expect(payload.providers[1]?.models.map((model) => model.model_id)).toEqual([
+      'anthropic.claude-opus-4-1-20250805-v1:0',
+      'anthropic.claude-opus-4-6-v1',
+      'anthropic.claude-sonnet-4-5-v1',
+    ])
     expect(payload.providers[2]?.models.map((model) => model.model_id)).toEqual(['gpt-5.4'])
+  })
+
+  it('returns curated Bedrock Claude models under anthropic_bedrock', async () => {
+    mockPricingSnapshot([
+      {
+        id: 'anthropic',
+        models: [
+          {
+            id: 'claude-sonnet-4-5',
+            context_window: 1000000,
+            prices: { input_mtok: 3, output_mtok: 15 },
+          },
+          {
+            id: 'claude-opus-4-6',
+            context_window: 200000,
+            prices: { input_mtok: 15, output_mtok: 75 },
+          },
+          {
+            id: 'claude-opus-4-1-20250805',
+            context_window: 200000,
+            prices: { input_mtok: 15, output_mtok: 75 },
+          },
+        ],
+      },
+    ])
+
+    const response = await SELF.fetch('https://example.com/metadata/models?provider=anthropic_bedrock', {
+      headers: { authorization: 'healthy-key' },
+    })
+    expect(response.status).toBe(200)
+
+    const payload = (await response.json()) as Array<{
+      provider_id: string
+      upstream_provider_id: string
+      model_id: string
+      display_name: string
+      context_window: number | null
+      sources: { display_name: string; pricing: string; reasoning_capabilities: string }
+    }>
+
+    expect(payload.map((item) => item.model_id)).toEqual([
+      'anthropic.claude-opus-4-1-20250805-v1:0',
+      'anthropic.claude-opus-4-6-v1',
+      'anthropic.claude-sonnet-4-5-v1',
+    ])
+    expect(payload[0]).toEqual(
+      expect.objectContaining({
+        provider_id: 'anthropic_bedrock',
+        upstream_provider_id: 'bedrock',
+        display_name: 'Claude Opus 4.1',
+        context_window: 200000,
+        sources: expect.objectContaining({
+          display_name: 'provider-heuristic',
+          pricing: 'genai-prices',
+          reasoning_capabilities: 'provider-heuristic',
+        }),
+      }),
+    )
   })
 
   it('enriches Anthropic metadata from the live pricing snapshot', async () => {

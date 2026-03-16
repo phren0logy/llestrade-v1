@@ -18,6 +18,24 @@ const OPENAI_EXCLUDED_TOKENS = [
   'search',
 ] as const
 const GEMINI_EXCLUDED_TOKENS = ['image', 'tts', 'embedding', 'veo', 'imagen', 'aqa', 'learnlm'] as const
+const BEDROCK_PROVIDER_LABEL = 'AWS Bedrock (Claude)'
+const BEDROCK_CLAUDE_MODELS = [
+  {
+    modelId: 'anthropic.claude-sonnet-4-5-v1',
+    displayName: 'Claude Sonnet 4.5',
+    anthropicModelId: 'claude-sonnet-4-5',
+  },
+  {
+    modelId: 'anthropic.claude-opus-4-6-v1',
+    displayName: 'Claude Opus 4.6',
+    anthropicModelId: 'claude-opus-4-6',
+  },
+  {
+    modelId: 'anthropic.claude-opus-4-1-20250805-v1:0',
+    displayName: 'Claude Opus 4.1',
+    anthropicModelId: 'claude-opus-4-1-20250805',
+  },
+] as const
 
 type LifecycleStatus = 'stable' | 'preview' | 'deprecated' | 'retired' | 'unknown'
 type ReasoningControl = 'toggle' | 'effort' | 'level' | 'budget'
@@ -419,6 +437,8 @@ async function loadModelsForProvider(
       return await loadOpenAIModels(route, requestedProviderId, providerProxy)
     case 'anthropic':
       return await loadAnthropicModels(route, requestedProviderId, providerProxy)
+    case 'bedrock':
+      return await loadBedrockModels(route, requestedProviderId, providerProxy)
     case 'google-vertex':
       return await loadGoogleVertexModels(route, requestedProviderId, providerProxy)
     default:
@@ -427,7 +447,7 @@ async function loadModelsForProvider(
 }
 
 function supportsMetadataProvider(providerId: string): boolean {
-  return providerId === 'openai' || providerId === 'anthropic' || providerId === 'google-vertex'
+  return providerId === 'openai' || providerId === 'anthropic' || providerId === 'google-vertex' || providerId === 'bedrock'
 }
 
 async function loadOpenAIModels(
@@ -537,6 +557,32 @@ async function loadGoogleVertexModels(
     })
 }
 
+async function loadBedrockModels(
+  route: string,
+  requestedProviderId: string,
+  providerProxy: ProviderProxy & { key: string },
+): Promise<MetadataModelRecord[]> {
+  const pricingProvider = await resolvePricingProvider('anthropic')
+  return BEDROCK_CLAUDE_MODELS.map((model) =>
+    buildNormalizedRecord({
+      route,
+      requestedProviderId,
+      upstreamProviderId: providerProxy.providerId,
+      modelId: model.modelId,
+      displayName: model.displayName,
+      lifecycleStatus: inferLifecycleStatus(model.modelId),
+      providerContextWindow: null,
+      providerMaxOutputTokens: null,
+      pricingProvider,
+      pricingModelId: model.anthropicModelId,
+      availabilitySource: 'provider-heuristic',
+      displayNameSource: 'provider-heuristic',
+      lifecycleSource: 'provider-heuristic',
+      reasoning: inferReasoningCapabilities(providerProxy.providerId, model.modelId),
+    }),
+  )
+}
+
 function buildNormalizedRecord(input: {
   route: string
   requestedProviderId: string
@@ -547,9 +593,13 @@ function buildNormalizedRecord(input: {
   providerContextWindow: number | null
   providerMaxOutputTokens: number | null
   pricingProvider: PricingProvider | null
+  pricingModelId?: string
+  availabilitySource?: SourceMarker
+  displayNameSource?: SourceMarker
+  lifecycleSource?: SourceMarker
   reasoning: ReasoningCapabilities
 }): MetadataModelRecord {
-  const pricing = resolvePricingMetadata(input.pricingProvider, input.modelId)
+  const pricing = resolvePricingMetadata(input.pricingProvider, input.pricingModelId ?? input.modelId)
   return {
     provider_id: input.requestedProviderId,
     route: input.route,
@@ -565,9 +615,10 @@ function buildNormalizedRecord(input: {
     pricing_tiered: pricing.tiered,
     reasoning_capabilities: input.reasoning,
     sources: {
-      availability: 'provider-native',
-      display_name: 'provider-native',
-      lifecycle_status: input.lifecycleStatus === 'unknown' ? 'provider-heuristic' : 'provider-native',
+      availability: input.availabilitySource ?? 'provider-native',
+      display_name: input.displayNameSource ?? 'provider-native',
+      lifecycle_status:
+        input.lifecycleSource ?? (input.lifecycleStatus === 'unknown' ? 'provider-heuristic' : 'provider-native'),
       context_window: input.providerContextWindow !== null ? 'provider-native' : pricing.source,
       max_output_tokens: input.providerMaxOutputTokens !== null ? 'provider-native' : pricing.source,
       pricing: pricing.source,
@@ -721,7 +772,7 @@ function isTieredPrice(value: unknown): boolean {
 
 function inferReasoningCapabilities(providerId: string, modelId: string): ReasoningCapabilities {
   const normalized = modelId.toLowerCase()
-  if (providerId === 'anthropic') {
+  if (providerId === 'anthropic' || providerId === 'bedrock') {
     return {
       source: 'provider-heuristic',
       exact: false,
@@ -857,6 +908,8 @@ function formatProviderLabel(providerProxy: ProviderProxy & { key: string }): st
 
 function canonicalProviderId(providerProxy: ProviderProxy & { key: string }): string {
   switch (providerProxy.providerId) {
+    case 'bedrock':
+      return 'anthropic_bedrock'
     case 'google-vertex':
       return 'gemini'
     default:
@@ -870,6 +923,8 @@ function upstreamProviderLabel(providerId: string): string {
       return 'OpenAI'
     case 'anthropic':
       return 'Anthropic'
+    case 'bedrock':
+      return BEDROCK_PROVIDER_LABEL
     case 'google-vertex':
       return 'Google Gemini'
     default:

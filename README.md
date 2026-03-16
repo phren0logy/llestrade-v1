@@ -296,6 +296,7 @@ Self-hosting notes:
 
 - Use a custom domain such as `https://gateway.example.com` for `PYDANTIC_AI_GATEWAY_BASE_URL`.
 - Keep the runtime gateway on API-key auth; the current desktop app does not participate in Cloudflare Access login flows.
+- For AWS Bedrock through the self-hosted gateway, store a Worker secret named `AWS_BEARER_TOKEN_BEDROCK` and set the rendered Worker var `AWS_DEFAULT_REGION`.
 - The full Cloudflare/1Password operator workflow lives in [`gateway/README.md`](gateway/README.md).
 
 ### AWS Bedrock Credentials

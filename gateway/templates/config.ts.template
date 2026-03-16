@@ -1,7 +1,7 @@
 import { env } from 'cloudflare:workers'
 import type { Config } from '@deploy/types'
 
-type ProviderKeys = 'anthropic' | 'openai' | 'google-vertex'
+type ProviderKeys = 'anthropic' | 'openai' | 'google-vertex' | 'bedrock'
 
 const PROJECT_ID = 1
 const APP_API_KEY_ID = 100
@@ -15,6 +15,7 @@ export const config: Config<ProviderKeys> = {
   },
   routingGroups: {
     anthropic: [{ key: 'anthropic' }],
+    anthropic_bedrock: [{ key: 'bedrock' }],
     openai: [{ key: 'openai' }],
     gemini: [{ key: 'google-vertex' }],
     'google-vertex': [{ key: 'google-vertex' }],
@@ -38,12 +39,18 @@ export const config: Config<ProviderKeys> = {
       injectCost: true,
       credentials: env.GOOGLE_VERTEX_SERVICE_ACCOUNT_JSON,
     },
+    bedrock: {
+      providerId: 'bedrock',
+      baseUrl: `https://bedrock-runtime.${env.AWS_DEFAULT_REGION}.amazonaws.com`,
+      injectCost: true,
+      credentials: env.AWS_BEARER_TOKEN_BEDROCK,
+    },
   },
   apiKeys: {
     __APP_API_KEY__: {
       id: APP_API_KEY_ID,
       project: PROJECT_ID,
-      providers: ['anthropic', 'openai', 'google-vertex'],
+      providers: ['anthropic', 'openai', 'google-vertex', 'bedrock'],
     },
   },
 }

@@ -19,6 +19,7 @@ export const config: Config<ProviderKeys> = {
   },
   routingGroups: {
     anthropic: [{ key: 'anthropic' }],
+    anthropic_bedrock: [{ key: 'bedrock' }],
     openai: [{ key: 'openai' }],
     gemini: [{ key: 'google-vertex' }],
     'google-vertex': [{ key: 'google-vertex' }],
@@ -61,7 +62,7 @@ export const config: Config<ProviderKeys> = {
       id: 3,
       project: 1,
       user: 2,
-      providers: ['openai', 'groq', 'anthropic', 'google-vertex', 'test'],
+      providers: ['openai', 'groq', 'anthropic', 'google-vertex', 'bedrock', 'test'],
       spendingLimitMonthly: 3,
       spendingLimitTotal: 4,
     },

@@ -21,6 +21,7 @@ You can override the service and account names in `var/gateway/local.env`.
 - `GATEWAY_ANTHROPIC_API_KEY_REF`
 - `GATEWAY_OPENAI_API_KEY_REF`
 - `GATEWAY_GOOGLE_VERTEX_SERVICE_ACCOUNT_REF`
+- `GATEWAY_BEDROCK_BEARER_TOKEN_REF`
 - `GATEWAY_APP_API_KEY_REF`
 - `GATEWAY_STATUS_API_KEY_REF`
 
@@ -36,6 +37,8 @@ Use `op://vault/item/field` references. Item UUIDs are supported.
   stored as the Worker secret `OPENAI_API_KEY`
 - Google Vertex service account JSON:
   stored as the Worker secret `GOOGLE_VERTEX_SERVICE_ACCOUNT_JSON`
+- Bedrock bearer token:
+  stored as the Worker secret `AWS_BEARER_TOKEN_BEDROCK`
 - gateway app API key:
   rendered into the upstream `src/config.ts` so the desktop app can authenticate to the gateway
 - status API key:
@@ -48,7 +51,7 @@ If the service-account token changes:
 1. update the value in 1Password
 2. rerun `gateway/scripts/seed_service_account_token.sh`
 
-If the Cloudflare, Anthropic, OpenAI, Google Vertex, app, or status secret changes:
+If the Cloudflare, Anthropic, Bedrock, OpenAI, Google Vertex, app, or status secret changes:
 
 1. update the 1Password item
 2. rerun `gateway/scripts/bootstrap.sh`

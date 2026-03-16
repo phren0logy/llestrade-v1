@@ -117,6 +117,7 @@ describe('provider capacity', () => {
     expect(payload.capacity.enabled).toBe(true)
     expect(payload.capacity.providers.openai.currentLimit).toBe(1)
     expect(payload.capacity.providers.anthropic.currentLimit).toBe(2)
+    expect(payload.capacity.providers.bedrock.currentLimit).toBe(4)
     expect(payload.capacity.providers['google-vertex'].currentLimit).toBe(3)
   })
 })

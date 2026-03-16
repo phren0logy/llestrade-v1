@@ -22,6 +22,8 @@ export default defineWorkersConfig({
             STATUS_AUTH_API_KEY: 'testing',
             OPENAI_API_KEY: process.env.OPENAI_API_KEY ?? 'OPENAI_API_KEY-unset',
             ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY ?? 'ANTHROPIC_API_KEY-unset',
+            AWS_BEARER_TOKEN_BEDROCK: process.env.AWS_BEARER_TOKEN_BEDROCK ?? 'AWS_BEARER_TOKEN_BEDROCK-unset',
+            AWS_DEFAULT_REGION: process.env.AWS_DEFAULT_REGION ?? 'us-west-2',
             GOOGLE_VERTEX_SERVICE_ACCOUNT_JSON:
               process.env.GOOGLE_VERTEX_SERVICE_ACCOUNT_JSON ??
               JSON.stringify({
@@ -39,6 +41,7 @@ export default defineWorkersConfig({
             ADAPTIVE_CAPACITY_DEFAULT_MAX_LIMIT: '4',
             ADAPTIVE_CAPACITY_DEFAULT_COOLDOWN_MS: '1000',
             ADAPTIVE_CAPACITY_ANTHROPIC_INITIAL_LIMIT: '2',
+            ADAPTIVE_CAPACITY_BEDROCK_INITIAL_LIMIT: '4',
             ADAPTIVE_CAPACITY_OPENAI_INITIAL_LIMIT: '1',
             ADAPTIVE_CAPACITY_GOOGLE_VERTEX_INITIAL_LIMIT: '3',
           },

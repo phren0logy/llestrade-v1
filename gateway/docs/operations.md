@@ -22,6 +22,7 @@ Verification includes:
 - `/status/` returns `200` with `STATUS_AUTH_API_KEY`
 - `/status/` includes a `capacity` section with per-provider state
 - a live `pydantic_ai` Anthropic request succeeds against the custom domain
+- a live `pydantic_ai` Bedrock Claude request succeeds against the custom domain
 - a live `pydantic_ai` OpenAI request succeeds against the custom domain
 - a live `pydantic_ai` Google Vertex request succeeds against the custom domain
 

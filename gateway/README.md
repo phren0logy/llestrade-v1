@@ -7,7 +7,7 @@ The deployed shape is intentionally small:
 - one public runtime hostname: `gateway.<your-domain>`
 - one shared app API key for the desktop app
 - one separate `STATUS_AUTH_API_KEY` for script-driven health checks
-- Anthropic, OpenAI, and Google Vertex as the enabled upstream providers
+- Anthropic, AWS Bedrock Claude, OpenAI, and Google Vertex as the enabled upstream providers
 - provider-specific adaptive capacity control inside the gateway Worker
 - no public admin UI or status hostname
 
@@ -35,7 +35,7 @@ Bootstrap also applies the upstream D1 schema automatically after provisioning o
 
 - Re-render upstream, provision missing resources, and refresh the working copy:
   `gateway/scripts/bootstrap.sh`
-- Push updated Anthropic, OpenAI, Google Vertex, or status secrets:
+- Push updated Anthropic, Bedrock, OpenAI, Google Vertex, or status secrets:
   `gateway/scripts/sync_secrets.sh`
 - Deploy:
   `gateway/scripts/deploy.sh`
@@ -45,6 +45,7 @@ Bootstrap also applies the upstream D1 schema automatically after provisioning o
   `curl -H "Authorization: $STATUS_AUTH_API_KEY" https://gateway.<your-domain>/status/`
 - Inspect authenticated gateway-backed model metadata for a route/provider:
   `curl -H "Authorization: $PYDANTIC_AI_GATEWAY_API_KEY" "https://gateway.<your-domain>/metadata/models?provider=openai"`
+  `curl -H "Authorization: $PYDANTIC_AI_GATEWAY_API_KEY" "https://gateway.<your-domain>/metadata/models?provider=anthropic_bedrock"`
 - Tail Worker logs:
   `gateway/scripts/tail.sh`
 - Roll back to an earlier Worker version:

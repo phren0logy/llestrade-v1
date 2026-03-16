@@ -26,6 +26,8 @@ metadata_response_file="$(mktemp)"
 trap 'rm -f "${metadata_response_file}"' EXIT
 metadata_code="$(curl -sS -o "${metadata_response_file}" -w '%{http_code}' -H "Authorization: ${app_api_key}" "${GATEWAY_PUBLIC_BASE_URL}/metadata/models?provider=anthropic")"
 [[ "${metadata_code}" == "200" ]] || die "Expected /metadata/models?provider=anthropic with app API key to return 200, got ${metadata_code}: $(cat "${metadata_response_file}")"
+metadata_code="$(curl -sS -o "${metadata_response_file}" -w '%{http_code}' -H "Authorization: ${app_api_key}" "${GATEWAY_PUBLIC_BASE_URL}/metadata/models?provider=anthropic_bedrock")"
+[[ "${metadata_code}" == "200" ]] || die "Expected /metadata/models?provider=anthropic_bedrock with app API key to return 200, got ${metadata_code}: $(cat "${metadata_response_file}")"
 
 GATEWAY_VERIFY_BASE_URL="${GATEWAY_PUBLIC_BASE_URL}" \
 GATEWAY_VERIFY_API_KEY="${app_api_key}" \
@@ -34,6 +36,7 @@ import os
 
 from pydantic_ai import Agent
 from pydantic_ai.models.anthropic import AnthropicModel
+from pydantic_ai.models.bedrock import BedrockConverseModel
 from pydantic_ai.models.google import GoogleModel
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.gateway import gateway_provider
@@ -85,6 +88,22 @@ google_result = google_agent.run_sync(
 )
 if not str(google_result.output).strip().startswith("OK"):
     raise SystemExit(f"Google Vertex gateway verification returned unexpected output: {google_result.output!r}")
+
+bedrock_gateway = gateway_provider(
+    "bedrock",
+    api_key=os.environ["GATEWAY_VERIFY_API_KEY"],
+    base_url=os.environ["GATEWAY_VERIFY_BASE_URL"],
+)
+bedrock_agent = Agent(
+    model=BedrockConverseModel("anthropic.claude-sonnet-4-5-v1", provider=bedrock_gateway),
+    system_prompt="Reply with the single word OK.",
+)
+bedrock_result = bedrock_agent.run_sync(
+    "Return exactly OK.",
+    model_settings={"max_tokens": 16, "temperature": 0},
+)
+if not str(bedrock_result.output).strip().startswith("OK"):
+    raise SystemExit(f"Bedrock gateway verification returned unexpected output: {bedrock_result.output!r}")
 PY
 
 log "Gateway verification succeeded."

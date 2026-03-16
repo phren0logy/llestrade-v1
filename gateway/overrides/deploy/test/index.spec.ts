@@ -68,7 +68,7 @@ describe('deploy', () => {
     expect(ok.status).toBe(200)
     const payload = (await ok.json()) as { capacity: { enabled: boolean; providers: Record<string, unknown> } }
     expect(payload.capacity.enabled).toBe(true)
-    expect(Object.keys(payload.capacity.providers)).toEqual(['anthropic', 'google-vertex', 'openai'])
+    expect(Object.keys(payload.capacity.providers)).toEqual(['anthropic', 'bedrock', 'google-vertex', 'openai'])
   })
 
   it('metadata endpoint requires a valid gateway app key', async () => {
@@ -175,17 +175,33 @@ describe('deploy', () => {
         models: Array<{ model_id: string }>
       }>
     }
-    expect(payload.providers.map((provider) => provider.provider_id)).toEqual(['anthropic', 'gemini', 'openai'])
-    expect(payload.providers.map((provider) => provider.route)).toEqual(['anthropic', 'google-vertex', 'openai'])
+    expect(payload.providers.map((provider) => provider.provider_id)).toEqual([
+      'anthropic',
+      'anthropic_bedrock',
+      'gemini',
+      'openai',
+    ])
+    expect(payload.providers.map((provider) => provider.route)).toEqual(['anthropic', 'bedrock', 'google-vertex', 'openai'])
     expect(payload.providers.map((provider) => provider.upstream_provider_id)).toEqual([
       'anthropic',
+      'bedrock',
       'google-vertex',
       'openai',
     ])
-    expect(payload.providers.map((provider) => provider.label)).toEqual(['Anthropic', 'Google Gemini', 'OpenAI'])
+    expect(payload.providers.map((provider) => provider.label)).toEqual([
+      'Anthropic',
+      'AWS Bedrock (Claude)',
+      'Google Gemini',
+      'OpenAI',
+    ])
     expect(payload.providers[0]?.models.map((model) => model.model_id)).toEqual(['claude-sonnet-4-20250514'])
-    expect(payload.providers[1]?.models.map((model) => model.model_id)).toEqual(['gemini-2.5-pro'])
-    expect(payload.providers[2]?.models.map((model) => model.model_id)).toEqual(['gpt-5.4'])
+    expect(payload.providers[1]?.models.map((model) => model.model_id)).toEqual([
+      'anthropic.claude-opus-4-1-20250805-v1:0',
+      'anthropic.claude-opus-4-6-v1',
+      'anthropic.claude-sonnet-4-5-v1',
+    ])
+    expect(payload.providers[2]?.models.map((model) => model.model_id)).toEqual(['gemini-2.5-pro'])
+    expect(payload.providers[3]?.models.map((model) => model.model_id)).toEqual(['gpt-5.4'])
   })
 
   it('should call openai via gateway', async () => {

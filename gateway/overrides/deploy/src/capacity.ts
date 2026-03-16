@@ -6,7 +6,7 @@ const DEFAULT_MIN_LIMIT = 1
 const DEFAULT_MAX_LIMIT = 32
 const DEFAULT_COOLDOWN_MS = 30_000
 const DEFAULT_RETRY_AFTER_SECONDS = 1
-const DEFAULT_PROVIDER_IDS = ['anthropic', 'openai', 'google-vertex'] as const
+const DEFAULT_PROVIDER_IDS = ['anthropic', 'bedrock', 'openai', 'google-vertex'] as const
 
 type ProviderId = string
 
@@ -284,6 +284,7 @@ function parseCapacityConfig(env: Env): CapacityConfig {
   const overrides: Record<string, CapacitySettings> = {}
   for (const [providerId, prefix] of Object.entries({
     anthropic: 'ANTHROPIC',
+    bedrock: 'BEDROCK',
     openai: 'OPENAI',
     'google-vertex': 'GOOGLE_VERTEX',
   })) {

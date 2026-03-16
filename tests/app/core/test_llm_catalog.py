@@ -359,6 +359,28 @@ def test_gateway_provider_payload_normalizes_google_vertex_to_gemini() -> None:
     assert [model.model_id for model in provider.models] == ["gemini-2.5-pro"]
 
 
+def test_gateway_provider_payload_normalizes_bedrock_to_anthropic_bedrock() -> None:
+    provider = llm_catalog._gateway_provider_option_from_payload(
+        {
+            "provider_id": "bedrock",
+            "upstream_provider_id": "bedrock",
+            "label": "AWS Bedrock (Claude)",
+            "models": [
+                {
+                    "model_id": "anthropic.claude-sonnet-4-5-v1",
+                    "display_name": "Claude Sonnet 4.5",
+                    "context_window": 1_000_000,
+                }
+            ],
+        }
+    )
+
+    assert provider is not None
+    assert provider.provider_id == "anthropic_bedrock"
+    assert provider.label == "AWS Bedrock (Claude)"
+    assert [model.model_id for model in provider.models] == ["anthropic.claude-sonnet-4-5-v1"]
+
+
 def test_gateway_provider_payload_preserves_missing_context_until_gateway_provides_it() -> None:
     provider = llm_catalog._gateway_provider_option_from_payload(
         {
