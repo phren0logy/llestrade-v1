@@ -63,12 +63,16 @@ class _ManagerStub:
         self._values = values
         self.metadata = None
         self.project_name = "Case"
+        self.saved_preferences: dict[str, object] | None = None
 
     def placeholder_mapping(self) -> dict[str, str]:
         return dict(self._values)
 
     def project_placeholder_values(self) -> dict[str, str]:
         return dict(self._values)
+
+    def update_report_preferences(self, **kwargs) -> None:  # noqa: ANN003
+        self.saved_preferences = dict(kwargs)
 
 
 @pytest.fixture(scope="module")
@@ -188,6 +192,122 @@ def test_start_draft_job_blocks_when_gateway_key_is_rejected(
     assert service.run_draft_called is False
     assert warnings
     assert "Pydantic AI Gateway app key was rejected" in warnings[0]
+
+
+def test_start_draft_job_can_continue_when_gateway_probe_is_rate_limited(
+    monkeypatch: pytest.MonkeyPatch,
+    qt_app: QApplication,
+    tmp_path: Path,
+) -> None:
+    assert qt_app is not None
+    controller = _build_controller(monkeypatch, tmp_path)
+    service = controller._service
+    assert isinstance(service, _ServiceStub)
+
+    controller._project_manager = _ManagerStub(tmp_path, values={})
+    template_path = tmp_path / "template.md"
+    template_path.write_text("template", encoding="utf-8")
+    prompt_path = tmp_path / "prompt.md"
+    prompt_path.write_text("prompt", encoding="utf-8")
+
+    service.gateway_result = GatewayAccessCheck(
+        ok=False,
+        kind="rate_limited",
+        status_code=429,
+        message="Provider capacity reached for anthropic. Retry soon.",
+        base_url="https://gateway.example.com",
+        route="bulk",
+        provider_id="anthropic",
+        model="claude-sonnet-4-5",
+        retry_after_seconds=7.0,
+    )
+
+    monkeypatch.setattr(controller, "_validate_placeholders_before_run", lambda **_kwargs: True)
+    monkeypatch.setattr(
+        controller,
+        "_resolve_llm_settings",
+        lambda: SimpleNamespace(
+            provider_id="anthropic",
+            model_id="claude-sonnet-4-5",
+            custom_model_id=None,
+            context_window=200000,
+            use_reasoning=False,
+            reasoning=SimpleNamespace(to_dict=lambda: {}),
+        ),
+    )
+    monkeypatch.setattr(controller, "_validate_required_path", lambda *_args, **_kwargs: template_path)
+    monkeypatch.setattr(controller, "_validate_prompt_path", lambda *_args, **_kwargs: prompt_path)
+    monkeypatch.setattr(controller, "_optional_path", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(controller, "_resolve_selected_inputs", lambda: [("converted", "doc.md")])
+    monkeypatch.setattr(controller, "_confirm_report_forecast", lambda **_kwargs: True)
+    replies = iter((QMessageBox.Yes, QMessageBox.Yes))
+    monkeypatch.setattr(QMessageBox, "question", lambda *args, **kwargs: next(replies))
+
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "warning",
+        lambda _parent, _title, message: warnings.append(message) or QMessageBox.Ok,
+    )
+
+    controller._start_draft_job()
+
+    assert service.run_draft_called is True
+    assert warnings == []
+
+
+def test_start_draft_job_stays_blocked_when_user_cancels_rate_limited_gateway_probe(
+    monkeypatch: pytest.MonkeyPatch,
+    qt_app: QApplication,
+    tmp_path: Path,
+) -> None:
+    assert qt_app is not None
+    controller = _build_controller(monkeypatch, tmp_path)
+    service = controller._service
+    assert isinstance(service, _ServiceStub)
+
+    controller._project_manager = _ManagerStub(tmp_path, values={})
+    template_path = tmp_path / "template.md"
+    template_path.write_text("template", encoding="utf-8")
+    prompt_path = tmp_path / "prompt.md"
+    prompt_path.write_text("prompt", encoding="utf-8")
+
+    service.gateway_result = GatewayAccessCheck(
+        ok=False,
+        kind="rate_limited",
+        status_code=429,
+        message="Provider capacity reached for anthropic. Retry soon.",
+        base_url="https://gateway.example.com",
+        route="bulk",
+        provider_id="anthropic",
+        model="claude-sonnet-4-5",
+        retry_after_seconds=7.0,
+    )
+
+    monkeypatch.setattr(controller, "_validate_placeholders_before_run", lambda **_kwargs: True)
+    monkeypatch.setattr(
+        controller,
+        "_resolve_llm_settings",
+        lambda: SimpleNamespace(provider_id="anthropic", model_id="claude-sonnet-4-5", custom_model_id=None),
+    )
+    monkeypatch.setattr(controller, "_validate_required_path", lambda *_args, **_kwargs: template_path)
+    monkeypatch.setattr(controller, "_validate_prompt_path", lambda *_args, **_kwargs: prompt_path)
+    monkeypatch.setattr(controller, "_optional_path", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(controller, "_resolve_selected_inputs", lambda: [("converted", "doc.md")])
+    monkeypatch.setattr(controller, "_confirm_report_forecast", lambda **_kwargs: True)
+    monkeypatch.setattr(QMessageBox, "question", lambda *args, **kwargs: QMessageBox.No)
+
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "warning",
+        lambda _parent, _title, message: warnings.append(message) or QMessageBox.Ok,
+    )
+
+    controller._start_draft_job()
+
+    assert service.run_draft_called is False
+    assert warnings == []
 
 
 def test_report_progress_detail_updates_progress_label(

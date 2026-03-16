@@ -56,6 +56,7 @@ GatewayAccessCheckKind = Literal[
     "missing_config",
     "auth_invalid",
     "auth_forbidden",
+    "rate_limited",
     "route_missing",
     "timeout",
     "unreachable",
@@ -129,6 +130,7 @@ class GatewayAccessCheck:
     route: str | None
     provider_id: str
     model: str | None
+    retry_after_seconds: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1323,28 +1325,26 @@ class PydanticAIGatewayBackend:
     ) -> GatewayAccessCheck:
         from pydantic_ai.exceptions import ModelHTTPError
 
-        if isinstance(exc, ModelHTTPError):
-            status_code = int(getattr(exc, "status_code", 0) or 0) or None
-            message = cls._gateway_probe_error_message(exc)
-            kind: GatewayAccessCheckKind = "unknown"
-            lower_message = message.lower()
-            if status_code == 401:
-                kind = "auth_invalid"
-            elif status_code == 403:
-                kind = "auth_forbidden"
-            elif status_code == 404 or "route not found" in lower_message or "no providers available for route" in lower_message:
-                kind = "route_missing"
-            elif status_code is not None and status_code >= 500:
-                kind = "server_error"
-            return GatewayAccessCheck(
-                ok=False,
-                kind=kind,
-                status_code=status_code,
-                message=message,
+        details = extract_http_status_error_details(exc)
+        if details is not None:
+            return cls._gateway_probe_http_error_result(
+                provider_id=provider_id,
+                model_name=model_name,
                 base_url=base_url,
                 route=route,
+                status_code=details.status_code,
+                message=details.message,
+                retry_after_seconds=details.retry_after_seconds,
+            )
+
+        if isinstance(exc, ModelHTTPError):
+            return cls._gateway_probe_http_error_result(
                 provider_id=provider_id,
-                model=model_name,
+                model_name=model_name,
+                base_url=base_url,
+                route=route,
+                status_code=int(getattr(exc, "status_code", 0) or 0) or None,
+                message=cls._gateway_probe_error_message(exc),
             )
         if isinstance(exc, (httpx.TimeoutException, asyncio.TimeoutError)):
             return GatewayAccessCheck(
@@ -1377,6 +1377,43 @@ class PydanticAIGatewayBackend:
             route=route,
             provider_id=provider_id,
             model=model_name,
+        )
+
+    @classmethod
+    def _gateway_probe_http_error_result(
+        cls,
+        *,
+        provider_id: str,
+        model_name: str,
+        base_url: str | None,
+        route: str | None,
+        status_code: int | None,
+        message: str,
+        retry_after_seconds: float | None = None,
+    ) -> GatewayAccessCheck:
+        kind: GatewayAccessCheckKind = "unknown"
+        lower_message = message.lower()
+        if status_code == 401:
+            kind = "auth_invalid"
+        elif status_code == 403:
+            kind = "auth_forbidden"
+        elif status_code == 429:
+            kind = "rate_limited"
+        elif status_code == 404 or "route not found" in lower_message or "no providers available for route" in lower_message:
+            kind = "route_missing"
+        elif status_code is not None and status_code >= 500:
+            kind = "server_error"
+
+        return GatewayAccessCheck(
+            ok=False,
+            kind=kind,
+            status_code=status_code,
+            message=message,
+            base_url=base_url,
+            route=route,
+            provider_id=provider_id,
+            model=model_name,
+            retry_after_seconds=retry_after_seconds,
         )
 
     @staticmethod

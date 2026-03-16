@@ -449,6 +449,7 @@ class BulkAnalysisController:
             provider_id=str(group.provider_id or "").strip(),
             model=group.model or provider_default[1],
             title="Bulk Analysis",
+            interactive=interactive,
         ):
             return False
 
@@ -890,12 +891,35 @@ class BulkAnalysisController:
         provider_id: str,
         model: str | None,
         title: str,
+        interactive: bool = True,
     ) -> bool:
         if not provider_id:
             return True
         result = self._service.verify_gateway_access(provider_id=provider_id, model=model)
         if result.ok:
             return True
+        if result.kind == "rate_limited":
+            if not interactive:
+                retry_after = (
+                    f" Retry-After: {result.retry_after_seconds:.1f}s."
+                    if result.retry_after_seconds is not None
+                    else ""
+                )
+                target = f"{result.provider_id}/{result.model or '<default>'}"
+                route = f" via route '{result.route}'" if result.route else ""
+                self._handle_log(
+                    "bulk",
+                    f"Skipping run for {target}{route}: gateway probe returned HTTP 429.{retry_after}",
+                )
+                return False
+            reply = QMessageBox.question(
+                self._workspace,
+                title,
+                self._gateway_failure_message(result),
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            return reply == QMessageBox.Yes
         QMessageBox.warning(
             self._workspace,
             title,
@@ -909,6 +933,11 @@ class BulkAnalysisController:
         target = f"{result.provider_id}/{model_label}"
         route = f"\nRoute: {result.route}" if result.route else ""
         status = f"\nGateway response: HTTP {result.status_code}" if result.status_code else ""
+        retry_after = (
+            f"\nRetry-After: {result.retry_after_seconds:.1f}s"
+            if result.retry_after_seconds is not None
+            else ""
+        )
         if result.kind in {"auth_invalid", "auth_forbidden"}:
             return (
                 "The saved Pydantic AI Gateway app key was rejected by the gateway.\n\n"
@@ -929,6 +958,14 @@ class BulkAnalysisController:
                 f"Requested selection: {target}\n"
                 f"Gateway message: {result.message}\n\n"
                 "Set the Pydantic AI Gateway App Key in Settings > API Keys before starting the run."
+            )
+        if result.kind == "rate_limited":
+            return (
+                "The gateway is temporarily rate limited for this provider, but you can still continue.\n\n"
+                f"Requested selection: {target}{route}{status}{retry_after}\n"
+                f"Gateway message: {result.message}\n\n"
+                "Choose Continue to start the run anyway and let runtime retries/backoff handle the request, "
+                "or Cancel to wait and try again later."
             )
         if result.kind in {"timeout", "unreachable", "server_error"}:
             return (

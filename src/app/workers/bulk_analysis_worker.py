@@ -146,7 +146,8 @@ _DEFAULT_GATEWAY_RATE_LIMIT_RETRY_DELAY_SECONDS = 15.0
 _DEFAULT_CHUNK_FANOUT_CONCURRENCY = 4
 _DEFAULT_CHUNK_TARGET_RATIO = 0.50
 _DEFAULT_REQUEST_OVERHEAD_SAFETY_MARGIN = 1_024
-_GATEWAY_ANTHROPIC_REQUEST_BUDGET_RATIO = 0.45
+# Keep extra headroom for gateway Anthropic bulk runs to reduce rate-limit pressure.
+_GATEWAY_ANTHROPIC_REQUEST_BUDGET_RATIO = 0.40
 _GATEWAY_RETRYABLE_STATUS_CODES: frozenset[int] = frozenset({408, 425, 429, 500, 502, 503, 504, 524})
 _CONFIGURED_LIMIT_RE = re.compile(
     r"configured limit of (?P<limit>\d+) tokens.*?resulted in (?P<actual>\d+) tokens",

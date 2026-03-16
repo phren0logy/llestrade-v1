@@ -1384,7 +1384,7 @@ def test_bulk_worker_gateway_anthropic_operational_budget_uses_metadata_budget_r
     )
 
     assert runtime_budget == 651_420
-    assert operational_budget == 293_139
+    assert operational_budget == 260_568
 
 
 def test_bulk_worker_chunked_document_reassembles_parallel_results_in_order(

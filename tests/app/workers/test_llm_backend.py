@@ -981,6 +981,38 @@ def test_gateway_backend_verify_gateway_access_classifies_route_mismatch(
     assert result.route == "bulk"
 
 
+def test_gateway_backend_verify_gateway_access_classifies_hidden_rate_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = httpx.Request("POST", "https://gateway.example.com/anthropic/v1/messages?beta=true")
+    response = httpx.Response(
+        429,
+        request=request,
+        headers={"retry-after": "7"},
+        json={"message": "Provider capacity reached for anthropic. Retry soon."},
+    )
+    status_error = httpx.HTTPStatusError("429 Too Many Requests", request=request, response=response)
+
+    def _fake_model_request_sync(*_args, **_kwargs):  # noqa: ANN002, ANN003
+        error = ModelAPIError("claude-sonnet-4-6", "Connection error.")
+        error.__cause__ = status_error
+        raise error
+
+    monkeypatch.setattr("pydantic_ai.direct.model_request_sync", _fake_model_request_sync)
+
+    backend = PydanticAIGatewayBackend(api_key="gateway-key", base_url="https://gateway.example.com")
+    monkeypatch.setattr(backend, "_build_model", lambda **_kwargs: object(), raising=True)
+    monkeypatch.setattr(backend, "_build_gateway_http_client", lambda **_kwargs: None, raising=True)
+
+    result = backend.verify_gateway_access("anthropic", "claude-sonnet-4-6", force=True)
+
+    assert result.ok is False
+    assert result.kind == "rate_limited"
+    assert result.status_code == 429
+    assert result.retry_after_seconds == 7.0
+    assert "Provider capacity reached for anthropic" in result.message
+
+
 def test_gateway_backend_verify_gateway_access_uses_env_over_settings(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1110,6 +1142,34 @@ def test_gateway_backend_verify_gateway_access_does_not_cache_transient_failures
             route=kwargs["route"],
             provider_id=kwargs["provider_id"],
             model=kwargs["model_name"],
+        )
+
+    backend = PydanticAIGatewayBackend(api_key="gateway-key", base_url="https://gateway.example.com")
+    monkeypatch.setattr(backend, "_probe_gateway_access", _fake_probe, raising=True)
+
+    backend.verify_gateway_access("anthropic", "claude-sonnet-4-5")
+    backend.verify_gateway_access("anthropic", "claude-sonnet-4-5")
+
+    assert calls["count"] == 2
+
+
+def test_gateway_backend_verify_gateway_access_does_not_cache_rate_limits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = {"count": 0}
+
+    def _fake_probe(**kwargs):  # noqa: ANN003
+        calls["count"] += 1
+        return GatewayAccessCheck(
+            ok=False,
+            kind="rate_limited",
+            status_code=429,
+            message="Provider capacity reached for anthropic. Retry soon.",
+            base_url=kwargs["base_url"],
+            route=kwargs["route"],
+            provider_id=kwargs["provider_id"],
+            model=kwargs["model_name"],
+            retry_after_seconds=5.0,
         )
 
     backend = PydanticAIGatewayBackend(api_key="gateway-key", base_url="https://gateway.example.com")

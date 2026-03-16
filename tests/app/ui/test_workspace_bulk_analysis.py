@@ -71,6 +71,7 @@ def _create_project_with_group(tmp_path: Path) -> tuple[ProjectManager, BulkAnal
         provider_id="anthropic",
         model="claude-sonnet-4-5",
     )
+    group.model_context_window = 200_000
     saved = manager.save_bulk_analysis_group(group)
     return manager, saved
 
@@ -94,6 +95,7 @@ def _create_project_with_combined_group(tmp_path: Path) -> tuple[ProjectManager,
     )
     group.operation = "combined"
     group.combine_converted_files = ["folder/record.md"]
+    group.model_context_window = 200_000
     saved = manager.save_bulk_analysis_group(group)
     return manager, saved
 
@@ -679,6 +681,220 @@ def test_bulk_map_run_blocks_when_gateway_key_is_rejected(
     assert run_called["value"] is False
     assert warnings
     assert "Pydantic AI Gateway app key was rejected" in warnings[0]
+
+    workspace.deleteLater()
+
+
+def test_bulk_map_run_can_continue_when_gateway_probe_is_rate_limited(
+    tmp_path: Path,
+    qt_app: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert qt_app is not None
+
+    manager, group = _create_project_with_group(tmp_path)
+
+    workspace = ProjectWorkspace()
+    workspace.set_project(manager)
+    QCoreApplication.processEvents()
+
+    controller = workspace.bulk_controller
+    assert controller is not None
+
+    metrics = WorkspaceGroupMetrics(
+        group_id=group.group_id,
+        name=group.name,
+        slug=group.slug or group.folder_name,
+        converted_files=("folder/record.md",),
+        converted_count=1,
+        bulk_analysis_total=0,
+        pending_bulk_analysis=1,
+        pending_files=("folder/record.md",),
+        operation="per_document",
+    )
+
+    monkeypatch.setattr(controller, "_resolve_group_metrics", lambda _group_id: metrics)
+    monkeypatch.setattr(controller, "_analyse_placeholders", lambda _group: (None, set(), set()))
+    monkeypatch.setattr(
+        controller,
+        "_forecast_map_run",
+        lambda *_args, **_kwargs: CostForecast(available=True, best_estimate=1.0, ceiling=2.0),
+    )
+    replies = iter((QMessageBox.Yes, QMessageBox.Yes))
+    monkeypatch.setattr(QMessageBox, "question", lambda *args, **kwargs: next(replies))
+    monkeypatch.setattr(
+        controller._service,
+        "verify_gateway_access",
+        lambda **_kwargs: GatewayAccessCheck(
+            ok=False,
+            kind="rate_limited",
+            status_code=429,
+            message="Provider capacity reached for anthropic. Retry soon.",
+            base_url="https://gateway.example.com",
+            route="bulk",
+            provider_id="anthropic",
+            model="claude-sonnet-4-5",
+            retry_after_seconds=7.0,
+        ),
+    )
+
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "warning",
+        lambda _parent, _title, message: warnings.append(message) or QMessageBox.Ok,
+    )
+
+    run_called = {"value": False}
+    monkeypatch.setattr(controller._service, "run_map", lambda **_kwargs: run_called.__setitem__("value", True) or True)
+
+    assert controller.start_map_run(group, force_rerun=False) is True
+    assert run_called["value"] is True
+    assert warnings == []
+
+    workspace.deleteLater()
+
+
+def test_bulk_map_run_stays_blocked_when_user_cancels_rate_limited_gateway_probe(
+    tmp_path: Path,
+    qt_app: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert qt_app is not None
+
+    manager, group = _create_project_with_group(tmp_path)
+
+    workspace = ProjectWorkspace()
+    workspace.set_project(manager)
+    QCoreApplication.processEvents()
+
+    controller = workspace.bulk_controller
+    assert controller is not None
+
+    metrics = WorkspaceGroupMetrics(
+        group_id=group.group_id,
+        name=group.name,
+        slug=group.slug or group.folder_name,
+        converted_files=("folder/record.md",),
+        converted_count=1,
+        bulk_analysis_total=0,
+        pending_bulk_analysis=1,
+        pending_files=("folder/record.md",),
+        operation="per_document",
+    )
+
+    monkeypatch.setattr(controller, "_resolve_group_metrics", lambda _group_id: metrics)
+    monkeypatch.setattr(controller, "_analyse_placeholders", lambda _group: (None, set(), set()))
+    monkeypatch.setattr(
+        controller,
+        "_forecast_map_run",
+        lambda *_args, **_kwargs: CostForecast(available=True, best_estimate=1.0, ceiling=2.0),
+    )
+    replies = iter((QMessageBox.Yes, QMessageBox.No))
+    monkeypatch.setattr(QMessageBox, "question", lambda *args, **kwargs: next(replies))
+    monkeypatch.setattr(
+        controller._service,
+        "verify_gateway_access",
+        lambda **_kwargs: GatewayAccessCheck(
+            ok=False,
+            kind="rate_limited",
+            status_code=429,
+            message="Provider capacity reached for anthropic. Retry soon.",
+            base_url="https://gateway.example.com",
+            route="bulk",
+            provider_id="anthropic",
+            model="claude-sonnet-4-5",
+            retry_after_seconds=7.0,
+        ),
+    )
+
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "warning",
+        lambda _parent, _title, message: warnings.append(message) or QMessageBox.Ok,
+    )
+
+    run_called = {"value": False}
+    monkeypatch.setattr(controller._service, "run_map", lambda **_kwargs: run_called.__setitem__("value", True) or True)
+
+    assert controller.start_map_run(group, force_rerun=False) is False
+    assert run_called["value"] is False
+    assert warnings == []
+
+    workspace.deleteLater()
+
+
+def test_bulk_auto_run_skips_rate_limited_gateway_probe_without_modal(
+    tmp_path: Path,
+    qt_app: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert qt_app is not None
+
+    manager, group = _create_project_with_group(tmp_path)
+
+    workspace = ProjectWorkspace()
+    workspace.set_project(manager)
+    QCoreApplication.processEvents()
+
+    controller = workspace.bulk_controller
+    assert controller is not None
+
+    metrics = WorkspaceGroupMetrics(
+        group_id=group.group_id,
+        name=group.name,
+        slug=group.slug or group.folder_name,
+        converted_files=("folder/record.md",),
+        converted_count=1,
+        bulk_analysis_total=0,
+        pending_bulk_analysis=1,
+        pending_files=("folder/record.md",),
+        operation="per_document",
+    )
+
+    monkeypatch.setattr(controller, "_resolve_group_metrics", lambda _group_id: metrics)
+    monkeypatch.setattr(controller, "_analyse_placeholders", lambda _group: (None, set(), set()))
+    monkeypatch.setattr(
+        controller,
+        "_forecast_map_run",
+        lambda *_args, **_kwargs: CostForecast(available=True, best_estimate=1.0, ceiling=2.0),
+    )
+    monkeypatch.setattr(
+        controller._service,
+        "verify_gateway_access",
+        lambda **_kwargs: GatewayAccessCheck(
+            ok=False,
+            kind="rate_limited",
+            status_code=429,
+            message="Provider capacity reached for anthropic. Retry soon.",
+            base_url="https://gateway.example.com",
+            route="bulk",
+            provider_id="anthropic",
+            model="claude-sonnet-4-5",
+            retry_after_seconds=7.0,
+        ),
+    )
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("question dialog should not open")),
+    )
+
+    logs: list[tuple[str, str]] = []
+    monkeypatch.setattr(controller, "_handle_log", lambda group_id, message: logs.append((group_id, message)))
+
+    run_called = {"value": False}
+    monkeypatch.setattr(controller._service, "run_map", lambda **_kwargs: run_called.__setitem__("value", True) or True)
+
+    assert controller.auto_run_pending_groups([group]) == 0
+    assert run_called["value"] is False
+    assert logs == [
+        (
+            "bulk",
+            "Skipping run for anthropic/claude-sonnet-4-5 via route 'bulk': gateway probe returned HTTP 429. Retry-After: 7.0s.",
+        )
+    ]
 
     workspace.deleteLater()
 
