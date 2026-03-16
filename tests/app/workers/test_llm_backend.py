@@ -8,7 +8,7 @@ from typing import Any, Dict
 
 import httpx
 import pytest
-from pydantic_ai.exceptions import ModelHTTPError
+from pydantic_ai.exceptions import ModelAPIError, ModelHTTPError
 from pydantic_ai.messages import ModelResponse, TextPart
 from pydantic_ai.usage import RequestUsage
 
@@ -22,6 +22,7 @@ from src.app.workers.llm_backend import (
     PydanticAIGatewayBackend,
     ProviderMetadata,
     build_model_settings,
+    extract_http_status_error_details,
     normalize_model_name,
     provider_capabilities,
     reset_gateway_access_check_cache,
@@ -1432,13 +1433,52 @@ def test_gateway_backend_uses_latest_settings_values_when_not_explicit(
     assert len(captured) == 2
 
 
-def test_gateway_backend_only_marks_transient_gateway_statuses_for_retry() -> None:
-    retryable = httpx.Response(429, request=httpx.Request("POST", "https://gateway.example.com"))
+@pytest.mark.parametrize("status_code", [429, 524])
+def test_gateway_backend_only_marks_transient_gateway_statuses_for_retry(status_code: int) -> None:
+    retryable = httpx.Response(status_code, request=httpx.Request("POST", "https://gateway.example.com"))
     with pytest.raises(httpx.HTTPStatusError):
         PydanticAIGatewayBackend._raise_for_retryable_gateway_response(retryable)
 
     non_retryable = httpx.Response(400, request=httpx.Request("POST", "https://gateway.example.com"))
     PydanticAIGatewayBackend._raise_for_retryable_gateway_response(non_retryable)
+
+
+def test_extract_http_status_error_details_from_httpx_status_error() -> None:
+    request = httpx.Request("POST", "https://gateway.example.com/anthropic/v1/messages?beta=true")
+    response = httpx.Response(
+        429,
+        request=request,
+        headers={"retry-after": "12"},
+        json={"error": {"message": "Too Many Requests"}},
+    )
+    error = httpx.HTTPStatusError("429 Too Many Requests", request=request, response=response)
+
+    details = extract_http_status_error_details(error)
+
+    assert details is not None
+    assert details.status_code == 429
+    assert details.retry_after_seconds == 12.0
+    assert "Too Many Requests" in details.message
+
+
+def test_extract_http_status_error_details_walks_exception_chain() -> None:
+    request = httpx.Request("POST", "https://gateway.example.com/anthropic/v1/messages?beta=true")
+    response = httpx.Response(
+        429,
+        request=request,
+        headers={"retry-after": "3"},
+        json={"error": {"message": "Rate limited upstream"}},
+    )
+    status_error = httpx.HTTPStatusError("429 Too Many Requests", request=request, response=response)
+    error = ModelAPIError("claude-sonnet-4-6", "Connection error.")
+    error.__cause__ = status_error
+
+    details = extract_http_status_error_details(error)
+
+    assert details is not None
+    assert details.status_code == 429
+    assert details.retry_after_seconds == 3.0
+    assert "Rate limited upstream" in details.message
 
 
 def test_gateway_backend_can_disable_concurrency_limit() -> None:

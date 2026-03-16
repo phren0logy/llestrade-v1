@@ -5,7 +5,9 @@ from pathlib import Path
 import time
 from typing import Sequence
 
+import httpx
 import pytest
+from pydantic_ai.exceptions import ModelAPIError, UsageLimitExceeded
 from pydantic_ai.messages import ModelResponse, TextPart
 from pydantic_ai.usage import RequestUsage
 
@@ -129,6 +131,68 @@ class _CountingBackend(LLMExecutionBackend):
         self.invoked = True
         self.requests.append(request)
         return _model_response("summary", model_name="claude-sonnet-4-5", output_tokens=1)
+
+
+class _FlakyUsageLimitBackend(_NoNativeBackend):
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def invoke_response(self, provider, request: LLMInvocationRequest) -> ModelResponse:  # noqa: ANN001
+        _ = provider, request
+        self.calls += 1
+        if self.calls == 1:
+            raise UsageLimitExceeded(
+                "Exceeded the input_tokens_limit of 638220 (input_tokens=693218)"
+            )
+        return _model_response("summary", model_name=request.model or "claude", output_tokens=1)
+
+
+class _FlakyGatewayRateLimitBackend(PydanticAIGatewayBackend):
+    def __init__(self) -> None:
+        super().__init__(api_key="gateway-key", base_url="https://gateway.example.com")
+        self.calls = 0
+
+    def invoke_response(self, provider, request: LLMInvocationRequest) -> ModelResponse:  # noqa: ANN001
+        _ = provider
+        self.calls += 1
+        if self.calls == 2:
+            http_request = httpx.Request("POST", "https://gateway.example.com/anthropic/v1/messages?beta=true")
+            http_response = httpx.Response(
+                429,
+                request=http_request,
+                headers={"retry-after": "0"},
+                json={"error": {"message": "Too Many Requests"}},
+            )
+            raise ModelAPIError(request.model or "claude-sonnet-4-6", "Connection error.") from httpx.HTTPStatusError(
+                "429 Too Many Requests",
+                request=http_request,
+                response=http_response,
+            )
+        return _model_response("summary", model_name=request.model or "claude-sonnet-4-6", output_tokens=1)
+
+
+class _FlakyGatewayServerBackend(PydanticAIGatewayBackend):
+    def __init__(self) -> None:
+        super().__init__(api_key="gateway-key", base_url="https://gateway.example.com")
+        self.calls = 0
+
+    def invoke_response(self, provider, request: LLMInvocationRequest) -> ModelResponse:  # noqa: ANN001
+        _ = provider
+        self.calls += 1
+        if self.calls == 1:
+            http_request = httpx.Request("POST", "https://gateway.example.com/anthropic/v1/messages?beta=true")
+            http_response = httpx.Response(
+                524,
+                request=http_request,
+                headers={"retry-after": "0"},
+                text="A timeout occurred",
+            )
+            raise ModelAPIError(request.model or "claude-sonnet-4-6", "Connection error.") from httpx.HTTPStatusError(
+                "524 A timeout occurred",
+                request=http_request,
+                response=http_response,
+            )
+        return _model_response("summary", model_name=request.model or "claude-sonnet-4-6", output_tokens=1)
 
 
 def _capture_traces(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, dict[str, object] | None]]:
@@ -396,7 +460,7 @@ def test_bulk_worker_uses_backend_token_count_for_gateway_preflight(tmp_path: Pa
         llm_backend=backend,
     )
 
-    with pytest.raises(RuntimeError, match="500 tokens > 400 budget"):
+    with pytest.raises(_ProviderPromptLimitError, match="500 tokens > 400 budget"):
         worker._invoke_provider(
             provider=worker._create_provider(ProviderConfig(provider_id="anthropic", model="claude-sonnet-4-5")),
             provider_config=ProviderConfig(provider_id="anthropic", model="claude-sonnet-4-5"),
@@ -444,6 +508,9 @@ def test_bulk_worker_chunk_fit_uses_local_estimates_for_real_gateway_backend(
         placeholder_values={},
         input_budget=10_000,
         initial_chunk_tokens=4_000,
+        max_tokens=worker._map_max_output_tokens(
+            ProviderConfig(provider_id="anthropic", model="claude-sonnet-4-6")
+        ),
     )
 
     assert chunks
@@ -525,6 +592,31 @@ def test_bulk_worker_parses_provider_prompt_limit_error(tmp_path: Path) -> None:
     assert exc_info.value.actual_tokens == 380_475
 
 
+def test_bulk_worker_parses_usage_limit_exceeded_error(tmp_path: Path) -> None:
+    worker = BulkAnalysisWorker(
+        project_dir=tmp_path,
+        group=BulkAnalysisGroup.create("Group"),
+        files=[],
+        metadata=ProjectMetadata(case_name="Case"),
+        force_rerun=False,
+        llm_backend=_ResultBackend(
+            UsageLimitExceeded("Exceeded the input_tokens_limit of 638220 (input_tokens=693218)")
+        ),
+    )
+
+    with pytest.raises(_ProviderPromptLimitError) as exc_info:
+        worker._invoke_provider(
+            provider=object(),
+            provider_config=ProviderConfig(provider_id="anthropic", model="claude-sonnet-4-5"),
+            prompt="Prompt",
+            system_prompt="System",
+            input_budget=638_220,
+        )
+
+    assert exc_info.value.configured_limit == 638_220
+    assert exc_info.value.actual_tokens == 693_218
+
+
 def test_bulk_worker_retries_chunked_document_after_provider_limit_error(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -568,7 +660,7 @@ def test_bulk_worker_retries_chunked_document_after_provider_limit_error(
 
     def _fake_generate(*, initial_chunk_tokens, **_kwargs):
         chunk_targets.append(initial_chunk_tokens)
-        if initial_chunk_tokens > 90_000:
+        if initial_chunk_tokens > 60_000:
             return ["chunk-one"]
         return ["chunk-one", "chunk-two"]
 
@@ -617,6 +709,133 @@ def test_bulk_worker_retries_chunked_document_after_provider_limit_error(
     assert chunk_targets[0] == 96_888
     assert chunk_targets[0] > chunk_targets[1]
     assert invoke_calls[0] == "chunk 1/1 for 'converted_documents/doc.md'"
+
+
+def test_bulk_worker_retries_chunked_document_after_usage_limit_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_dir = tmp_path
+    source_path = project_dir / "converted_documents" / "doc.md"
+    source_path.parent.mkdir(parents=True, exist_ok=True)
+    source_path.write_text("body", encoding="utf-8")
+
+    document = worker_module.BulkAnalysisDocument(
+        source_path=source_path,
+        relative_path="converted_documents/doc.md",
+        output_path=project_dir / "bulk_analysis" / "group" / "doc.md",
+    )
+    group = BulkAnalysisGroup.create("Group")
+    group.provider_id = "anthropic"
+    group.model = "claude-sonnet-4-5"
+    group.model_context_window = 1_000_000
+    backend = _FlakyUsageLimitBackend()
+    worker = BulkAnalysisWorker(
+        project_dir=project_dir,
+        group=group,
+        files=[],
+        metadata=ProjectMetadata(case_name="Case"),
+        force_rerun=False,
+        llm_backend=backend,
+    )
+    bundle = PromptBundle(system_template="System", user_template="Analyze {document_content}")
+    provider = worker._create_provider(ProviderConfig(provider_id="anthropic", model="claude-sonnet-4-5"))
+    source_context = SourceFileContext(
+        absolute_path=source_path.resolve(),
+        relative_path=document.relative_path,
+    )
+    manifest_path = _manifest_path(project_dir, group)
+    recovery_store = worker_module.BulkRecoveryStore(project_dir / "bulk_analysis" / group.folder_name)
+    recovery_manifest = recovery_store.load_map_manifest()
+
+    monkeypatch.setattr(worker, "_load_document", lambda _document: ("body", {}, source_context))
+    monkeypatch.setattr(worker_module, "should_chunk", lambda *_args, **_kwargs: (True, 4_939_208, 200_000))
+    monkeypatch.setattr(worker, "_count_prompt_tokens", lambda *_args, **_kwargs: 1_000)
+
+    chunk_targets: list[int] = []
+
+    def _fake_generate(*, initial_chunk_tokens, **_kwargs):
+        chunk_targets.append(initial_chunk_tokens)
+        if initial_chunk_tokens > 180_000:
+            return ["chunk-one"]
+        return ["chunk-one", "chunk-two"]
+
+    monkeypatch.setattr(worker, "_generate_fitting_chunks", _fake_generate)
+    monkeypatch.setattr(
+        worker_module,
+        "combine_chunk_summaries_hierarchical",
+        lambda summaries, **_kwargs: "combined:" + "|".join(summaries),
+    )
+
+    result, run_details, _placeholders = worker._process_document(
+        provider=provider,
+        provider_config=ProviderConfig(provider_id="anthropic", model="claude-sonnet-4-5"),
+        bundle=bundle,
+        system_prompt="System",
+        document=document,
+        global_placeholders={},
+        manifest={"version": 2, "signature": None, "documents": {}},
+        prompt_hash="prompt-hash",
+        manifest_path=manifest_path,
+        recovery_store=recovery_store,
+        recovery_manifest=recovery_manifest,
+    )
+
+    assert result == "combined:summary|summary"
+    assert run_details["chunk_count"] == 2
+    assert chunk_targets[0] == 200_000
+    assert chunk_targets[0] > chunk_targets[1]
+
+
+def test_bulk_worker_chunk_fit_uses_exact_count_for_direct_backend(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = _CountingBackend(token_count=12_000)
+    worker = BulkAnalysisWorker(
+        project_dir=tmp_path,
+        group=BulkAnalysisGroup.create("Group"),
+        files=[],
+        metadata=ProjectMetadata(case_name="Case"),
+        force_rerun=False,
+        llm_backend=backend,
+    )
+    provider = worker._create_provider(ProviderConfig(provider_id="anthropic", model="claude-sonnet-4-5"))
+    document = worker_module.BulkAnalysisDocument(
+        source_path=tmp_path / "doc.md",
+        relative_path="doc.md",
+        output_path=tmp_path / "out.md",
+    )
+    bundle = worker_module.PromptBundle(
+        system_template="System",
+        user_template="Analyze {document_content}",
+    )
+    count_calls = {"value": 0}
+
+    def _count_input_tokens(provider, request):  # noqa: ANN001
+        _ = provider, request
+        count_calls["value"] += 1
+        return 12_000
+
+    monkeypatch.setattr(backend, "count_input_tokens", _count_input_tokens)
+
+    with pytest.raises(RuntimeError, match="Prompt exceeds model input budget"):
+        worker._generate_fitting_chunks(
+            provider=provider,
+            provider_config=ProviderConfig(provider_id="anthropic", model="claude-sonnet-4-5"),
+            bundle=bundle,
+            system_prompt="System",
+            document=document,
+            body="Short body text",
+            placeholder_values={},
+            input_budget=10_000,
+            initial_chunk_tokens=4_000,
+            max_tokens=worker._map_max_output_tokens(
+                ProviderConfig(provider_id="anthropic", model="claude-sonnet-4-5")
+            ),
+        )
+
+    assert count_calls["value"] > 0
 
 
 def test_bulk_worker_applies_reasoning_settings_to_llm_request(tmp_path: Path) -> None:
@@ -801,6 +1020,60 @@ def test_bulk_worker_applies_placeholder_values(tmp_path: Path, monkeypatch: pyt
     assert "ACME" in captured["user"][0]
 
 
+def test_bulk_worker_placeholder_requirements_skip_dynamic_document_name(tmp_path: Path) -> None:
+    group = BulkAnalysisGroup.create("Group")
+    group.placeholder_requirements = {
+        "document_name": False,
+        "subject_name": False,
+    }
+    worker = BulkAnalysisWorker(
+        project_dir=tmp_path,
+        group=group,
+        files=[],
+        metadata=ProjectMetadata(case_name="Case"),
+        force_rerun=False,
+    )
+    logs: list[str] = []
+    worker.log_message.connect(logs.append)
+
+    worker._enforce_placeholder_requirements(
+        {"subject_name": ""},
+        context="bulk analysis document 'doc.md'",
+        dynamic_keys=worker_module._DYNAMIC_DOCUMENT_KEYS,
+    )
+
+    assert logs
+    assert "{subject_name}" in logs[0]
+    assert "{document_name}" not in logs[0]
+
+
+def test_bulk_worker_global_placeholder_requirements_skip_dynamic_document_name(tmp_path: Path) -> None:
+    group = BulkAnalysisGroup.create("Group")
+    group.placeholder_requirements = {
+        "document_name": False,
+        "subject_name": False,
+    }
+    worker = BulkAnalysisWorker(
+        project_dir=tmp_path,
+        group=group,
+        files=[],
+        metadata=ProjectMetadata(case_name="Case"),
+        force_rerun=False,
+    )
+    logs: list[str] = []
+    worker.log_message.connect(logs.append)
+
+    worker._enforce_placeholder_requirements(
+        {"subject_name": ""},
+        context="bulk analysis",
+        dynamic_keys=worker_module._DYNAMIC_GLOBAL_KEYS,
+    )
+
+    assert logs
+    assert "{subject_name}" in logs[0]
+    assert "{document_name}" not in logs[0]
+
+
 def test_invoke_provider_rejects_over_budget_prompt(tmp_path: Path) -> None:
     group = BulkAnalysisGroup.create("Group")
     worker = BulkAnalysisWorker(
@@ -814,7 +1087,7 @@ def test_invoke_provider_rejects_over_budget_prompt(tmp_path: Path) -> None:
 
     config = ProviderConfig(provider_id="anthropic", model="claude-sonnet-4-5-20250929")
 
-    with pytest.raises(RuntimeError, match="Prompt exceeds model input budget"):
+    with pytest.raises(_ProviderPromptLimitError, match="Prompt exceeds model input budget"):
         worker._invoke_provider(
             object(),
             config,
@@ -1023,6 +1296,97 @@ def test_bulk_worker_chunk_fanout_uses_env_override(
     assert worker._chunk_fanout_max_concurrency() == 4
 
 
+def test_bulk_worker_effective_gateway_chunk_fanout_defaults_to_serial(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("LLESTRADE_BULK_MAP_CHUNK_MAX_CONCURRENCY", raising=False)
+    worker = BulkAnalysisWorker(
+        project_dir=tmp_path,
+        group=BulkAnalysisGroup.create("Group"),
+        files=[],
+        metadata=ProjectMetadata(case_name="Case"),
+        force_rerun=False,
+        llm_backend=_FlakyGatewayRateLimitBackend(),
+    )
+
+    assert worker._effective_chunk_fanout_max_concurrency(
+        ProviderConfig(provider_id="anthropic", model="claude-sonnet-4-6")
+    ) == 1
+
+
+def test_bulk_worker_effective_gateway_chunk_fanout_respects_env_override(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LLESTRADE_BULK_MAP_CHUNK_MAX_CONCURRENCY", "8")
+    worker = BulkAnalysisWorker(
+        project_dir=tmp_path,
+        group=BulkAnalysisGroup.create("Group"),
+        files=[],
+        metadata=ProjectMetadata(case_name="Case"),
+        force_rerun=False,
+        llm_backend=_FlakyGatewayRateLimitBackend(),
+    )
+
+    assert worker._effective_chunk_fanout_max_concurrency(
+        ProviderConfig(provider_id="anthropic", model="claude-sonnet-4-6")
+    ) == 8
+
+
+def test_bulk_worker_map_max_output_tokens_reduce_gateway_anthropic_requests(tmp_path: Path) -> None:
+    gateway_worker = BulkAnalysisWorker(
+        project_dir=tmp_path,
+        group=BulkAnalysisGroup.create("Group"),
+        files=[],
+        metadata=ProjectMetadata(case_name="Case"),
+        force_rerun=False,
+        llm_backend=_FlakyGatewayRateLimitBackend(),
+    )
+    direct_worker = BulkAnalysisWorker(
+        project_dir=tmp_path,
+        group=BulkAnalysisGroup.create("Group"),
+        files=[],
+        metadata=ProjectMetadata(case_name="Case"),
+        force_rerun=False,
+        llm_backend=_NoNativeBackend(),
+    )
+
+    assert gateway_worker._map_max_output_tokens(
+        ProviderConfig(provider_id="anthropic", model="claude-sonnet-4-6")
+    ) == 12_000
+    assert direct_worker._map_max_output_tokens(
+        ProviderConfig(provider_id="anthropic", model="claude-sonnet-4-6")
+    ) == 32_000
+
+
+def test_bulk_worker_gateway_anthropic_operational_budget_uses_metadata_budget_ratio(tmp_path: Path) -> None:
+    group = BulkAnalysisGroup.create("Group")
+    group.model_context_window = 1_000_000
+    worker = BulkAnalysisWorker(
+        project_dir=tmp_path,
+        group=group,
+        files=[],
+        metadata=ProjectMetadata(case_name="Case"),
+        force_rerun=False,
+        llm_backend=_FlakyGatewayRateLimitBackend(),
+    )
+
+    runtime_budget = worker._max_input_budget(
+        raw_context_window=1_000_000,
+        max_output_tokens=worker._map_max_output_tokens(
+            ProviderConfig(provider_id="anthropic", model="claude-sonnet-4-6")
+        ),
+    )
+    operational_budget = worker._operational_request_budget(
+        ProviderConfig(provider_id="anthropic", model="claude-sonnet-4-6"),
+        runtime_budget,
+    )
+
+    assert runtime_budget == 651_420
+    assert operational_budget == 260_568
+
+
 def test_bulk_worker_chunked_document_reassembles_parallel_results_in_order(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1092,6 +1456,7 @@ def test_bulk_worker_chunked_document_reassembles_parallel_results_in_order(
         raw_context_window=400_000,
         input_budget=100_000,
         preflight_input_budget=80_000,
+        map_max_tokens=32_000,
     )
 
     assert completion_order != [1, 2, 3]
@@ -1175,6 +1540,7 @@ def test_bulk_worker_passes_runtime_budget_and_count_callback_to_hierarchical_co
         raw_context_window=400_000,
         input_budget=242_220,
         preflight_input_budget=193_776,
+        map_max_tokens=32_000,
     )
 
     assert result == "combined"
@@ -1184,3 +1550,194 @@ def test_bulk_worker_passes_runtime_budget_and_count_callback_to_hierarchical_co
     assert captured["runtime_input_budget"] == 242_220
     assert captured["raw_context_window"] == 400_000
     assert captured["counted"] == 4321
+
+
+def test_bulk_worker_retries_gateway_rate_limit_without_rechunking_and_reuses_checkpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_dir = tmp_path
+    source_path = project_dir / "converted_documents" / "doc.md"
+    source_path.parent.mkdir(parents=True, exist_ok=True)
+    source_path.write_text("body", encoding="utf-8")
+
+    document = worker_module.BulkAnalysisDocument(
+        source_path=source_path,
+        relative_path="converted_documents/doc.md",
+        output_path=project_dir / "bulk_analysis" / "group" / "doc.md",
+    )
+    group = BulkAnalysisGroup.create("Group")
+    group.provider_id = "anthropic"
+    group.model = "claude-sonnet-4-5"
+    group.model_context_window = 1_000_000
+    backend = _FlakyGatewayRateLimitBackend()
+    worker = BulkAnalysisWorker(
+        project_dir=project_dir,
+        group=group,
+        files=[],
+        metadata=ProjectMetadata(case_name="Case"),
+        force_rerun=False,
+        llm_backend=backend,
+    )
+    bundle = PromptBundle(system_template="System", user_template="Analyze {document_content}")
+    provider = worker._create_provider(ProviderConfig(provider_id="anthropic", model="claude-sonnet-4-5"))
+    source_context = SourceFileContext(
+        absolute_path=source_path.resolve(),
+        relative_path=document.relative_path,
+    )
+    manifest_path = _manifest_path(project_dir, group)
+    recovery_store = worker_module.BulkRecoveryStore(project_dir / "bulk_analysis" / group.folder_name)
+    recovery_manifest = recovery_store.load_map_manifest()
+
+    monkeypatch.setattr(worker, "_load_document", lambda _document: ("body", {}, source_context))
+    monkeypatch.setattr(worker_module, "should_chunk", lambda *_args, **_kwargs: (True, 4_939_208, 200_000))
+    monkeypatch.setattr(worker, "_count_prompt_tokens", lambda *_args, **_kwargs: 1_000)
+    monkeypatch.setattr(worker, "_gateway_rate_limit_retry_delay", lambda *_args, **_kwargs: 0.0)
+    monkeypatch.setattr(
+        worker_module,
+        "combine_chunk_summaries_hierarchical",
+        lambda summaries, **_kwargs: "combined:" + "|".join(summaries),
+    )
+
+    chunk_targets: list[int] = []
+
+    def _fake_generate(*, initial_chunk_tokens, **_kwargs):
+        chunk_targets.append(initial_chunk_tokens)
+        return ["chunk-one", "chunk-two"]
+
+    monkeypatch.setattr(worker, "_generate_fitting_chunks", _fake_generate)
+
+    result, run_details, _placeholders = worker._process_document(
+        provider=provider,
+        provider_config=ProviderConfig(provider_id="anthropic", model="claude-sonnet-4-5"),
+        bundle=bundle,
+        system_prompt="System",
+        document=document,
+        global_placeholders={},
+        manifest={"version": 2, "signature": None, "documents": {}},
+        prompt_hash="prompt-hash",
+        manifest_path=manifest_path,
+        recovery_store=recovery_store,
+        recovery_manifest=recovery_manifest,
+    )
+
+    assert result == "combined:summary|summary"
+    assert run_details["chunk_count"] == 2
+    assert chunk_targets == [200_000, 200_000]
+    assert backend.calls == 3
+
+
+def test_bulk_worker_retries_gateway_server_error_with_smaller_chunks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_dir = tmp_path
+    source_path = project_dir / "converted_documents" / "doc.md"
+    source_path.parent.mkdir(parents=True, exist_ok=True)
+    source_path.write_text("body", encoding="utf-8")
+
+    document = worker_module.BulkAnalysisDocument(
+        source_path=source_path,
+        relative_path="converted_documents/doc.md",
+        output_path=project_dir / "bulk_analysis" / "group" / "doc.md",
+    )
+    group = BulkAnalysisGroup.create("Group")
+    group.provider_id = "anthropic"
+    group.model = "claude-sonnet-4-5"
+    group.model_context_window = 1_000_000
+    backend = _FlakyGatewayServerBackend()
+    worker = BulkAnalysisWorker(
+        project_dir=project_dir,
+        group=group,
+        files=[],
+        metadata=ProjectMetadata(case_name="Case"),
+        force_rerun=False,
+        llm_backend=backend,
+    )
+    bundle = PromptBundle(system_template="System", user_template="Analyze {document_content}")
+    provider = worker._create_provider(ProviderConfig(provider_id="anthropic", model="claude-sonnet-4-5"))
+    source_context = SourceFileContext(
+        absolute_path=source_path.resolve(),
+        relative_path=document.relative_path,
+    )
+    manifest_path = _manifest_path(project_dir, group)
+    recovery_store = worker_module.BulkRecoveryStore(project_dir / "bulk_analysis" / group.folder_name)
+    recovery_manifest = recovery_store.load_map_manifest()
+
+    monkeypatch.setattr(worker, "_load_document", lambda _document: ("body", {}, source_context))
+    monkeypatch.setattr(worker_module, "should_chunk", lambda *_args, **_kwargs: (True, 4_939_208, 200_000))
+    monkeypatch.setattr(worker, "_count_prompt_tokens", lambda *_args, **_kwargs: 1_000)
+    monkeypatch.setattr(worker, "_gateway_rate_limit_retry_delay", lambda *_args, **_kwargs: 0.0)
+    monkeypatch.setattr(
+        worker_module,
+        "combine_chunk_summaries_hierarchical",
+        lambda summaries, **_kwargs: "combined:" + "|".join(summaries),
+    )
+
+    chunk_targets: list[int] = []
+
+    def _fake_generate(*, initial_chunk_tokens, **_kwargs):
+        chunk_targets.append(initial_chunk_tokens)
+        if initial_chunk_tokens > 150_000:
+            return ["chunk-one"]
+        return ["chunk-one", "chunk-two"]
+
+    monkeypatch.setattr(worker, "_generate_fitting_chunks", _fake_generate)
+
+    result, run_details, _placeholders = worker._process_document(
+        provider=provider,
+        provider_config=ProviderConfig(provider_id="anthropic", model="claude-sonnet-4-5"),
+        bundle=bundle,
+        system_prompt="System",
+        document=document,
+        global_placeholders={},
+        manifest={"version": 2, "signature": None, "documents": {}},
+        prompt_hash="prompt-hash",
+        manifest_path=manifest_path,
+        recovery_store=recovery_store,
+        recovery_manifest=recovery_manifest,
+    )
+
+    assert result == "combined:summary|summary"
+    assert run_details["chunk_count"] == 2
+    assert chunk_targets == [200_000, 150_000]
+    assert backend.calls == 3
+
+
+def test_bulk_worker_extract_page_numbers_uses_canonical_marker_regex(tmp_path: Path) -> None:
+    worker = BulkAnalysisWorker(
+        project_dir=tmp_path,
+        group=BulkAnalysisGroup.create("Group"),
+        files=[],
+        metadata=ProjectMetadata(case_name="Case"),
+        force_rerun=False,
+    )
+
+    content = "\n".join(
+        [
+            "<!--- AC DH 000001.pdf#page=1 --->",
+            "First page",
+            "<!--- AC DH 000001.pdf#page=1 --->",
+            "<!--- AC DH 000001.pdf#page=2 --->",
+        ]
+    )
+
+    assert worker._extract_page_numbers(content) == [1, 2]
+
+
+def test_bulk_worker_skips_ledger_when_chunk_has_no_page_markers(tmp_path: Path) -> None:
+    worker = BulkAnalysisWorker(
+        project_dir=tmp_path,
+        group=BulkAnalysisGroup.create("Group"),
+        files=[],
+        metadata=ProjectMetadata(case_name="Case"),
+        force_rerun=False,
+    )
+
+    class _FailingCitationStore:
+        def build_evidence_ledger(self, **_kwargs):  # noqa: ANN003
+            raise AssertionError("ledger should not be built without page markers")
+
+    worker._citation_store = _FailingCitationStore()  # type: ignore[assignment]
+
+    assert worker._build_document_evidence_ledger(relative_path="doc.md", content="no markers here") == ""
