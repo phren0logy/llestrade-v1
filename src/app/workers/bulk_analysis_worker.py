@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+import time
 from collections import deque
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
@@ -32,7 +33,7 @@ from src.app.core.bulk_analysis_runner import (
     render_user_prompt,
     should_chunk,
 )
-from src.app.core.citations import CitationRecordStats, CitationStore
+from src.app.core.citations import PAGE_MARKER_RE, CitationRecordStats, CitationStore
 from src.app.core.bulk_prompt_context import build_bulk_placeholders
 from src.app.core.placeholders.system import SourceFileContext
 from src.app.core.project_manager import ProjectMetadata
@@ -40,10 +41,10 @@ from src.common.llm.budgets import compute_input_token_budget
 from src.common.llm.request_budget import (
     compute_preflight_input_budget,
     count_request_input_tokens,
+    estimate_text_input_tokens,
     evaluate_request_budget,
     resolve_request_raw_context_window,
 )
-from src.common.llm.tokens import TokenCounter
 from src.config.observability import trace_operation
 from src.common.markdown import (
     PromptReference,
@@ -64,6 +65,7 @@ from .llm_backend import (
     PydanticAIGatewayBackend,
     backend_route_name,
     backend_transport_name,
+    extract_http_status_error_details,
 )
 from .progress import WorkerProgressDetail
 from .stage_contracts import BulkMapStageInput, stage_trace_attributes
@@ -110,16 +112,42 @@ class _ChunkTaskResult:
     usage: dict[str, int | float]
 
 
+@dataclass
+class _GatewayRateLimitError(RuntimeError):
+    status_code: int
+    retry_after_seconds: float | None
+    message: str
+
+    def __str__(self) -> str:
+        return self.message
+
+
+@dataclass
+class _GatewayServerError(RuntimeError):
+    status_code: int
+    retry_after_seconds: float | None
+    message: str
+
+    def __str__(self) -> str:
+        return self.message
+
+
 
 
 _MANIFEST_VERSION = 2
 _MTIME_TOLERANCE = 1e-6
 _DEFAULT_MAX_OUTPUT_TOKENS = 32_000
+_GATEWAY_ANTHROPIC_MAP_MAX_OUTPUT_TOKENS = 12_000
 _MIN_CHUNK_TOKEN_TARGET = 4_000
 _MAX_PROVIDER_LIMIT_RETRIES = 5
+_MAX_GATEWAY_RATE_LIMIT_RETRIES = 3
+_MAX_GATEWAY_SERVER_RETRIES = 3
+_DEFAULT_GATEWAY_RATE_LIMIT_RETRY_DELAY_SECONDS = 15.0
 _DEFAULT_CHUNK_FANOUT_CONCURRENCY = 4
 _DEFAULT_CHUNK_TARGET_RATIO = 0.50
-_PAGE_MARKER_RE = re.compile(r"<!---\\s*.+?#page=(\\d+)\\s*--->")
+_DEFAULT_REQUEST_OVERHEAD_SAFETY_MARGIN = 1_024
+_GATEWAY_ANTHROPIC_REQUEST_BUDGET_RATIO = 0.40
+_GATEWAY_RETRYABLE_STATUS_CODES: frozenset[int] = frozenset({408, 425, 429, 500, 502, 503, 504, 524})
 _CONFIGURED_LIMIT_RE = re.compile(
     r"configured limit of (?P<limit>\d+) tokens.*?resulted in (?P<actual>\d+) tokens",
     re.IGNORECASE | re.DOTALL,
@@ -128,9 +156,18 @@ _MAXIMUM_LIMIT_RE = re.compile(
     r"(?P<actual>\d+) tokens?\s*>\s*(?P<limit>\d+)\s*maximum",
     re.IGNORECASE,
 )
+_INPUT_LIMIT_RE = re.compile(
+    r"Exceeded the input_tokens_limit of (?P<limit>\d+) \(input_tokens=(?P<actual>\d+)\)",
+    re.IGNORECASE,
+)
+_LOCAL_PROMPT_BUDGET_RE = re.compile(
+    r"Prompt exceeds model input budget for .*?: (?P<actual>\d+) tokens > (?P<limit>\d+) budget",
+    re.IGNORECASE,
+)
 
 _DYNAMIC_GLOBAL_KEYS: frozenset[str] = frozenset(
     {
+        "document_name",
         "document_content",
         "source_pdf_filename",
         "source_pdf_relative_path",
@@ -146,6 +183,7 @@ _DYNAMIC_GLOBAL_KEYS: frozenset[str] = frozenset(
 
 _DYNAMIC_DOCUMENT_KEYS: frozenset[str] = frozenset(
     {
+        "document_name",
         "document_content",
         "chunk_index",
         "chunk_total",
@@ -323,7 +361,7 @@ class BulkAnalysisWorker(DashboardWorker):
             "input_tokens": 0,
             "output_tokens": 0,
         }
-        self._prompt_token_cache: dict[str, int] = {}
+        self._prompt_token_cache: dict[str, tuple[int, str]] = {}
         self._provider_input_budget_overrides: dict[tuple[str, str], int] = {}
         self._current_document_index = 0
         self._total_documents = 0
@@ -737,6 +775,7 @@ class BulkAnalysisWorker(DashboardWorker):
         )
 
         raw_context_window = self._resolve_raw_context_window(provider_config)
+        map_max_tokens = self._map_max_output_tokens(provider_config)
         needs_chunking, token_count, default_chunk_tokens = should_chunk(
             body,
             provider_config.provider_id,
@@ -744,13 +783,14 @@ class BulkAnalysisWorker(DashboardWorker):
             raw_context_window=raw_context_window,
         )
 
-        input_budget = self._effective_input_budget(
+        runtime_input_budget = self._effective_input_budget(
             provider_config,
             self._max_input_budget(
                 raw_context_window=raw_context_window,
-                max_output_tokens=_DEFAULT_MAX_OUTPUT_TOKENS,
+                max_output_tokens=map_max_tokens,
             ),
         )
+        input_budget = self._operational_request_budget(provider_config, runtime_input_budget)
         preflight_input_budget = compute_preflight_input_budget(
             provider_id=provider_config.provider_id,
             model_id=provider_config.model,
@@ -774,6 +814,7 @@ class BulkAnalysisWorker(DashboardWorker):
             provider_config,
             system_prompt,
             full_prompt,
+            max_tokens=map_max_tokens,
             allow_backend_preflight=False,
         )
         if preflight_input_budget is not None and full_prompt_tokens > preflight_input_budget:
@@ -783,6 +824,7 @@ class BulkAnalysisWorker(DashboardWorker):
             "token_count": token_count,
             "full_prompt_tokens": full_prompt_tokens,
             "max_tokens": default_chunk_tokens,
+            "runtime_input_budget_tokens": runtime_input_budget,
             "input_budget_tokens": input_budget,
             "preflight_input_budget_tokens": preflight_input_budget,
             "chunking": bool(needs_chunking),
@@ -815,6 +857,7 @@ class BulkAnalysisWorker(DashboardWorker):
                     provider_config,
                     full_prompt,
                     system_prompt,
+                    max_tokens=map_max_tokens,
                     input_budget=input_budget,
                     preflight_input_budget=preflight_input_budget,
                     context_label=f"document '{document.relative_path}'",
@@ -826,27 +869,53 @@ class BulkAnalysisWorker(DashboardWorker):
                     raise
                 needs_chunking = True
                 run_details["chunking"] = True
-                run_details["input_budget_tokens"] = learned_limit
+                previous_runtime_input_budget = runtime_input_budget
+                runtime_input_budget = learned_limit
+                input_budget = self._operational_request_budget(provider_config, runtime_input_budget)
+                run_details["runtime_input_budget_tokens"] = runtime_input_budget
+                run_details["input_budget_tokens"] = input_budget
                 preflight_input_budget = compute_preflight_input_budget(
                     provider_id=provider_config.provider_id,
                     model_id=provider_config.model,
-                    runtime_input_budget=learned_limit,
+                    runtime_input_budget=input_budget,
                     minimum_budget=_MIN_CHUNK_TOKEN_TARGET,
                 )
                 run_details["preflight_input_budget_tokens"] = preflight_input_budget
                 self.log_message.emit(
                     f"Provider reduced effective prompt budget for {document.relative_path}: "
-                    f"{input_budget} -> {learned_limit} tokens"
+                    f"{previous_runtime_input_budget} -> {learned_limit} tokens"
                 )
-                input_budget = learned_limit
 
-        chunk_target_tokens = self._chunk_target_from_budget(
-            input_budget=preflight_input_budget or input_budget,
+        chunk_fit_count_mode = self._chunk_fit_count_mode(provider_config)
+        prompt_overhead_budget = self._chunk_prompt_overhead_budget(
+            provider=provider,
+            provider_config=provider_config,
+            bundle=bundle,
+            system_prompt=system_prompt,
+            document=document,
+            placeholder_values=doc_placeholders,
+            max_tokens=map_max_tokens,
+        )
+        chunk_target_tokens = self._initial_chunk_content_budget(
+            request_budget=preflight_input_budget or input_budget,
+            prompt_overhead_budget=prompt_overhead_budget,
             default_chunk_tokens=default_chunk_tokens,
         )
+        if not self._uses_operational_gateway_budget(provider_config):
+            chunk_target_tokens = self._chunk_target_from_budget(
+                input_budget=preflight_input_budget or input_budget,
+                default_chunk_tokens=chunk_target_tokens,
+            )
+        run_details["request_overhead_tokens"] = prompt_overhead_budget
+        run_details["chunk_fit_count_mode"] = chunk_fit_count_mode
         provider_limit_retries = 0
+        gateway_rate_limit_retries = 0
+        gateway_server_retries = 0
+        chunk_fanout_override: int | None = None
         while True:
-            input_budget = self._effective_input_budget(provider_config, input_budget)
+            runtime_input_budget = self._effective_input_budget(provider_config, runtime_input_budget)
+            input_budget = self._operational_request_budget(provider_config, runtime_input_budget)
+            run_details["runtime_input_budget_tokens"] = runtime_input_budget
             run_details["input_budget_tokens"] = input_budget
             preflight_input_budget = compute_preflight_input_budget(
                 provider_id=provider_config.provider_id,
@@ -855,24 +924,32 @@ class BulkAnalysisWorker(DashboardWorker):
                 minimum_budget=_MIN_CHUNK_TOKEN_TARGET,
             )
             run_details["preflight_input_budget_tokens"] = preflight_input_budget
-            adjusted_chunk_target = self._chunk_target_from_budget(
-                input_budget=preflight_input_budget or input_budget,
+            adjusted_chunk_target = self._initial_chunk_content_budget(
+                request_budget=preflight_input_budget or input_budget,
+                prompt_overhead_budget=prompt_overhead_budget,
                 default_chunk_tokens=chunk_target_tokens,
             )
+            if not self._uses_operational_gateway_budget(provider_config):
+                adjusted_chunk_target = self._chunk_target_from_budget(
+                    input_budget=preflight_input_budget or input_budget,
+                    default_chunk_tokens=adjusted_chunk_target,
+                )
             if (
                 preflight_input_budget is not None
                 and input_budget is not None
                 and preflight_input_budget != input_budget
             ):
                 self.log_message.emit(
-                    f"Chunking {document.relative_path} with runtime budget {input_budget} tokens, "
-                    f"preflight budget {preflight_input_budget} tokens, and target chunk size "
-                    f"{adjusted_chunk_target} tokens"
+                    f"Chunking {document.relative_path} with runtime budget {runtime_input_budget} tokens, "
+                    f"request budget {input_budget} tokens, preflight budget {preflight_input_budget} tokens, "
+                    f"overhead {prompt_overhead_budget} tokens, and target chunk size "
+                    f"{adjusted_chunk_target} tokens ({chunk_fit_count_mode} chunk fit)"
                 )
             else:
                 self.log_message.emit(
-                    f"Chunking {document.relative_path} with input budget {input_budget} tokens "
-                    f"and target chunk size {adjusted_chunk_target} tokens"
+                    f"Chunking {document.relative_path} with request budget {input_budget} tokens, "
+                    f"overhead {prompt_overhead_budget} tokens, and target chunk size "
+                    f"{adjusted_chunk_target} tokens ({chunk_fit_count_mode} chunk fit)"
                 )
             chunks = self._generate_fitting_chunks(
                 provider=provider,
@@ -884,6 +961,7 @@ class BulkAnalysisWorker(DashboardWorker):
                 placeholder_values=doc_placeholders,
                 input_budget=preflight_input_budget or input_budget,
                 initial_chunk_tokens=adjusted_chunk_target,
+                max_tokens=map_max_tokens,
             )
             if not chunks:
                 run_details["chunk_count"] = 1
@@ -899,6 +977,7 @@ class BulkAnalysisWorker(DashboardWorker):
                     provider_config,
                     full_prompt,
                     system_prompt,
+                    max_tokens=map_max_tokens,
                     input_budget=input_budget,
                     preflight_input_budget=preflight_input_budget,
                     context_label=f"document '{document.relative_path}'",
@@ -929,6 +1008,8 @@ class BulkAnalysisWorker(DashboardWorker):
                     raw_context_window=raw_context_window,
                     input_budget=input_budget,
                     preflight_input_budget=preflight_input_budget or input_budget,
+                    map_max_tokens=map_max_tokens,
+                    chunk_fanout_override=chunk_fanout_override,
                 )
             except _ProviderPromptLimitError as exc:
                 provider_limit_retries += 1
@@ -945,8 +1026,8 @@ class BulkAnalysisWorker(DashboardWorker):
                 if next_target >= adjusted_chunk_target and learned_limit is None:
                     raise RuntimeError(str(exc)) from exc
                 self.log_message.emit(
-                    f"Provider reduced effective prompt budget for {document.relative_path}: "
-                    f"{input_budget} -> {learned_limit or input_budget} tokens; "
+                    f"Prompt budget reduced for {document.relative_path}: "
+                    f"limit={exc.configured_limit or input_budget} actual={exc.actual_tokens or 'unknown'}; "
                     f"reducing chunk target {adjusted_chunk_target} -> {next_target}"
                 )
                 documents = manifest.setdefault("documents", {})  # type: ignore[assignment]
@@ -959,6 +1040,43 @@ class BulkAnalysisWorker(DashboardWorker):
                 recovery_store.clear_map_document(document.relative_path)
                 recovery_store.save_map_manifest(recovery_manifest)
                 chunk_target_tokens = next_target
+            except _GatewayRateLimitError as exc:
+                gateway_rate_limit_retries += 1
+                if gateway_rate_limit_retries >= _MAX_GATEWAY_RATE_LIMIT_RETRIES:
+                    raise RuntimeError(
+                        f"Gateway repeatedly rate limited {document.relative_path}: {exc}"
+                    ) from exc
+                chunk_fanout_override = 1
+                delay_seconds = self._gateway_rate_limit_retry_delay(exc, gateway_rate_limit_retries)
+                self.log_message.emit(
+                    f"Gateway rate limited {document.relative_path}; "
+                    f"retrying in {delay_seconds:.1f}s with serial chunk processing"
+                )
+                time.sleep(delay_seconds)
+            except _GatewayServerError as exc:
+                gateway_server_retries += 1
+                if gateway_server_retries >= _MAX_GATEWAY_SERVER_RETRIES:
+                    raise RuntimeError(
+                        f"Gateway repeatedly failed {document.relative_path} with {exc.status_code}: {exc}"
+                    ) from exc
+                chunk_fanout_override = 1
+                next_target = max(int(adjusted_chunk_target * 0.75), _MIN_CHUNK_TOKEN_TARGET)
+                self.log_message.emit(
+                    f"Gateway server error {exc.status_code} for {document.relative_path}; "
+                    f"retrying in {self._gateway_rate_limit_retry_delay(exc, gateway_server_retries):.1f}s "
+                    f"with smaller chunks {adjusted_chunk_target} -> {next_target}"
+                )
+                documents = manifest.setdefault("documents", {})  # type: ignore[assignment]
+                if isinstance(documents, dict):
+                    documents.pop(document.relative_path, None)
+                    _save_manifest(manifest_path, manifest)
+                recovery_documents = recovery_manifest.setdefault("documents", {})  # type: ignore[assignment]
+                if isinstance(recovery_documents, dict):
+                    recovery_documents.pop(document.relative_path, None)
+                recovery_store.clear_map_document(document.relative_path)
+                recovery_store.save_map_manifest(recovery_manifest)
+                chunk_target_tokens = next_target
+                time.sleep(self._gateway_rate_limit_retry_delay(exc, gateway_server_retries))
 
     def _process_chunked_document(
         self,
@@ -980,6 +1098,8 @@ class BulkAnalysisWorker(DashboardWorker):
         raw_context_window: int,
         input_budget: int,
         preflight_input_budget: int,
+        map_max_tokens: int,
+        chunk_fanout_override: int | None = None,
     ) -> tuple[str, Dict[str, object], Dict[str, str]]:
         documents = manifest.setdefault("documents", {})  # type: ignore[assignment]
         entry: Dict[str, object] = dict(documents.get(document.relative_path, {}) or {})
@@ -1110,7 +1230,19 @@ class BulkAnalysisWorker(DashboardWorker):
 
         chunk_failures: list[Exception] = []
         prompt_limit_error: _ProviderPromptLimitError | None = None
-        fanout_limit = min(self._chunk_fanout_max_concurrency(), len(pending_specs)) if pending_specs else 0
+        gateway_rate_limit_error: _GatewayRateLimitError | None = None
+        gateway_server_error: _GatewayServerError | None = None
+        fanout_limit = (
+            min(
+                self._effective_chunk_fanout_max_concurrency(
+                    provider_config,
+                    override=chunk_fanout_override,
+                ),
+                len(pending_specs),
+            )
+            if pending_specs
+            else 0
+        )
 
         if fanout_limit > 0:
             in_flight: dict[Future[_ChunkTaskResult], _ChunkTaskSpec] = {}
@@ -1123,6 +1255,7 @@ class BulkAnalysisWorker(DashboardWorker):
                     pending_specs=pending_specs,
                     provider_config=provider_config,
                     system_prompt=system_prompt,
+                    map_max_tokens=map_max_tokens,
                     input_budget=input_budget,
                     preflight_input_budget=preflight_input_budget,
                     document=document,
@@ -1137,6 +1270,18 @@ class BulkAnalysisWorker(DashboardWorker):
                         except _ProviderPromptLimitError as exc:
                             if prompt_limit_error is None:
                                 prompt_limit_error = exc
+                                stop_submitting = True
+                                pending_specs.clear()
+                                self._cancel_pending_chunk_futures(in_flight)
+                        except _GatewayRateLimitError as exc:
+                            if gateway_rate_limit_error is None:
+                                gateway_rate_limit_error = exc
+                                stop_submitting = True
+                                pending_specs.clear()
+                                self._cancel_pending_chunk_futures(in_flight)
+                        except _GatewayServerError as exc:
+                            if gateway_server_error is None:
+                                gateway_server_error = exc
                                 stop_submitting = True
                                 pending_specs.clear()
                                 self._cancel_pending_chunk_futures(in_flight)
@@ -1201,16 +1346,21 @@ class BulkAnalysisWorker(DashboardWorker):
                             max_workers=fanout_limit,
                             in_flight=in_flight,
                             pending_specs=pending_specs,
-                                provider_config=provider_config,
-                                system_prompt=system_prompt,
-                                input_budget=input_budget,
-                                preflight_input_budget=preflight_input_budget,
-                                document=document,
-                                chunks_completed=completed_chunks,
-                            )
+                            provider_config=provider_config,
+                            system_prompt=system_prompt,
+                            map_max_tokens=map_max_tokens,
+                            input_budget=input_budget,
+                            preflight_input_budget=preflight_input_budget,
+                            document=document,
+                            chunks_completed=completed_chunks,
+                        )
 
         if prompt_limit_error is not None:
             raise prompt_limit_error
+        if gateway_rate_limit_error is not None:
+            raise gateway_rate_limit_error
+        if gateway_server_error is not None:
+            raise gateway_server_error
         if any(isinstance(error, BulkAnalysisCancelled) for error in chunk_failures):
             raise BulkAnalysisCancelled
         if chunk_failures:
@@ -1342,6 +1492,34 @@ class BulkAnalysisWorker(DashboardWorker):
             return _DEFAULT_CHUNK_FANOUT_CONCURRENCY
         return value if value > 0 else _DEFAULT_CHUNK_FANOUT_CONCURRENCY
 
+    def _effective_chunk_fanout_max_concurrency(
+        self,
+        provider_config: ProviderConfig,
+        *,
+        override: int | None = None,
+    ) -> int:
+        configured = self._chunk_fanout_max_concurrency()
+        explicit_override = os.getenv("LLESTRADE_BULK_MAP_CHUNK_MAX_CONCURRENCY", "").strip()
+        if (
+            not explicit_override
+            and backend_transport_name(self._llm_backend) == "gateway"
+            and provider_config.provider_id == "anthropic"
+        ):
+            configured = 1
+        if isinstance(override, int) and override > 0:
+            configured = min(configured, override)
+        return max(configured, 1)
+
+    @staticmethod
+    def _gateway_rate_limit_retry_delay(
+        exc: _GatewayRateLimitError | _GatewayServerError,
+        attempt: int,
+    ) -> float:
+        retry_after = exc.retry_after_seconds
+        if isinstance(retry_after, (int, float)) and retry_after > 0:
+            return float(retry_after)
+        return min(_DEFAULT_GATEWAY_RATE_LIMIT_RETRY_DELAY_SECONDS * max(attempt, 1), 60.0)
+
     def _chunk_trace_attributes(
         self,
         *,
@@ -1412,6 +1590,7 @@ class BulkAnalysisWorker(DashboardWorker):
         pending_specs: Deque[_ChunkTaskSpec],
         provider_config: ProviderConfig,
         system_prompt: str,
+        map_max_tokens: int,
         input_budget: int,
         preflight_input_budget: int,
         document: BulkAnalysisDocument,
@@ -1424,6 +1603,7 @@ class BulkAnalysisWorker(DashboardWorker):
                 provider_config=provider_config,
                 system_prompt=system_prompt,
                 spec=spec,
+                map_max_tokens=map_max_tokens,
                 input_budget=input_budget,
                 preflight_input_budget=preflight_input_budget,
             )
@@ -1449,6 +1629,7 @@ class BulkAnalysisWorker(DashboardWorker):
         provider_config: ProviderConfig,
         system_prompt: str,
         spec: _ChunkTaskSpec,
+        map_max_tokens: int,
         input_budget: int,
         preflight_input_budget: int,
     ) -> _ChunkTaskResult:
@@ -1460,6 +1641,7 @@ class BulkAnalysisWorker(DashboardWorker):
                     provider_config,
                     spec.prompt,
                     system_prompt,
+                    max_tokens=map_max_tokens,
                     input_budget=input_budget,
                     preflight_input_budget=preflight_input_budget,
                     context_label=spec.context_label,
@@ -1582,6 +1764,85 @@ class BulkAnalysisWorker(DashboardWorker):
             _MIN_CHUNK_TOKEN_TARGET,
         )
 
+    def _operational_request_budget(self, provider_config: ProviderConfig, runtime_input_budget: int) -> int:
+        budget = runtime_input_budget
+        if (
+            backend_transport_name(self._llm_backend) == "gateway"
+            and provider_config.provider_id == "anthropic"
+        ):
+            budget = int(runtime_input_budget * _GATEWAY_ANTHROPIC_REQUEST_BUDGET_RATIO)
+        return max(min(runtime_input_budget, budget), _MIN_CHUNK_TOKEN_TARGET)
+
+    def _uses_operational_gateway_budget(self, provider_config: ProviderConfig) -> bool:
+        return (
+            backend_transport_name(self._llm_backend) == "gateway"
+            and provider_config.provider_id == "anthropic"
+        )
+
+    @staticmethod
+    def _initial_chunk_content_budget(
+        *,
+        request_budget: int,
+        prompt_overhead_budget: int,
+        default_chunk_tokens: int,
+    ) -> int:
+        available = max(request_budget - prompt_overhead_budget, _MIN_CHUNK_TOKEN_TARGET)
+        return max(min(default_chunk_tokens, available), _MIN_CHUNK_TOKEN_TARGET)
+
+    def _chunk_chars_per_token(self, provider_config: ProviderConfig) -> int:
+        if provider_config.provider_id in {"anthropic", "anthropic_bedrock"}:
+            return 3
+        return 4
+
+    def _chunk_prompt_overhead_budget(
+        self,
+        *,
+        provider: object,
+        provider_config: ProviderConfig,
+        bundle: PromptBundle,
+        system_prompt: str,
+        document: BulkAnalysisDocument,
+        placeholder_values: Mapping[str, str],
+        max_tokens: int,
+    ) -> int:
+        overhead_prompt = render_user_prompt(
+            bundle,
+            self._metadata,
+            document.relative_path,
+            "",
+            chunk_index=1,
+            chunk_total=1,
+            placeholder_values=placeholder_values,
+        )
+        overhead_tokens = self._count_prompt_tokens(
+            provider,
+            provider_config,
+            system_prompt,
+            overhead_prompt,
+            max_tokens=max_tokens,
+            allow_backend_preflight=False,
+        )
+        return overhead_tokens + _DEFAULT_REQUEST_OVERHEAD_SAFETY_MARGIN
+
+    def _map_max_output_tokens(self, provider_config: ProviderConfig) -> int:
+        if (
+            backend_transport_name(self._llm_backend) == "gateway"
+            and provider_config.provider_id == "anthropic"
+        ):
+            return _GATEWAY_ANTHROPIC_MAP_MAX_OUTPUT_TOKENS
+        return _DEFAULT_MAX_OUTPUT_TOKENS
+
+    def _chunk_fit_count_mode(self, provider_config: ProviderConfig) -> str:
+        capabilities = self._llm_backend.capabilities(
+            provider_config.provider_id,
+            provider_config.model,
+        )
+        if isinstance(self._llm_backend, PydanticAIGatewayBackend):
+            return "estimate"
+        if capabilities.supports_pre_request_token_count:
+            return "exact"
+        return "estimate"
+
     def _effective_input_budget(self, provider_config: ProviderConfig, input_budget: int) -> int:
         override = self._provider_input_budget_overrides.get(
             (provider_config.provider_id, provider_config.model or "")
@@ -1635,6 +1896,22 @@ class BulkAnalysisWorker(DashboardWorker):
                 message=haystack,
             )
 
+        match = _INPUT_LIMIT_RE.search(haystack)
+        if match:
+            return _ProviderPromptLimitError(
+                configured_limit=int(match.group("limit")),
+                actual_tokens=int(match.group("actual")),
+                message=haystack,
+            )
+
+        match = _LOCAL_PROMPT_BUDGET_RE.search(haystack)
+        if match:
+            return _ProviderPromptLimitError(
+                configured_limit=int(match.group("limit")),
+                actual_tokens=int(match.group("actual")),
+                message=haystack,
+            )
+
         return None
 
     @staticmethod
@@ -1654,7 +1931,7 @@ class BulkAnalysisWorker(DashboardWorker):
         reduced = int(min(current_target, fallback_limit) * _DEFAULT_CHUNK_TARGET_RATIO)
         return max(min(reduced, current_target - 1), _MIN_CHUNK_TOKEN_TARGET)
 
-    def _count_prompt_tokens(
+    def _count_prompt_tokens_with_mode(
         self,
         provider: object,
         provider_config: ProviderConfig,
@@ -1663,10 +1940,10 @@ class BulkAnalysisWorker(DashboardWorker):
         *,
         max_tokens: int = _DEFAULT_MAX_OUTPUT_TOKENS,
         allow_backend_preflight: bool = True,
-    ) -> int:
+    ) -> tuple[int, str]:
         combined_prompt = f"{system_prompt.strip()}\n\n{user_prompt.strip()}".strip()
         if not combined_prompt:
-            return 0
+            return 0, "estimate"
 
         cache_key = self._prompt_token_cache_key(
             provider_id=provider_config.provider_id,
@@ -1702,33 +1979,43 @@ class BulkAnalysisWorker(DashboardWorker):
                 self.logger.debug("Backend token preflight failed; falling back to local estimate", exc_info=True)
                 return None
 
-        result, _mode = count_request_input_tokens(
+        result, mode = count_request_input_tokens(
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             provider_id=provider_config.provider_id,
             model_id=provider_config.model,
             exact_token_counter=_exact_token_counter if allow_backend_preflight else None,
         )
-        self._prompt_token_cache[cache_key] = result
+        cached_value = (result, mode)
+        self._prompt_token_cache[cache_key] = cached_value
+        return cached_value
+
+    def _count_prompt_tokens(
+        self,
+        provider: object,
+        provider_config: ProviderConfig,
+        system_prompt: str,
+        user_prompt: str,
+        *,
+        max_tokens: int = _DEFAULT_MAX_OUTPUT_TOKENS,
+        allow_backend_preflight: bool = True,
+    ) -> int:
+        result, _mode = self._count_prompt_tokens_with_mode(
+            provider,
+            provider_config,
+            system_prompt,
+            user_prompt,
+            max_tokens=max_tokens,
+            allow_backend_preflight=allow_backend_preflight,
+        )
         return result
 
     def _estimate_prompt_tokens(self, *, text: str, provider: str, model: str) -> int:
-        token_info = TokenCounter.count(
+        return estimate_text_input_tokens(
             text=text,
-            provider=provider,
-            model=model,
+            provider_id=provider,
+            model_id=model,
         )
-        if token_info.get("success"):
-            counted = int(token_info.get("token_count") or 0)
-            capabilities = self._llm_backend.capabilities(
-                provider,
-                model or None,
-            )
-            if capabilities.reasoning_mode == "anthropic":
-                return max(counted, max(len(text) // 3, 1))
-            if counted > 0:
-                return counted
-        return max(len(text) // 3, 1)
 
     def _prompt_token_cache_key(
         self,
@@ -1770,10 +2057,13 @@ class BulkAnalysisWorker(DashboardWorker):
         placeholder_values: Mapping[str, str],
         input_budget: int,
         initial_chunk_tokens: int,
+        max_tokens: int,
     ) -> List[str]:
         chunk_target = max(initial_chunk_tokens, _MIN_CHUNK_TOKEN_TARGET)
+        allow_backend_preflight = self._chunk_fit_count_mode(provider_config) == "exact"
+        chars_per_token = self._chunk_chars_per_token(provider_config)
         while True:
-            chunks = generate_chunks(body, chunk_target)
+            chunks = generate_chunks(body, chunk_target, chars_per_token=chars_per_token)
             if not chunks:
                 return []
 
@@ -1794,16 +2084,36 @@ class BulkAnalysisWorker(DashboardWorker):
                     content=chunk,
                 )
                 prompt = self._append_citation_ledger(prompt, chunk_ledger)
-                prompt_tokens = self._count_prompt_tokens(
+                prompt_tokens, count_mode = self._count_prompt_tokens_with_mode(
                     provider,
                     provider_config,
                     system_prompt,
                     prompt,
-                    max_tokens=_DEFAULT_MAX_OUTPUT_TOKENS,
-                    allow_backend_preflight=False,
+                    max_tokens=max_tokens,
+                    allow_backend_preflight=allow_backend_preflight,
                 )
                 if prompt_tokens > input_budget:
                     oversized.append((idx, prompt_tokens))
+                    if count_mode == "exact":
+                        self.logger.debug(
+                            "%s exact chunk-fit count exceeded budget for %s chunk=%s/%s tokens=%s budget=%s",
+                            self.job_tag,
+                            document.relative_path,
+                            idx,
+                            total_chunks,
+                            prompt_tokens,
+                            input_budget,
+                        )
+                    else:
+                        self.logger.debug(
+                            "%s estimated chunk request for %s chunk=%s/%s tokens=%s budget=%s",
+                            self.job_tag,
+                            document.relative_path,
+                            idx,
+                            total_chunks,
+                            prompt_tokens,
+                            input_budget,
+                        )
 
             if not oversized:
                 return chunks
@@ -1906,9 +2216,13 @@ class BulkAnalysisWorker(DashboardWorker):
                     if evaluation.preflight_input_budget is not None
                     else preflight_input_budget if preflight_input_budget is not None else input_budget
                 )
-                raise RuntimeError(
-                    f"Prompt exceeds model input budget for {context_label}: "
-                    f"{evaluation.input_tokens} tokens > {comparison_budget} budget"
+                raise _ProviderPromptLimitError(
+                    configured_limit=int(comparison_budget) if comparison_budget is not None else input_budget,
+                    actual_tokens=evaluation.input_tokens,
+                    message=(
+                        f"Prompt exceeds model input budget for {context_label}: "
+                        f"{evaluation.input_tokens} tokens > {comparison_budget} budget"
+                    ),
                 )
 
         stage_input = BulkMapStageInput(
@@ -1948,6 +2262,23 @@ class BulkAnalysisWorker(DashboardWorker):
                 parsed_limit_error = self._parse_provider_prompt_limit_error(exc)
                 if parsed_limit_error is not None:
                     raise parsed_limit_error from exc
+                gateway_error = extract_http_status_error_details(exc)
+                if (
+                    backend_transport_name(self._llm_backend) == "gateway"
+                    and gateway_error is not None
+                    and gateway_error.status_code in _GATEWAY_RETRYABLE_STATUS_CODES
+                ):
+                    if gateway_error.status_code == 429:
+                        raise _GatewayRateLimitError(
+                            status_code=gateway_error.status_code,
+                            retry_after_seconds=gateway_error.retry_after_seconds,
+                            message=f"Gateway rate limit for {context_label}: {gateway_error.message}",
+                        ) from exc
+                    raise _GatewayServerError(
+                        status_code=gateway_error.status_code,
+                        retry_after_seconds=gateway_error.retry_after_seconds,
+                        message=f"Gateway server error for {context_label}: {gateway_error.message}",
+                    ) from exc
                 raise
         content = str(response.text or "").strip()
         if not content:
@@ -2162,6 +2493,8 @@ class BulkAnalysisWorker(DashboardWorker):
         if self._citation_store is None:
             return ""
         pages = self._extract_page_numbers(content)
+        if not pages:
+            return ""
         try:
             return self._citation_store.build_evidence_ledger(
                 relative_path=relative_path,
@@ -2178,7 +2511,7 @@ class BulkAnalysisWorker(DashboardWorker):
             return ""
 
     def _extract_page_numbers(self, content: str) -> list[int]:
-        pages = [int(match.group(1)) for match in _PAGE_MARKER_RE.finditer(content)]
+        pages = [int(match.group(1)) for match in PAGE_MARKER_RE.finditer(content)]
         if not pages:
             return []
         ordered = list(dict.fromkeys(pages))

@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 _MODEL_REQUEST_RETRY_ATTEMPTS = 3
 _MODEL_REQUEST_RETRY_BASE_DELAY_SECONDS = 0.5
 _MODEL_REQUEST_RETRY_MAX_DELAY_SECONDS = 2.0
+_RETRYABLE_MODEL_HTTP_STATUS_CODES: frozenset[int] = frozenset({408, 425, 429, 500, 502, 503, 504, 524})
 
 _BEDROCK_MODEL_ALIASES: dict[str, str] = {
     "claude-sonnet-4-5": "anthropic.claude-sonnet-4-5-v1",
@@ -128,6 +129,15 @@ class GatewayAccessCheck:
     route: str | None
     provider_id: str
     model: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class HTTPStatusErrorDetails:
+    """Normalized HTTP status details extracted from an exception chain."""
+
+    status_code: int | None
+    message: str
+    retry_after_seconds: float | None = None
 
 
 _GATEWAY_ACCESS_CACHE_TTL_SECONDS = 300.0
@@ -501,12 +511,98 @@ def _check_after_response(*, response: Any, usage_limits: Any) -> None:
 def _is_retryable_model_request_error(exc: BaseException) -> bool:
     if isinstance(exc, (httpx.TimeoutException, httpx.TransportError, asyncio.TimeoutError)):
         return True
+    details = extract_http_status_error_details(exc)
+    if details is not None and details.status_code in _RETRYABLE_MODEL_HTTP_STATUS_CODES:
+        return True
     return False
 
 
 def _retry_delay_seconds(attempt_number: int) -> float:
     delay = _MODEL_REQUEST_RETRY_BASE_DELAY_SECONDS * (2 ** max(attempt_number - 1, 0))
     return min(delay, _MODEL_REQUEST_RETRY_MAX_DELAY_SECONDS)
+
+
+def _iter_exception_chain(exc: BaseException) -> Any:
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        yield current
+        seen.add(id(current))
+        next_exc = current.__cause__ or current.__context__
+        current = next_exc if isinstance(next_exc, BaseException) else None
+
+
+def _retry_after_seconds_from_headers(headers: Any) -> float | None:
+    if headers is None:
+        return None
+
+    try:
+        retry_after_ms = headers.get("retry-after-ms", None)
+        if retry_after_ms is not None:
+            return float(retry_after_ms) / 1000
+    except (AttributeError, TypeError, ValueError):
+        pass
+
+    try:
+        retry_after = headers.get("retry-after", None)
+        if retry_after is not None:
+            return float(retry_after)
+    except (AttributeError, TypeError, ValueError):
+        pass
+    return None
+
+
+def _response_error_message(response: Any) -> str:
+    try:
+        payload = response.json()
+    except Exception:
+        payload = None
+
+    if isinstance(payload, dict):
+        message = str(payload.get("message") or payload.get("error") or "").strip()
+        if message:
+            return message
+
+    try:
+        text = str(response.text or "").strip()
+    except Exception:
+        text = ""
+    if text:
+        return text
+
+    status_code = int(getattr(response, "status_code", 0) or 0) or "HTTP"
+    reason = str(getattr(response, "reason_phrase", "") or "").strip()
+    return f"{status_code} {reason}".strip()
+
+
+def extract_http_status_error_details(exc: BaseException) -> HTTPStatusErrorDetails | None:
+    for candidate in _iter_exception_chain(exc):
+        if isinstance(candidate, httpx.HTTPStatusError):
+            response = candidate.response
+            status_code = int(getattr(response, "status_code", 0) or 0) or None
+            return HTTPStatusErrorDetails(
+                status_code=status_code,
+                message=_response_error_message(response),
+                retry_after_seconds=_retry_after_seconds_from_headers(getattr(response, "headers", None)),
+            )
+
+        status_code = getattr(candidate, "status_code", None)
+        if isinstance(status_code, int) and status_code > 0:
+            body = getattr(candidate, "body", None)
+            message = ""
+            if isinstance(body, dict):
+                message = str(body.get("message") or body.get("error") or "").strip()
+            elif body is not None:
+                message = str(body).strip()
+            if not message:
+                message = str(candidate) or candidate.__class__.__name__
+            return HTTPStatusErrorDetails(
+                status_code=status_code,
+                message=message,
+                retry_after_seconds=None,
+            )
+
+    return None
 
 
 def _invoke_model_response_sync(
@@ -781,7 +877,7 @@ class PydanticAIGatewayBackend:
     Agent/tool orchestration remains in worker code.
     """
 
-    _RETRYABLE_STATUS_CODES: frozenset[int] = frozenset({408, 425, 429, 500, 502, 503, 504})
+    _RETRYABLE_STATUS_CODES: frozenset[int] = _RETRYABLE_MODEL_HTTP_STATUS_CODES
     _GATEWAY_RETRY_ATTEMPTS = 3
     _GATEWAY_RETRY_MAX_WAIT_SECONDS = 30.0
     _DEFAULT_GATEWAY_MAX_CONCURRENCY = 4
@@ -1303,6 +1399,7 @@ class PydanticAIGatewayBackend:
 
 __all__ = [
     "GatewayAccessCheck",
+    "HTTPStatusErrorDetails",
     "ProviderMetadata",
     "LLMExecutionBackend",
     "LLMProviderRequest",
@@ -1314,6 +1411,7 @@ __all__ = [
     "build_model_settings",
     "backend_transport_name",
     "backend_route_name",
+    "extract_http_status_error_details",
     "normalize_model_name",
     "provider_capabilities",
     "resolve_model_name",
