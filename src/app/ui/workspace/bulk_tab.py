@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QFontDatabase
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QHBoxLayout,
@@ -41,7 +42,9 @@ class BulkAnalysisTab(QWidget):
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
         self.log_text.setMaximumHeight(120)
-        self.log_text.setStyleSheet("font-family: monospace; font-size: 11px;")
+        fixed_font = QFontDatabase.systemFont(QFontDatabase.FixedFont)
+        fixed_font.setPointSize(11)
+        self.log_text.setFont(fixed_font)
 
         self.table = QTableWidget(0, 7)
         self.table.setHorizontalHeaderLabels(["Group", "Coverage", "Updated", "Status", "Est. Cost", "Placeholders", "Actions"])

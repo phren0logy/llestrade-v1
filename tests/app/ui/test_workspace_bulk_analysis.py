@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 import pytest
 from PySide6.QtCore import QCoreApplication, QObject, QRunnable, Signal
+from PySide6.QtGui import QFontDatabase
 from PySide6.QtWidgets import QApplication, QDialog, QPushButton, QMessageBox
 
 from src.app.core.bulk_analysis_runner import PromptBundle
@@ -15,6 +16,7 @@ from src.app.core.project_manager import ProjectManager, ProjectMetadata
 from src.app.core.bulk_analysis_groups import BulkAnalysisGroup
 from src.app.ui.stages import project_workspace
 from src.app.ui.stages.project_workspace import ProjectWorkspace
+from src.app.ui.workspace.bulk_tab import BulkAnalysisTab
 from src.app.workers import bulk_analysis_worker
 from src.app.workers.llm_backend import GatewayAccessCheck
 from src.app.workers.progress import WorkerProgressDetail
@@ -103,6 +105,18 @@ def _find_button(action_widget, text: str) -> QPushButton:
     raise AssertionError(f"Button with text '{text}' not found")
 
 
+def test_bulk_analysis_tab_uses_fixed_system_font_for_log(qt_app: QApplication) -> None:
+    assert qt_app is not None
+
+    tab = BulkAnalysisTab()
+    expected = QFontDatabase.systemFont(QFontDatabase.FixedFont)
+
+    assert tab.log_text.font().family() == expected.family()
+    assert tab.log_text.font().pointSize() == 11
+
+    tab.deleteLater()
+
+
 def test_workspace_run_executes_worker_and_updates_ui(tmp_path: Path, qt_app: QApplication, monkeypatch: pytest.MonkeyPatch) -> None:
     assert qt_app is not None
 
@@ -124,7 +138,7 @@ def test_workspace_run_executes_worker_and_updates_ui(tmp_path: Path, qt_app: QA
     monkeypatch.setattr(
         bulk_analysis_worker,
         "should_chunk",
-        lambda content, provider_id, model_name: (False, 10, 8192),
+        lambda content, provider_id, model_name, **_kwargs: (False, 10, 8192),
     )
 
     workspace = ProjectWorkspace()
