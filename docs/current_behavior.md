@@ -22,7 +22,9 @@ This document is the concise behavior baseline for cleanup, testing, and future 
 - Highlights denominator is PDF-only.
 - Placeholder `.highlights.md` files are written when PDFs have no highlights.
 - Bulk and report prompt runs use project placeholder mapping plus runtime context placeholders.
-- Generated analyses/reports may include inline citation markers in the format `[CIT:ev_<id>]`.
+- Citation-aware bulk/report prompts receive a generated system appendix that defines the allowed local citation labels for that run.
+- Generated analyses/reports use inline local citation markers in the format `[C1]`, `[C2]`, etc.
+- When the citation pipeline changes incompatibly, derived artifacts (`converted_documents/`, `highlights/`, `bulk_analysis/`, `reports/`, `.llestrade/citations.db`) are expected to be reset and rebuilt.
 
 ## Observability Status
 - Observability is OTEL-first, with Local Phoenix supported as one export target.

@@ -20,6 +20,7 @@ Live-provider tests are skipped by default unless `RUN_LIVE_PROVIDER_TESTS=1`.
 - `scripts/run_pytest.sh tests/` for general local runs.
 - `scripts/run_pytest_pr.sh` for deterministic PR-equivalent checks.
 - `scripts/run_pytest_live.sh` for optional real-provider validation.
+- `uv run python scripts/reset_citation_pipeline.py <project_dir>` to clear derived citation-dependent artifacts before reconversion/regeneration after a breaking citation change.
 
 Live-provider notes:
 - Normal pytest runs use isolated test settings, isolated QSettings, and a fake keyring backend.
@@ -33,5 +34,5 @@ Live-provider notes:
 
 ## Coverage Policy
 - PR deterministic lane reports coverage for `src/app/core`, `src/app/workers`, and `src/common/llm`.
-- Citation coverage should include `src/app/core/citations.py` (indexing, verification, chunked Azure ingestion).
+- Citation coverage should include `src/app/core/citations.py` (indexing, local-label verification, chunked Azure ingestion).
 - Coverage trends should be reviewed on high-risk refactors; thresholds can be raised incrementally once the suite stabilizes.
