@@ -12,6 +12,7 @@ from pydantic_ai.exceptions import ModelAPIError, ModelHTTPError
 from pydantic_ai.messages import ModelResponse, TextPart
 from pydantic_ai.usage import RequestUsage
 
+import src.app.workers.llm_backend as llm_backend_module
 from src.app.workers.llm_backend import (
     DirectProviderMetadata,
     GatewayAccessCheck,
@@ -1430,6 +1431,187 @@ def test_gateway_backend_build_model_uses_canonical_gateway_model_ids(
         "http_client": backend._gateway_http_client(),
     }
     assert captured["provider"]["http_client"] is not None
+
+
+def test_gateway_backend_builds_bedrock_model_without_infer_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _fail_infer_model(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("infer_model should not be used for gateway Bedrock models")
+
+    monkeypatch.setattr("pydantic_ai.models.infer_model", _fail_infer_model)
+
+    backend = PydanticAIGatewayBackend(
+        api_key="gateway-key",
+        base_url="https://gateway.example.com",
+        route=None,
+        max_concurrency=0,
+    )
+
+    model = backend._build_model(
+        provider_id="anthropic_bedrock",
+        model_name="us.anthropic.claude-sonnet-4-6",
+    )
+
+    assert model.__class__.__name__ == "BedrockConverseModel"
+    assert model._provider.__class__.__name__ == "_GatewayBedrockProvider"
+    assert model._provider.base_url == "https://gateway.example.com/bedrock"
+
+
+def test_gateway_bedrock_provider_sends_gateway_auth_to_converse_endpoint() -> None:
+    calls: list[dict[str, Any]] = []
+
+    class _FakeSyncClient:
+        def post(self, url: str, *, json: dict[str, Any], headers: dict[str, str], timeout: Any) -> httpx.Response:
+            calls.append(
+                {
+                    "url": url,
+                    "json": json,
+                    "headers": headers,
+                    "timeout": timeout,
+                }
+            )
+            request = httpx.Request("POST", url, headers=headers)
+            return httpx.Response(
+                200,
+                request=request,
+                json={
+                    "output": {"message": {"content": [{"text": "Gateway OK"}]}},
+                    "usage": {"inputTokens": 3, "outputTokens": 2},
+                    "stopReason": "end_turn",
+                    "ResponseMetadata": {"RequestId": "req_123"},
+                },
+            )
+
+    backend = PydanticAIGatewayBackend(
+        api_key="gateway-key",
+        base_url="https://gateway.example.com",
+        route="bulk",
+        max_concurrency=0,
+    )
+    provider = backend._gateway_bedrock_provider(http_client=_FakeSyncClient())
+
+    response = provider.client.converse(
+        modelId="us.anthropic.claude-sonnet-4-6",
+        messages=[],
+        system=[],
+        inferenceConfig={},
+    )
+
+    assert response["usage"] == {"inputTokens": 3, "outputTokens": 2}
+    assert calls == [
+        {
+            "url": "https://gateway.example.com/bulk/model/us.anthropic.claude-sonnet-4-6/converse",
+            "json": {
+                "modelId": "us.anthropic.claude-sonnet-4-6",
+                "messages": [],
+                "system": [],
+                "inferenceConfig": {},
+            },
+            "headers": {"Authorization": "Bearer gateway-key"},
+            "timeout": calls[0]["timeout"],
+        }
+    ]
+
+
+def test_gateway_bedrock_524_surfaces_as_model_http_error() -> None:
+    class _FakeSyncClient:
+        def post(self, url: str, *, json: dict[str, Any], headers: dict[str, str], timeout: Any) -> httpx.Response:
+            request = httpx.Request("POST", url, headers=headers, json=json)
+            return httpx.Response(524, request=request, text="error code: 524")
+
+    backend = PydanticAIGatewayBackend(
+        api_key="gateway-key",
+        base_url="https://gateway.example.com",
+        route=None,
+        max_concurrency=0,
+    )
+    model = backend._build_model(
+        provider_id="anthropic_bedrock",
+        model_name="us.anthropic.claude-sonnet-4-6",
+        http_client=_FakeSyncClient(),
+    )
+
+    with pytest.raises(ModelHTTPError, match="status_code: 524"):
+        llm_backend_module._invoke_model_response_sync(
+            model=model,
+            request=LLMInvocationRequest(
+                prompt="Summarize this document",
+                system_prompt="Return a short summary.",
+                model="us.anthropic.claude-sonnet-4-6",
+                model_settings={"temperature": 0.2, "max_tokens": 1024},
+            ),
+            provider_id="anthropic_bedrock",
+            model_name="us.anthropic.claude-sonnet-4-6",
+            count_input_tokens_fn=lambda: None,
+        )
+
+
+def test_extract_http_status_error_details_normalizes_html_524_page() -> None:
+    request = httpx.Request("POST", "https://gateway.example.com/bedrock/model/us.anthropic.claude-sonnet-4-6/converse")
+    response = httpx.Response(
+        524,
+        request=request,
+        text=(
+            "<!DOCTYPE html><html><head>"
+            "<title>bedrock-runtime.us-west-2.amazonaws.com | 524: A timeout occurred</title>"
+            "</head><body>timeout</body></html>"
+        ),
+    )
+    error = httpx.HTTPStatusError("524 A timeout occurred", request=request, response=response)
+
+    details = extract_http_status_error_details(error)
+
+    assert details is not None
+    assert details.status_code == 524
+    assert details.message == "524: A timeout occurred (origin: bedrock-runtime.us-west-2.amazonaws.com)"
+
+
+def test_gateway_backend_verify_access_uses_sync_client_for_bedrock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeSyncClient:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def post(self, url: str, *, json: dict[str, Any], headers: dict[str, str], timeout: Any) -> httpx.Response:
+            request = httpx.Request("POST", url, headers=headers)
+            return httpx.Response(
+                200,
+                request=request,
+                json={
+                    "output": {"message": {"content": [{"text": "OK"}]}},
+                    "usage": {"inputTokens": 1, "outputTokens": 1},
+                    "stopReason": "end_turn",
+                    "ResponseMetadata": {"RequestId": "req_verify"},
+                },
+            )
+
+        def close(self) -> None:
+            self.closed = True
+
+    backend = PydanticAIGatewayBackend(
+        api_key="gateway-key",
+        base_url="https://gateway.example.com",
+        route=None,
+        max_concurrency=0,
+    )
+    client = _FakeSyncClient()
+    monkeypatch.setattr(
+        backend,
+        "_build_gateway_bedrock_http_client",
+        lambda *, timeout_seconds=None: client,
+        raising=True,
+    )
+
+    result = backend.verify_gateway_access(
+        "anthropic_bedrock",
+        "us.anthropic.claude-sonnet-4-6",
+        force=True,
+    )
+
+    assert result.ok is True
+    assert client.closed is True
 
 
 def test_gateway_backend_uses_latest_settings_values_when_not_explicit(

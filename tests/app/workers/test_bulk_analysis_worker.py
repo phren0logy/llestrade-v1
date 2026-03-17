@@ -1488,6 +1488,32 @@ def test_bulk_worker_map_max_output_tokens_reduce_gateway_anthropic_requests(tmp
     ) == 32_000
 
 
+def test_bulk_worker_map_max_output_tokens_reduce_gateway_bedrock_requests(tmp_path: Path) -> None:
+    gateway_worker = BulkAnalysisWorker(
+        project_dir=tmp_path,
+        group=BulkAnalysisGroup.create("Group"),
+        files=[],
+        metadata=ProjectMetadata(case_name="Case"),
+        force_rerun=False,
+        llm_backend=_FlakyGatewayRateLimitBackend(),
+    )
+    direct_worker = BulkAnalysisWorker(
+        project_dir=tmp_path,
+        group=BulkAnalysisGroup.create("Group"),
+        files=[],
+        metadata=ProjectMetadata(case_name="Case"),
+        force_rerun=False,
+        llm_backend=_NoNativeBackend(),
+    )
+
+    assert gateway_worker._map_max_output_tokens(
+        ProviderConfig(provider_id="anthropic_bedrock", model="us.anthropic.claude-sonnet-4-6")
+    ) == 12_000
+    assert direct_worker._map_max_output_tokens(
+        ProviderConfig(provider_id="anthropic_bedrock", model="us.anthropic.claude-sonnet-4-6")
+    ) == 32_000
+
+
 def test_bulk_worker_gateway_anthropic_operational_budget_uses_metadata_budget_ratio(tmp_path: Path) -> None:
     group = BulkAnalysisGroup.create("Group")
     group.model_context_window = 1_000_000
@@ -1508,6 +1534,33 @@ def test_bulk_worker_gateway_anthropic_operational_budget_uses_metadata_budget_r
     )
     operational_budget = worker._operational_request_budget(
         ProviderConfig(provider_id="anthropic", model="claude-sonnet-4-6"),
+        runtime_budget,
+    )
+
+    assert runtime_budget == 651_420
+    assert operational_budget == 260_568
+
+
+def test_bulk_worker_gateway_bedrock_operational_budget_uses_metadata_budget_ratio(tmp_path: Path) -> None:
+    group = BulkAnalysisGroup.create("Group")
+    group.model_context_window = 1_000_000
+    worker = BulkAnalysisWorker(
+        project_dir=tmp_path,
+        group=group,
+        files=[],
+        metadata=ProjectMetadata(case_name="Case"),
+        force_rerun=False,
+        llm_backend=_FlakyGatewayRateLimitBackend(),
+    )
+
+    runtime_budget = worker._max_input_budget(
+        raw_context_window=1_000_000,
+        max_output_tokens=worker._map_max_output_tokens(
+            ProviderConfig(provider_id="anthropic_bedrock", model="us.anthropic.claude-sonnet-4-6")
+        ),
+    )
+    operational_budget = worker._operational_request_budget(
+        ProviderConfig(provider_id="anthropic_bedrock", model="us.anthropic.claude-sonnet-4-6"),
         runtime_budget,
     )
 
@@ -1829,6 +1882,82 @@ def test_bulk_worker_retries_gateway_server_error_with_smaller_chunks(
     assert result == "combined:summary|summary"
     assert run_details["chunk_count"] == 2
     assert chunk_targets == [200_000, 150_000]
+    assert backend.calls == 3
+
+
+def test_bulk_worker_falls_back_to_chunking_after_first_gateway_server_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_dir = tmp_path
+    source_path = project_dir / "converted_documents" / "doc.md"
+    source_path.parent.mkdir(parents=True, exist_ok=True)
+    source_path.write_text("body", encoding="utf-8")
+
+    document = worker_module.BulkAnalysisDocument(
+        source_path=source_path,
+        relative_path="converted_documents/doc.md",
+        output_path=project_dir / "bulk_analysis" / "group" / "doc.md",
+    )
+    group = BulkAnalysisGroup.create("Group")
+    group.provider_id = "anthropic_bedrock"
+    group.model = "us.anthropic.claude-sonnet-4-6"
+    group.model_context_window = 1_000_000
+    backend = _FlakyGatewayServerBackend()
+    worker = BulkAnalysisWorker(
+        project_dir=project_dir,
+        group=group,
+        files=[],
+        metadata=ProjectMetadata(case_name="Case"),
+        force_rerun=False,
+        llm_backend=backend,
+    )
+    bundle = PromptBundle(system_template="System", user_template="Analyze {document_content}")
+    provider = worker._create_provider(ProviderConfig(provider_id=group.provider_id, model=group.model))
+    source_context = SourceFileContext(
+        absolute_path=source_path.resolve(),
+        relative_path=document.relative_path,
+    )
+    manifest_path = _manifest_path(project_dir, group)
+    recovery_store = worker_module.BulkRecoveryStore(project_dir / "bulk_analysis" / group.folder_name)
+    recovery_manifest = recovery_store.load_map_manifest()
+
+    monkeypatch.setattr(worker, "_load_document", lambda _document: ("body", {}, source_context))
+    monkeypatch.setattr(worker_module, "should_chunk", lambda *_args, **_kwargs: (False, 48_822, 200_000))
+    monkeypatch.setattr(worker, "_count_prompt_tokens", lambda *_args, **_kwargs: 10_000)
+    monkeypatch.setattr(worker, "_gateway_rate_limit_retry_delay", lambda *_args, **_kwargs: 0.0)
+    monkeypatch.setattr(
+        worker_module,
+        "combine_chunk_summaries_hierarchical",
+        lambda summaries, **_kwargs: "combined:" + "|".join(summaries),
+    )
+
+    chunk_targets: list[int] = []
+
+    def _fake_generate(*, initial_chunk_tokens, **_kwargs):
+        chunk_targets.append(initial_chunk_tokens)
+        return ["chunk-one", "chunk-two"]
+
+    monkeypatch.setattr(worker, "_generate_fitting_chunks", _fake_generate)
+
+    result, run_details, _placeholders = worker._process_document(
+        provider=provider,
+        provider_config=ProviderConfig(provider_id=group.provider_id, model=group.model),
+        bundle=bundle,
+        system_prompt="System",
+        document=document,
+        global_placeholders={},
+        manifest={"version": 2, "signature": None, "documents": {}},
+        prompt_hash="prompt-hash",
+        manifest_path=manifest_path,
+        recovery_store=recovery_store,
+        recovery_manifest=recovery_manifest,
+    )
+
+    assert result == "combined:summary|summary"
+    assert run_details["chunking"] is True
+    assert run_details["chunk_count"] == 2
+    assert chunk_targets == [24_411]
     assert backend.calls == 3
 
 

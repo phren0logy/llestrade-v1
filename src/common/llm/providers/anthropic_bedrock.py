@@ -7,6 +7,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+from contextlib import contextmanager
 from threading import Lock
 from typing import Any, Dict, List, Optional
 
@@ -17,10 +18,21 @@ from ..bedrock_catalog import BedrockModel, DEFAULT_BEDROCK_MODELS, list_bedrock
 from ..tokens import TokenCounter
 
 logger = logging.getLogger(__name__)
+_botocore_credentials_logger = logging.getLogger("botocore.credentials")
 
 _ATTEMPT_LOCK = Lock()
 _MAX_INIT_ATTEMPTS = 3
 _INIT_ATTEMPTS = 0
+
+
+@contextmanager
+def _suppress_botocore_credentials_info():
+    previous_level = _botocore_credentials_logger.level
+    _botocore_credentials_logger.setLevel(max(previous_level, logging.WARNING))
+    try:
+        yield
+    finally:
+        _botocore_credentials_logger.setLevel(previous_level)
 
 
 def _should_attempt_initialization() -> bool:
@@ -141,10 +153,11 @@ class AnthropicBedrockProvider(BaseLLMProvider):
                 try:
                     import boto3  # type: ignore
 
-                    session = boto3.Session(
-                        profile_name=self._aws_profile,
-                        region_name=self._aws_region,
-                    )
+                    with _suppress_botocore_credentials_info():
+                        session = boto3.Session(
+                            profile_name=self._aws_profile,
+                            region_name=self._aws_region,
+                        )
                     client_kwargs["session"] = session
                 except Exception as exc:
                     logger.error("Failed to create AWS session for profile '%s': %s", self._aws_profile, exc)

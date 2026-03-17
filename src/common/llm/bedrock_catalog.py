@@ -7,11 +7,13 @@ from __future__ import annotations
 import logging
 import re
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from threading import Lock
 from typing import Iterable, List, Optional
 
 logger = logging.getLogger(__name__)
+_botocore_credentials_logger = logging.getLogger("botocore.credentials")
 
 
 @dataclass(frozen=True)
@@ -48,6 +50,16 @@ _CACHE_TTL_SECONDS = 900.0  # 15 minutes
 DEFAULT_BEDROCK_MODELS: List[BedrockModel] = list(_DEFAULT_MODELS)
 
 
+@contextmanager
+def _suppress_botocore_credentials_info():
+    previous_level = _botocore_credentials_logger.level
+    _botocore_credentials_logger.setLevel(max(previous_level, logging.WARNING))
+    try:
+        yield
+    finally:
+        _botocore_credentials_logger.setLevel(previous_level)
+
+
 def _create_session(profile: Optional[str]):
     """Create a boto3 session using the optional profile name."""
     try:
@@ -60,7 +72,8 @@ def _create_session(profile: Optional[str]):
     session_kwargs = {}
     if profile:
         session_kwargs["profile_name"] = profile
-    return boto3.Session(**session_kwargs)
+    with _suppress_botocore_credentials_info():
+        return boto3.Session(**session_kwargs)
 
 
 def _fetch_models_from_bedrock(
@@ -75,7 +88,8 @@ def _fetch_models_from_bedrock(
         if region:
             client_kwargs["region_name"] = region
 
-        bedrock_client = session.client("bedrock", **client_kwargs)
+        with _suppress_botocore_credentials_info():
+            bedrock_client = session.client("bedrock", **client_kwargs)
         discovered_region = bedrock_client.meta.region_name
 
         models: List[BedrockModel] = []

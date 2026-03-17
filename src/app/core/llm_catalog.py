@@ -22,6 +22,7 @@ from pydantic_ai.usage import RequestUsage
 from src.config.paths import app_config_dir
 
 logger = logging.getLogger(__name__)
+_botocore_credentials_logger = logging.getLogger("botocore.credentials")
 
 SUPPORTED_SELECTOR_PROVIDER_IDS: tuple[str, ...] = (
     "anthropic",
@@ -93,6 +94,16 @@ _BEDROCK_ANTHROPIC_ALIASES: dict[str, str] = {
 }
 
 CatalogTransport = Literal["direct", "gateway"]
+
+
+@contextmanager
+def _suppress_botocore_credentials_info() -> Any:
+    previous_level = _botocore_credentials_logger.level
+    _botocore_credentials_logger.setLevel(max(previous_level, logging.WARNING))
+    try:
+        yield
+    finally:
+        _botocore_credentials_logger.setLevel(previous_level)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1472,9 +1483,10 @@ def _discover_bedrock_models_live() -> tuple[_DiscoveredModel, ...]:
         or None
     )
     try:
-        session = boto3.session.Session(profile_name=profile, region_name=region)
-        client = session.client("bedrock", region_name=region)
-        response = client.list_foundation_models(byProvider="Anthropic")
+        with _suppress_botocore_credentials_info():
+            session = boto3.session.Session(profile_name=profile, region_name=region)
+            client = session.client("bedrock", region_name=region)
+            response = client.list_foundation_models(byProvider="Anthropic")
     except Exception:
         logger.debug("Unable to discover Bedrock Anthropic models live", exc_info=True)
         return ()

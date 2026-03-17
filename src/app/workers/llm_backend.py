@@ -6,9 +6,12 @@ import asyncio
 import hashlib
 import logging
 import os
+import re
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Literal, Mapping, Optional, Protocol
+from urllib.parse import quote
 
 import httpx
 from pydantic_ai.settings import ModelSettings
@@ -26,6 +29,7 @@ _MODEL_REQUEST_RETRY_ATTEMPTS = 3
 _MODEL_REQUEST_RETRY_BASE_DELAY_SECONDS = 0.5
 _MODEL_REQUEST_RETRY_MAX_DELAY_SECONDS = 2.0
 _RETRYABLE_MODEL_HTTP_STATUS_CODES: frozenset[int] = frozenset({408, 425, 429, 500, 502, 503, 504, 524})
+_HTML_TITLE_RE = re.compile(r"<title>\s*([^<]+?)\s*</title>", re.IGNORECASE | re.DOTALL)
 
 _BEDROCK_MODEL_ALIASES: dict[str, str] = {
     "claude-sonnet-4-6": "us.anthropic.claude-sonnet-4-6",
@@ -425,6 +429,193 @@ def _pydantic_ai_instrumentation() -> Any | None:
         return None
 
 
+def _gateway_route_base_url(
+    *,
+    api_key: str | None,
+    base_url: str | None,
+    route: str | None,
+    upstream_provider: str,
+) -> str:
+    from pydantic_ai.providers import gateway as gateway_module
+
+    resolved_api_key = str(api_key or "").strip()
+    if not resolved_api_key:
+        raise RuntimeError("No Pydantic AI Gateway app key is configured.")
+
+    resolved_base_url = str(base_url or "").strip() or gateway_module._infer_base_url(resolved_api_key)
+    resolved_route = str(route or "").strip() or gateway_module.normalize_gateway_provider(upstream_provider)
+    return resolved_base_url.rstrip("/") + "/" + resolved_route.lstrip("/")
+
+
+class _GatewayBedrockProvider:
+    """Provider shim that keeps Bedrock gateway calls on plain HTTP."""
+
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        base_url: str,
+        http_client: Any | None = None,
+    ) -> None:
+        self._base_url = base_url.rstrip("/")
+        self._client = _GatewayBedrockClient(
+            api_key=api_key,
+            base_url=self._base_url,
+            http_client=http_client,
+        )
+
+    @property
+    def name(self) -> str:
+        return "bedrock"
+
+    @property
+    def base_url(self) -> str:
+        return self._base_url
+
+    @property
+    def client(self) -> Any:
+        return self._client
+
+    @staticmethod
+    def model_profile(model_name: str) -> Any | None:
+        from pydantic_ai.providers.bedrock import BedrockProvider
+
+        return BedrockProvider.model_profile(model_name)
+
+
+class _GatewayBedrockClient:
+    """Minimal Bedrock Converse client over the gateway HTTP transport."""
+
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        base_url: str,
+        http_client: Any | None = None,
+        read_timeout_seconds: float = 300.0,
+        connect_timeout_seconds: float = 60.0,
+    ) -> None:
+        self._api_key = api_key
+        self._base_url = base_url.rstrip("/")
+        self._http_client = http_client
+        self._timeout = httpx.Timeout(read_timeout_seconds, connect=connect_timeout_seconds)
+
+    @property
+    def meta(self) -> Any:
+        class _Meta:
+            endpoint_url = self._base_url
+
+        return _Meta()
+
+    def converse(self, **params: Any) -> dict[str, Any]:
+        response = self._post("Converse", params, operation_path="converse")
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise self._client_error(
+                operation_name="Converse",
+                status_code=502,
+                message="Gateway Bedrock response was not valid JSON.",
+                response=None,
+            ) from exc
+        if not isinstance(payload, dict):
+            raise self._client_error(
+                operation_name="Converse",
+                status_code=502,
+                message="Gateway Bedrock response was not a JSON object.",
+                response=response,
+            )
+        return payload
+
+    def converse_stream(self, **params: Any) -> dict[str, Any]:
+        raise self._client_error(
+            operation_name="ConverseStream",
+            status_code=501,
+            message="Gateway Bedrock streaming is not supported by this client.",
+            response=None,
+        )
+
+    def _post(self, operation_name: str, params: dict[str, Any], *, operation_path: str) -> httpx.Response:
+        model_id = str(params.get("modelId") or "").strip()
+        if not model_id:
+            raise self._client_error(
+                operation_name=operation_name,
+                status_code=400,
+                message="Bedrock gateway request is missing modelId.",
+                response=None,
+            )
+        url = f"{self._base_url}/model/{quote(model_id, safe='')}/{operation_path}"
+        headers = {"Authorization": f"Bearer {self._api_key}"}
+        with self._request_client() as client:
+            response = client.post(url, json=params, headers=headers, timeout=self._timeout)
+        if response.status_code >= 400:
+            raise self._client_error(
+                operation_name=operation_name,
+                status_code=response.status_code,
+                message=self._response_error_message(response),
+                response=response,
+            )
+        return response
+
+    @contextmanager
+    def _request_client(self) -> Any:
+        if self._http_client is not None:
+            yield self._http_client
+            return
+        with httpx.Client() as client:
+            yield client
+
+    @staticmethod
+    def _response_error_message(response: httpx.Response) -> str:
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = None
+        if isinstance(payload, dict):
+            error = payload.get("error")
+            if isinstance(error, dict):
+                message = _normalize_http_error_message(
+                    response.status_code,
+                    str(error.get("message") or error.get("Message") or "").strip(),
+                )
+                if message:
+                    return message
+            message = _normalize_http_error_message(
+                response.status_code,
+                str(payload.get("message") or payload.get("Message") or "").strip(),
+            )
+            if message:
+                return message
+        text = _normalize_http_error_message(response.status_code, str(response.text or "").strip())
+        return text or f"Gateway Bedrock request failed with HTTP {response.status_code}."
+
+    @staticmethod
+    def _client_error(
+        *,
+        operation_name: str,
+        status_code: int,
+        message: str,
+        response: httpx.Response | None,
+    ) -> Exception:
+        from botocore.exceptions import ClientError
+
+        headers = dict(response.headers.items()) if response is not None else {}
+        return ClientError(
+            {
+                "Error": {
+                    "Message": message,
+                    "Code": str(status_code),
+                },
+                "ResponseMetadata": {
+                    "HTTPStatusCode": status_code,
+                    "HTTPHeaders": headers,
+                    "RetryAttempts": 0,
+                },
+            },
+            operation_name,
+        )
+
+
 def _count_tokens_with_model(
     *,
     model: Any,
@@ -562,12 +753,18 @@ def _response_error_message(response: Any) -> str:
         payload = None
 
     if isinstance(payload, dict):
-        message = str(payload.get("message") or payload.get("error") or "").strip()
+        message = _normalize_http_error_message(
+            int(getattr(response, "status_code", 0) or 0),
+            str(payload.get("message") or payload.get("error") or "").strip(),
+        )
         if message:
             return message
 
     try:
-        text = str(response.text or "").strip()
+        text = _normalize_http_error_message(
+            int(getattr(response, "status_code", 0) or 0),
+            str(response.text or "").strip(),
+        )
     except Exception:
         text = ""
     if text:
@@ -576,6 +773,31 @@ def _response_error_message(response: Any) -> str:
     status_code = int(getattr(response, "status_code", 0) or 0) or "HTTP"
     reason = str(getattr(response, "reason_phrase", "") or "").strip()
     return f"{status_code} {reason}".strip()
+
+
+def _normalize_http_error_message(status_code: int, message: str) -> str:
+    text = str(message or "").strip()
+    if not text:
+        return ""
+    lowered = text.lower()
+    if "<html" not in lowered and "<!doctype html" not in lowered:
+        return text
+
+    title_match = _HTML_TITLE_RE.search(text)
+    if title_match:
+        title = re.sub(r"\s+", " ", title_match.group(1)).strip()
+        if "|" in title:
+            host, _, detail = title.partition("|")
+            host = host.strip()
+            detail = detail.strip()
+            if host and detail:
+                return f"{detail} (origin: {host})"
+        if title:
+            return title
+
+    if status_code == 524:
+        return "524 A timeout occurred"
+    return f"{status_code} Upstream gateway request failed"
 
 
 def extract_http_status_error_details(exc: BaseException) -> HTTPStatusErrorDetails | None:
@@ -594,9 +816,14 @@ def extract_http_status_error_details(exc: BaseException) -> HTTPStatusErrorDeta
             body = getattr(candidate, "body", None)
             message = ""
             if isinstance(body, dict):
-                message = str(body.get("message") or body.get("error") or "").strip()
+                error = body.get("error")
+                if isinstance(error, dict):
+                    message = str(error.get("message") or error.get("Message") or "").strip()
+                if not message:
+                    message = str(body.get("message") or body.get("error") or "").strip()
             elif body is not None:
                 message = str(body).strip()
+            message = _normalize_http_error_message(status_code, message)
             if not message:
                 message = str(candidate) or candidate.__class__.__name__
             return HTTPStatusErrorDetails(
@@ -1107,15 +1334,22 @@ class PydanticAIGatewayBackend:
 
     def _build_model(self, *, provider_id: str, model_name: str, http_client: Any | None = None) -> Any:
         from pydantic_ai.models import infer_model
+        from pydantic_ai.models.bedrock import BedrockConverseModel
         from pydantic_ai.models.concurrency import limit_model_concurrency
 
-        model = infer_model(
-            self._gateway_model_id(provider_id=provider_id, model_name=model_name),
-            provider_factory=lambda provider_name: self._gateway_provider_factory(
-                provider_name,
-                http_client=http_client,
-            ),
-        )
+        if provider_id == "anthropic_bedrock":
+            model = BedrockConverseModel(
+                model_name,
+                provider=self._gateway_bedrock_provider(http_client=http_client),
+            )
+        else:
+            model = infer_model(
+                self._gateway_model_id(provider_id=provider_id, model_name=model_name),
+                provider_factory=lambda provider_name: self._gateway_provider_factory(
+                    provider_name,
+                    http_client=http_client,
+                ),
+            )
         limiter = self._gateway_concurrency_limiter()
         if limiter is None:
             return model
@@ -1155,6 +1389,18 @@ class PydanticAIGatewayBackend:
             base_url=self._current_base_url(),
             route=self._current_route(),
             http_client=http_client or self._gateway_http_client(),
+        )
+
+    def _gateway_bedrock_provider(self, *, http_client: Any | None = None) -> Any:
+        return _GatewayBedrockProvider(
+            api_key=str(self._current_api_key() or "").strip(),
+            base_url=_gateway_route_base_url(
+                api_key=self._current_api_key(),
+                base_url=self._current_base_url(),
+                route=self._current_route(),
+                upstream_provider="bedrock",
+            ),
+            http_client=http_client,
         )
 
     def _current_api_key(self) -> str | None:
@@ -1212,6 +1458,16 @@ class PydanticAIGatewayBackend:
         if timeout_seconds and timeout_seconds > 0:
             client_kwargs["timeout"] = timeout_seconds
         return AsyncClient(**client_kwargs)
+
+    def _build_gateway_bedrock_http_client(self, *, timeout_seconds: float | None = None) -> Any:
+        timeout = self._bedrock_timeout(timeout_seconds=timeout_seconds)
+        return httpx.Client(timeout=timeout)
+
+    @staticmethod
+    def _bedrock_timeout(*, timeout_seconds: float | None = None) -> httpx.Timeout:
+        if timeout_seconds and timeout_seconds > 0:
+            return httpx.Timeout(timeout_seconds)
+        return httpx.Timeout(300.0, connect=60.0)
 
     @staticmethod
     def _resolve_max_concurrency(value: int | None) -> int | None:
@@ -1271,7 +1527,11 @@ class PydanticAIGatewayBackend:
         route: str | None,
         timeout_seconds: float,
     ) -> GatewayAccessCheck:
-        verify_client = self._build_gateway_http_client(timeout_seconds=timeout_seconds)
+        verify_client = (
+            self._build_gateway_bedrock_http_client(timeout_seconds=timeout_seconds)
+            if provider_id == "anthropic_bedrock"
+            else self._build_gateway_http_client(timeout_seconds=timeout_seconds)
+        )
         request = LLMInvocationRequest(
             prompt=self._VERIFY_PROMPT,
             system_prompt=self._VERIFY_SYSTEM_PROMPT,
@@ -1310,7 +1570,10 @@ class PydanticAIGatewayBackend:
         finally:
             if verify_client is not None:
                 try:
-                    asyncio.run(verify_client.aclose())
+                    if hasattr(verify_client, "aclose"):
+                        asyncio.run(verify_client.aclose())
+                    else:
+                        verify_client.close()
                 except Exception:
                     logger.debug("Unable to close temporary gateway probe HTTP client", exc_info=True)
 

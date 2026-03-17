@@ -137,7 +137,7 @@ class _GatewayServerError(RuntimeError):
 _MANIFEST_VERSION = 2
 _MTIME_TOLERANCE = 1e-6
 _DEFAULT_MAX_OUTPUT_TOKENS = 32_000
-_GATEWAY_ANTHROPIC_MAP_MAX_OUTPUT_TOKENS = 12_000
+_GATEWAY_MAP_MAX_OUTPUT_TOKENS = 12_000
 _MIN_CHUNK_TOKEN_TARGET = 4_000
 _MAX_PROVIDER_LIMIT_RETRIES = 5
 _MAX_GATEWAY_RATE_LIMIT_RETRIES = 3
@@ -878,6 +878,16 @@ class BulkAnalysisWorker(DashboardWorker):
             full_prompt_tokens,
             'yes' if needs_chunking else 'no',
         )
+        prompt_overhead_budget = self._chunk_prompt_overhead_budget(
+            provider=provider,
+            provider_config=provider_config,
+            bundle=bundle,
+            system_prompt=system_prompt,
+            document=document,
+            placeholder_values=doc_placeholders,
+            max_tokens=map_max_tokens,
+        )
+        fallback_chunk_target_tokens: int | None = None
 
         if not needs_chunking:
             run_details["chunk_count"] = 1
@@ -921,22 +931,35 @@ class BulkAnalysisWorker(DashboardWorker):
                     f"Provider reduced effective prompt budget for {document.relative_path}: "
                     f"{previous_runtime_input_budget} -> {learned_limit} tokens"
                 )
+            except (_GatewayRateLimitError, _GatewayServerError) as exc:
+                needs_chunking = True
+                run_details["chunking"] = True
+                fallback_chunk_target_tokens = self._gateway_fallback_chunk_target(
+                    token_count=token_count,
+                    request_budget=preflight_input_budget or input_budget,
+                    prompt_overhead_budget=prompt_overhead_budget,
+                )
+                if isinstance(exc, _GatewayRateLimitError):
+                    delay_seconds = self._gateway_rate_limit_retry_delay(exc, 1)
+                    self.log_message.emit(
+                        f"Gateway rate limited {document.relative_path}; "
+                        f"retrying in {delay_seconds:.1f}s with chunked processing"
+                    )
+                    time.sleep(delay_seconds)
+                else:
+                    self.log_message.emit(
+                        f"Gateway server error {exc.status_code} for {document.relative_path}; "
+                        f"retrying with chunked processing"
+                    )
 
         chunk_fit_count_mode = self._chunk_fit_count_mode(provider_config)
-        prompt_overhead_budget = self._chunk_prompt_overhead_budget(
-            provider=provider,
-            provider_config=provider_config,
-            bundle=bundle,
-            system_prompt=system_prompt,
-            document=document,
-            placeholder_values=doc_placeholders,
-            max_tokens=map_max_tokens,
-        )
         chunk_target_tokens = self._initial_chunk_content_budget(
             request_budget=preflight_input_budget or input_budget,
             prompt_overhead_budget=prompt_overhead_budget,
             default_chunk_tokens=default_chunk_tokens,
         )
+        if fallback_chunk_target_tokens is not None:
+            chunk_target_tokens = fallback_chunk_target_tokens
         if not self._uses_operational_gateway_budget(provider_config):
             chunk_target_tokens = self._chunk_target_from_budget(
                 input_budget=preflight_input_budget or input_budget,
@@ -1802,17 +1825,14 @@ class BulkAnalysisWorker(DashboardWorker):
 
     def _operational_request_budget(self, provider_config: ProviderConfig, runtime_input_budget: int) -> int:
         budget = runtime_input_budget
-        if (
-            backend_transport_name(self._llm_backend) == "gateway"
-            and provider_config.provider_id == "anthropic"
-        ):
+        if self._uses_operational_gateway_budget(provider_config):
             budget = int(runtime_input_budget * _GATEWAY_ANTHROPIC_REQUEST_BUDGET_RATIO)
         return max(min(runtime_input_budget, budget), _MIN_CHUNK_TOKEN_TARGET)
 
     def _uses_operational_gateway_budget(self, provider_config: ProviderConfig) -> bool:
         return (
             backend_transport_name(self._llm_backend) == "gateway"
-            and provider_config.provider_id == "anthropic"
+            and provider_config.provider_id in {"anthropic", "anthropic_bedrock"}
         )
 
     @staticmethod
@@ -1861,12 +1881,20 @@ class BulkAnalysisWorker(DashboardWorker):
         return overhead_tokens + _DEFAULT_REQUEST_OVERHEAD_SAFETY_MARGIN
 
     def _map_max_output_tokens(self, provider_config: ProviderConfig) -> int:
-        if (
-            backend_transport_name(self._llm_backend) == "gateway"
-            and provider_config.provider_id == "anthropic"
-        ):
-            return _GATEWAY_ANTHROPIC_MAP_MAX_OUTPUT_TOKENS
+        if self._uses_operational_gateway_budget(provider_config):
+            return _GATEWAY_MAP_MAX_OUTPUT_TOKENS
         return _DEFAULT_MAX_OUTPUT_TOKENS
+
+    @staticmethod
+    def _gateway_fallback_chunk_target(
+        *,
+        token_count: int,
+        request_budget: int,
+        prompt_overhead_budget: int,
+    ) -> int:
+        available = max(request_budget - prompt_overhead_budget, _MIN_CHUNK_TOKEN_TARGET)
+        reduced = max(token_count // 2, _MIN_CHUNK_TOKEN_TARGET)
+        return max(min(available, reduced), _MIN_CHUNK_TOKEN_TARGET)
 
     def _chunk_fit_count_mode(self, provider_config: ProviderConfig) -> str:
         capabilities = self._llm_backend.capabilities(
