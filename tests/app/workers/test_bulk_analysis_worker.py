@@ -1980,21 +1980,3 @@ def test_bulk_worker_extract_page_numbers_uses_canonical_marker_regex(tmp_path: 
     )
 
     assert worker._extract_page_numbers(content) == [1, 2]
-
-
-def test_bulk_worker_skips_ledger_when_chunk_has_no_page_markers(tmp_path: Path) -> None:
-    worker = BulkAnalysisWorker(
-        project_dir=tmp_path,
-        group=BulkAnalysisGroup.create("Group"),
-        files=[],
-        metadata=ProjectMetadata(case_name="Case"),
-        force_rerun=False,
-    )
-
-    class _FailingCitationStore:
-        def build_evidence_ledger(self, **_kwargs):  # noqa: ANN003
-            raise AssertionError("ledger should not be built without page markers")
-
-    worker._citation_store = _FailingCitationStore()  # type: ignore[assignment]
-
-    assert worker._build_document_evidence_ledger(relative_path="doc.md", content="no markers here") == ""

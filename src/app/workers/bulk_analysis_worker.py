@@ -2575,10 +2575,6 @@ class BulkAnalysisWorker(DashboardWorker):
     def _append_citation_appendix(self, system_prompt: str, appendix: str) -> str:
         return append_generated_prompt_section(system_prompt, appendix)
 
-    def _build_document_evidence_ledger(self, *, relative_path: str, content: str) -> str:
-        entries = self._build_document_citation_entries(relative_path=relative_path, content=content)
-        return self._render_citation_appendix(entries=entries)
-
     def _build_document_citation_entries(
         self,
         *,

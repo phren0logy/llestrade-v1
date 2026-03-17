@@ -760,7 +760,6 @@ def test_report_draft_trace_attributes_match_between_legacy_and_gateway(
         transcript_text="",
         system_prompt="System prompt",
         placeholder_map={},
-        evidence_ledger="",
     )
 
     gateway_worker = DraftReportWorker(
@@ -787,7 +786,6 @@ def test_report_draft_trace_attributes_match_between_legacy_and_gateway(
         transcript_text="",
         system_prompt="System prompt",
         placeholder_map={},
-        evidence_ledger="",
     )
 
     assert legacy_outputs[0]["title"] == "Section One"
@@ -870,7 +868,6 @@ def test_report_draft_passes_computed_input_budget_to_backend(
         transcript_text="",
         system_prompt="System prompt",
         placeholder_map={},
-        evidence_ledger="",
     )
 
     assert outputs[0]["title"] == "Section One"
@@ -917,7 +914,6 @@ def test_report_draft_applies_reasoning_settings_to_backend_request(
         transcript_text="",
         system_prompt="System prompt",
         placeholder_map={},
-        evidence_ledger="",
     )
 
     assert backend.requests[0].model_settings["anthropic_thinking"] == {
@@ -1058,7 +1054,6 @@ def test_report_draft_emits_progress_detail_for_sections(
         transcript_text="",
         system_prompt="System prompt",
         placeholder_map={},
-        evidence_ledger="",
     )
 
     assert [detail.phase for detail in details] == ["section_started", "section_completed"]

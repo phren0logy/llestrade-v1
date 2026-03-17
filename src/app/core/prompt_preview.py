@@ -13,7 +13,7 @@ from src.app.core.bulk_analysis_runner import load_prompts
 from src.app.core.bulk_analysis_runner import _metadata_context  # type: ignore[attr-defined]
 from src.app.core.project_manager import ProjectMetadata
 from src.app.core.bulk_analysis_groups import BulkAnalysisGroup
-from src.app.core.citations import CitationLedgerEntry, CitationStore, PAGE_MARKER_RE, parse_citation_tokens, strip_citation_tokens
+from src.app.core.citations import CitationLedgerEntry, CitationStore, PAGE_MARKER_RE, strip_citation_tokens
 from src.app.core.prompt_assembly import append_generated_prompt_section
 from src.app.core.prompt_placeholders import get_prompt_spec, format_prompt
 from src.app.core.placeholders.system import SourceFileContext
@@ -283,20 +283,6 @@ def _build_combined_bulk_citation_appendix(
             if len(reusable_ev_ids) >= 220:
                 break
             continue
-
-        try:
-            text = path.read_text(encoding="utf-8")
-        except Exception:
-            continue
-        for token in parse_citation_tokens(text):
-            if token.ev_id in seen_ids:
-                continue
-            seen_ids.add(token.ev_id)
-            reusable_ev_ids.append(token.ev_id)
-            if len(reusable_ev_ids) >= 220:
-                break
-        if len(reusable_ev_ids) >= 220:
-            break
 
     entries: list[CitationLedgerEntry] = []
     if converted_relatives:

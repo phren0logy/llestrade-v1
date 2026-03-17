@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
@@ -11,7 +10,6 @@ from src.app.core.citations import (
     CitationLedgerEntry,
     CitationRecordStats,
     CitationStore,
-    parse_citation_tokens,
     strip_citation_tokens,
 )
 from src.app.core.llm_catalog import calculate_usage_cost
@@ -37,7 +35,6 @@ from .llm_backend import (
     backend_transport_name,
 )
 from .progress import WorkerProgressDetail
-_CITATION_ID_RE = re.compile(r"^ev_[a-z0-9]{8,64}$")
 _MIN_REPORT_INPUT_BUDGET = 4_000
 
 
@@ -75,20 +72,6 @@ def build_report_citation_appendix(
             if len(reusable_ev_ids) >= 220:
                 break
             continue
-
-        try:
-            text = Path(str(absolute_raw)).read_text(encoding="utf-8")
-        except Exception:
-            continue
-        for token in parse_citation_tokens(text):
-            if token.ev_id in seen_ids or not _CITATION_ID_RE.match(token.ev_id):
-                continue
-            seen_ids.add(token.ev_id)
-            reusable_ev_ids.append(token.ev_id)
-            if len(reusable_ev_ids) >= 220:
-                break
-        if len(reusable_ev_ids) >= 220:
-            break
 
     entries: list[CitationLedgerEntry] = []
     if converted_relatives:

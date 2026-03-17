@@ -3,23 +3,20 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from src.app.core.citations import CitationStore, parse_citation_tokens
+from src.app.core.citations import CitationStore, strip_citation_tokens
 
 
-def test_parse_citation_tokens_reports_positions() -> None:
-    text = "Line one [CIT:ev_1234abcd5678ef00]\nNext [CIT:ev_abcdef0123456789]"
-    tokens = parse_citation_tokens(text)
+def test_strip_citation_tokens_removes_legacy_and_local_markers() -> None:
+    text = "Line one [CIT:ev_1234abcd5678ef00]\nNext [C1]"
+    stripped = strip_citation_tokens(text)
 
-    assert [token.ev_id for token in tokens] == [
-        "ev_1234abcd5678ef00",
-        "ev_abcdef0123456789",
-    ]
-    assert tokens[0].line == 1
-    assert tokens[1].line == 2
-    assert tokens[0].column > 1
+    assert "[CIT:ev_1234abcd5678ef00]" not in stripped
+    assert "[C1]" not in stripped
+    assert "Line one" in stripped
+    assert "Next" in stripped
 
 
-def test_citation_store_indexes_and_verifies_with_geometry(tmp_path: Path) -> None:
+def test_citation_store_indexes_and_records_local_citations_with_geometry(tmp_path: Path) -> None:
     project_dir = tmp_path
     store = CitationStore(project_dir)
 
@@ -78,22 +75,28 @@ def test_citation_store_indexes_and_verifies_with_geometry(tmp_path: Path) -> No
     assert ids
     ev_id = ids[0]
 
-    verified = store.verify_citations(
-        f"Patient reported insomnia and anxiety [CIT:{ev_id}]"
+    label_mapping = {"C1": ev_id}
+    verified = store.verify_local_citations(
+        "Patient reported insomnia and anxiety [C1]",
+        label_mapping=label_mapping,
     )
     assert len(verified) == 1
-    assert verified[0].status == "valid"
+    assert verified[0]["status"] == "valid"
 
-    unknown = store.verify_citations("Unsupported claim [CIT:ev_deadbeefdeadbeef]")
+    unknown = store.verify_local_citations(
+        "Unsupported claim [C9]",
+        label_mapping=label_mapping,
+    )
     assert len(unknown) == 1
-    assert unknown[0].status == "invalid"
+    assert unknown[0]["status"] == "invalid"
 
     output_path = project_dir / "bulk_analysis" / "group" / "outputs" / "doc_analysis.md"
     record = store.record_output_citations(
         output_path=output_path,
-        output_text=f"Patient reported insomnia and anxiety [CIT:{ev_id}]",
+        output_text="Patient reported insomnia and anxiety [C1]",
         generator="bulk_analysis_worker",
         prompt_hash="hash-1",
+        label_mapping=label_mapping,
     )
     assert record.total == 1
     assert record.valid == 1

@@ -3,7 +3,7 @@
 This module provides a per-project SQLite store used to:
 - index converted markdown segments into deterministic evidence IDs,
 - ingest Azure DI geometry spans from raw JSON sidecars,
-- parse/verify inline citation tokens in generated outputs,
+- verify local inline citation labels in generated outputs,
 - retrieve evidence bundles for future agentic verification and UI deep-linking.
 """
 
@@ -20,32 +20,11 @@ from pathlib import Path
 from typing import Dict, Iterable, Iterator, List, Mapping, Optional, Sequence
 
 PAGE_MARKER_RE = re.compile(r"<!---\s*.+?#page=(\d+)\s*--->")
-CITATION_TOKEN_RE = re.compile(r"\[CIT:(ev_[a-z0-9]{8,64})\]")
 LOCAL_CITATION_TOKEN_RE = re.compile(r"\[(C\d{1,5})\]")
 INLINE_CITATION_TOKEN_RE = re.compile(r"\[CIT:(ev_[a-z0-9]{8,64})\]|\[(C\d{1,5})\]")
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
 
 _SCHEMA_VERSION = 2
-
-
-@dataclass(frozen=True)
-class CitationToken:
-    token: str
-    ev_id: str
-    start_offset: int
-    end_offset: int
-    line: int
-    column: int
-
-
-@dataclass(frozen=True)
-class CitationVerification:
-    token: CitationToken
-    status: str
-    reason: str
-    confidence: float
-    document_relative_path: str | None
-    page_number: int | None
 
 
 @dataclass(frozen=True)
@@ -100,27 +79,6 @@ class OutputCitationMention:
     source_relative_path: str | None
     source_absolute_path: str | None
     page_number: int | None
-
-
-def parse_citation_tokens(text: str) -> list[CitationToken]:
-    """Return parsed citation tokens from ``text`` with source positions."""
-
-    tokens: list[CitationToken] = []
-    for match in CITATION_TOKEN_RE.finditer(text):
-        start = int(match.start())
-        line, column = _line_and_column(text, start)
-        tokens.append(
-            CitationToken(
-                token=match.group(0),
-                ev_id=match.group(1),
-                start_offset=start,
-                end_offset=int(match.end()),
-                line=line,
-                column=column,
-            )
-        )
-    return tokens
-
 
 def strip_citation_tokens(text: str) -> str:
     """Remove inline citation markers while preserving surrounding prose."""
@@ -236,105 +194,6 @@ class CitationStore:
             segments_indexed=len(segments),
             geometry_spans_indexed=len(geometry_spans),
         )
-
-    def build_evidence_ledger(
-        self,
-        *,
-        relative_path: str,
-        page_numbers: Sequence[int] | None = None,
-        max_entries: int = 120,
-        max_excerpt_chars: int = 180,
-    ) -> str:
-        """Return a compact ledger for prompt-time citation guidance."""
-
-        page_numbers = list(page_numbers or [])
-
-        with self._connection() as conn:
-            doc_row = conn.execute(
-                "SELECT id FROM documents WHERE relative_path = ?",
-                (relative_path,),
-            ).fetchone()
-            if doc_row is None:
-                return ""
-
-            document_id = int(doc_row[0])
-            query = (
-                "SELECT ev_id, page_number, text FROM segments "
-                "WHERE document_id = ? "
-            )
-            params: list[object] = [document_id]
-            if page_numbers:
-                placeholders = ",".join("?" for _ in page_numbers)
-                query += f"AND page_number IN ({placeholders}) "
-                params.extend(page_numbers)
-            query += "ORDER BY page_number ASC, ordinal ASC LIMIT ?"
-            params.append(int(max_entries))
-
-            rows = conn.execute(query, tuple(params)).fetchall()
-
-        if not rows:
-            return ""
-
-        lines: list[str] = []
-        lines.append("## Citation Evidence Ledger")
-        lines.append("Use only IDs from this ledger for citation markers: [CIT:ev_<id>].")
-        lines.append("If evidence is missing, explicitly state that no supporting evidence was found.")
-        lines.append("")
-
-        for ev_id, page, text in rows:
-            excerpt = _squash_whitespace(str(text))
-            if len(excerpt) > max_excerpt_chars:
-                excerpt = excerpt[: max_excerpt_chars - 1].rstrip() + "…"
-            lines.append(f"- [{ev_id}|p{page}] {excerpt}")
-
-        return "\n".join(lines).strip() + "\n"
-
-    def build_evidence_ledger_for_documents(
-        self,
-        *,
-        relative_paths: Sequence[str],
-        max_per_document: int = 40,
-        max_total: int = 200,
-        max_excerpt_chars: int = 180,
-    ) -> str:
-        """Return ledger entries across multiple documents."""
-
-        entries: list[tuple[str, str, int, str]] = []
-        with self._connection() as conn:
-            for rel in relative_paths:
-                doc_row = conn.execute(
-                    "SELECT id FROM documents WHERE relative_path = ?",
-                    (rel,),
-                ).fetchone()
-                if doc_row is None:
-                    continue
-                document_id = int(doc_row[0])
-                rows = conn.execute(
-                    (
-                        "SELECT ev_id, page_number, text FROM segments "
-                        "WHERE document_id = ? ORDER BY page_number ASC, ordinal ASC LIMIT ?"
-                    ),
-                    (document_id, int(max_per_document)),
-                ).fetchall()
-                entries.extend((rel, str(ev_id), int(page), str(text)) for ev_id, page, text in rows)
-
-        if not entries:
-            return ""
-
-        entries = entries[:max_total]
-        lines: list[str] = []
-        lines.append("## Citation Evidence Ledger")
-        lines.append("Use only IDs from this ledger for citation markers: [CIT:ev_<id>].")
-        lines.append("If evidence is missing, explicitly state that no supporting evidence was found.")
-        lines.append("")
-
-        for rel, ev_id, page, text in entries:
-            excerpt = _squash_whitespace(text)
-            if len(excerpt) > max_excerpt_chars:
-                excerpt = excerpt[: max_excerpt_chars - 1].rstrip() + "…"
-            lines.append(f"- [{ev_id}|{rel}|p{page}] {excerpt}")
-
-        return "\n".join(lines).strip() + "\n"
 
     def list_local_citation_entries(
         self,
@@ -564,21 +423,6 @@ class CitationStore:
                     break
         return out[:limit]
 
-    def verify_citations(self, text: str) -> list[CitationVerification]:
-        """Parse and verify citation markers in generated output text."""
-
-        tokens = parse_citation_tokens(text)
-        if not tokens:
-            return []
-
-        segment_lookup, geometry_count = self._segment_lookup_for_ids(token.ev_id for token in tokens)
-
-        verifications: list[CitationVerification] = []
-        for token in tokens:
-            verifications.append(self._verify_token(token=token, text=text, segment_lookup=segment_lookup, geometry_count=geometry_count))
-
-        return verifications
-
     def verify_local_citations(
         self,
         text: str,
@@ -671,9 +515,8 @@ class CitationStore:
         timestamp = (created_at or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat()
         output_path_resolved = output_path.resolve().as_posix()
         checksum = hashlib.sha256(output_text.encode("utf-8")).hexdigest()
-        verifications = self.verify_citations(output_text)
         local_verifications = self.verify_local_citations(output_text, label_mapping=label_mapping or {})
-        total_verifications = len(verifications) + len(local_verifications)
+        total_verifications = len(local_verifications)
 
         with self._connection() as conn:
             conn.execute("BEGIN")
@@ -698,35 +541,6 @@ class CitationStore:
                 )
                 conn.execute("DELETE FROM output_citations WHERE output_id = ?", (output_id,))
 
-            if verifications:
-                conn.executemany(
-                    (
-                        "INSERT INTO output_citations ("
-                        "output_id, token, citation_label, ev_id, status, reason, confidence, start_offset, line, column, "
-                        "document_relative_path, source_relative_path, source_absolute_path, page_number, created_at"
-                        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-                    ),
-                    [
-                        (
-                            output_id,
-                            item.token.token,
-                            None,
-                            item.token.ev_id,
-                            item.status,
-                            item.reason,
-                            float(item.confidence),
-                            int(item.token.start_offset),
-                            int(item.token.line),
-                            int(item.token.column),
-                            item.document_relative_path,
-                            None,
-                            None,
-                            item.page_number,
-                            timestamp,
-                        )
-                        for item in verifications
-                    ],
-                )
             if local_verifications:
                 conn.executemany(
                     (
@@ -759,15 +573,9 @@ class CitationStore:
 
             conn.commit()
 
-        valid = sum(1 for item in verifications if item.status == "valid") + sum(
-            1 for item in local_verifications if item["status"] == "valid"
-        )
-        warning = sum(1 for item in verifications if item.status == "warning") + sum(
-            1 for item in local_verifications if item["status"] == "warning"
-        )
-        invalid = sum(1 for item in verifications if item.status == "invalid") + sum(
-            1 for item in local_verifications if item["status"] == "invalid"
-        )
+        valid = sum(1 for item in local_verifications if item["status"] == "valid")
+        warning = sum(1 for item in local_verifications if item["status"] == "warning")
+        invalid = sum(1 for item in local_verifications if item["status"] == "invalid")
 
         return CitationRecordStats(
             output_path=output_path_resolved,
@@ -846,49 +654,6 @@ class CitationStore:
                 ).fetchone()
                 geometry_count[(document_id, page_number)] = int(count_row["count"] if count_row else 0)
         return segment_lookup, geometry_count
-
-    def _verify_token(
-        self,
-        *,
-        token: CitationToken,
-        text: str,
-        segment_lookup: Mapping[str, sqlite3.Row],
-        geometry_count: Mapping[tuple[int, int], int],
-    ) -> CitationVerification:
-        segment = segment_lookup.get(token.ev_id)
-        if segment is None:
-            return CitationVerification(
-                token=token,
-                status="invalid",
-                reason="unknown evidence id",
-                confidence=0.0,
-                document_relative_path=None,
-                page_number=None,
-            )
-
-        context = text[max(0, token.start_offset - 240): min(len(text), token.end_offset + 240)]
-        context = context.replace(token.token, "")
-        overlap = _token_overlap_ratio(_normalize_text(context), str(segment["normalized_text"]))
-        doc_id = int(segment["document_id"])
-        page_number = int(segment["page_number"])
-        geometry_hits = geometry_count.get((doc_id, page_number), 0)
-        status = "valid"
-        reason = "verified"
-        if overlap < 0.06:
-            status = "warning"
-            reason = "low textual overlap with cited evidence"
-        if geometry_hits <= 0:
-            if status == "valid":
-                status = "warning"
-            reason = "verified without geometry mapping"
-        return CitationVerification(
-            token=token,
-            status=status,
-            reason=reason,
-            confidence=round(overlap, 4),
-            document_relative_path=str(segment["relative_path"]),
-            page_number=page_number,
-        )
 
     def get_evidence_bundle(self, ev_id: str, *, window: int = 2) -> EvidenceBundle | None:
         """Return cited segment, surrounding segments, and geometry candidates."""
@@ -1518,10 +1283,8 @@ __all__ = [
     "CitationLedgerEntry",
     "CitationRecordStats",
     "CitationStore",
-    "CitationToken",
-    "CitationVerification",
     "EvidenceBundle",
     "IndexStats",
     "OutputCitationMention",
-    "parse_citation_tokens",
+    "strip_citation_tokens",
 ]

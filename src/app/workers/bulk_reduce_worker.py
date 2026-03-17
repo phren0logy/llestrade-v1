@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -34,7 +33,6 @@ from src.app.core.citations import (
     CitationLedgerEntry,
     CitationRecordStats,
     CitationStore,
-    parse_citation_tokens,
     strip_citation_tokens,
 )
 from src.app.core.bulk_paths import (
@@ -79,7 +77,6 @@ LOGGER = logging.getLogger(__name__)
 
 
 _MANIFEST_VERSION = 2
-_PAGE_MARKER_RE = re.compile(r"<!---\\s*.+?#page=(\\d+)\\s*--->")
 _MIN_INPUT_TOKEN_BUDGET = 4_000
 
 _DYNAMIC_REDUCE_KEYS: frozenset[str] = frozenset(
@@ -1081,20 +1078,6 @@ class BulkReduceWorker(DashboardWorker):
                 if len(reusable_ev_ids) >= 220:
                     break
                 continue
-            try:
-                text = abs_path.read_text(encoding="utf-8")
-            except Exception:
-                continue
-            for token in parse_citation_tokens(text):
-                if token.ev_id in seen_ids:
-                    continue
-                seen_ids.add(token.ev_id)
-                reusable_ev_ids.append(token.ev_id)
-                if len(reusable_ev_ids) >= 220:
-                    break
-            if len(reusable_ev_ids) >= 220:
-                break
-
         entries: list[CitationLedgerEntry] = []
         try:
             if converted_relatives:

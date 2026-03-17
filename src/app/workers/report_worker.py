@@ -316,9 +316,7 @@ class DraftReportWorker(ReportWorkerBase):
         transcript_text: str,
         system_prompt: str,
         placeholder_map: Mapping[str, str],
-        evidence_ledger: str = "",
     ) -> List[dict]:
-        _ = evidence_ledger
         self.log_message.emit(self._llm_execution_summary())
         provider = self._create_provider()
         outputs: List[dict] = []
