@@ -196,9 +196,10 @@ describe('deploy', () => {
     ])
     expect(payload.providers[0]?.models.map((model) => model.model_id)).toEqual(['claude-sonnet-4-20250514'])
     expect(payload.providers[1]?.models.map((model) => model.model_id)).toEqual([
-      'anthropic.claude-opus-4-1-20250805-v1:0',
-      'anthropic.claude-opus-4-6-v1',
-      'anthropic.claude-sonnet-4-5-v1',
+      'us.anthropic.claude-opus-4-1-20250805-v1:0',
+      'us.anthropic.claude-opus-4-6-v1',
+      'us.anthropic.claude-sonnet-4-5-20250929-v1:0',
+      'us.anthropic.claude-sonnet-4-6',
     ])
     expect(payload.providers[2]?.models.map((model) => model.model_id)).toEqual(['gemini-2.5-pro'])
     expect(payload.providers[3]?.models.map((model) => model.model_id)).toEqual(['gpt-5.4'])

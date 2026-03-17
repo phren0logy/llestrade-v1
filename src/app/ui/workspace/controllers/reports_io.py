@@ -68,7 +68,7 @@ def read_prompt_file(path_str: str, project_dir: Optional[Path]) -> str:
         return ""
     if not project_dir:
         return ""
-    path = Path(path_str).expanduser()
+    path = Path(normalize_prompt_path(path_str)).expanduser()
     candidates: List[Path] = []
     if path.is_absolute():
         candidates.append(path)
@@ -88,6 +88,27 @@ def read_prompt_file(path_str: str, project_dir: Optional[Path]) -> str:
         except Exception:
             continue
     return ""
+
+
+def normalize_prompt_path(path_str: str) -> str:
+    path_str = (path_str or "").strip()
+    if not path_str:
+        return ""
+
+    path = Path(path_str).expanduser()
+    if not path.is_absolute():
+        return path_str
+
+    try:
+        relative = path.relative_to(get_repo_prompts_dir())
+    except Exception:
+        return path_str
+
+    for root in (get_custom_dir(), get_bundled_dir()):
+        candidate = root / relative
+        if candidate.exists():
+            return str(candidate)
+    return path_str
 
 
 def safe_read_text(path: Optional[Path]) -> str:
@@ -214,8 +235,8 @@ def collect_report_inputs(project_dir: Optional[Path]) -> List[ReportInputDescri
 
 def default_prompt_path(filename: str) -> str:
     for candidate in (
-        get_repo_prompts_dir() / "reports" / filename,
         get_bundled_dir() / "reports" / filename,
+        get_repo_prompts_dir() / "reports" / filename,
     ):
         if candidate.exists():
             return str(candidate)

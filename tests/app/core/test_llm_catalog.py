@@ -367,7 +367,7 @@ def test_gateway_provider_payload_normalizes_bedrock_to_anthropic_bedrock() -> N
             "label": "AWS Bedrock (Claude)",
             "models": [
                 {
-                    "model_id": "anthropic.claude-sonnet-4-5-v1",
+                    "model_id": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
                     "display_name": "Claude Sonnet 4.5",
                     "context_window": 1_000_000,
                 }
@@ -378,7 +378,7 @@ def test_gateway_provider_payload_normalizes_bedrock_to_anthropic_bedrock() -> N
     assert provider is not None
     assert provider.provider_id == "anthropic_bedrock"
     assert provider.label == "AWS Bedrock (Claude)"
-    assert [model.model_id for model in provider.models] == ["anthropic.claude-sonnet-4-5-v1"]
+    assert [model.model_id for model in provider.models] == ["us.anthropic.claude-sonnet-4-5-20250929-v1:0"]
 
 
 def test_gateway_provider_payload_preserves_missing_context_until_gateway_provides_it() -> None:

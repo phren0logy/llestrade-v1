@@ -21,17 +21,22 @@ const GEMINI_EXCLUDED_TOKENS = ['image', 'tts', 'embedding', 'veo', 'imagen', 'a
 const BEDROCK_PROVIDER_LABEL = 'AWS Bedrock (Claude)'
 const BEDROCK_CLAUDE_MODELS = [
   {
-    modelId: 'anthropic.claude-sonnet-4-5-v1',
+    modelId: 'us.anthropic.claude-sonnet-4-6',
+    displayName: 'Claude Sonnet 4.6',
+    anthropicModelId: 'claude-sonnet-4-6',
+  },
+  {
+    modelId: 'us.anthropic.claude-sonnet-4-5-20250929-v1:0',
     displayName: 'Claude Sonnet 4.5',
     anthropicModelId: 'claude-sonnet-4-5',
   },
   {
-    modelId: 'anthropic.claude-opus-4-6-v1',
+    modelId: 'us.anthropic.claude-opus-4-6-v1',
     displayName: 'Claude Opus 4.6',
     anthropicModelId: 'claude-opus-4-6',
   },
   {
-    modelId: 'anthropic.claude-opus-4-1-20250805-v1:0',
+    modelId: 'us.anthropic.claude-opus-4-1-20250805-v1:0',
     displayName: 'Claude Opus 4.1',
     anthropicModelId: 'claude-opus-4-1-20250805',
   },

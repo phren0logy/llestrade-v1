@@ -28,10 +28,11 @@ _MODEL_REQUEST_RETRY_MAX_DELAY_SECONDS = 2.0
 _RETRYABLE_MODEL_HTTP_STATUS_CODES: frozenset[int] = frozenset({408, 425, 429, 500, 502, 503, 504, 524})
 
 _BEDROCK_MODEL_ALIASES: dict[str, str] = {
-    "claude-sonnet-4-5": "anthropic.claude-sonnet-4-5-v1",
-    "claude-sonnet-4-5-20250929": "anthropic.claude-sonnet-4-5-v1",
-    "claude-opus-4-6": "anthropic.claude-opus-4-6-v1",
-    "claude-opus-4-1-20250805": "anthropic.claude-opus-4-1-20250805-v1:0",
+    "claude-sonnet-4-6": "us.anthropic.claude-sonnet-4-6",
+    "claude-sonnet-4-5": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+    "claude-sonnet-4-5-20250929": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+    "claude-opus-4-6": "us.anthropic.claude-opus-4-6-v1",
+    "claude-opus-4-1-20250805": "us.anthropic.claude-opus-4-1-20250805-v1:0",
 }
 
 _DIRECT_PROVIDER_NAMES: Mapping[str, str] = {

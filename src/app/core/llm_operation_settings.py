@@ -132,7 +132,7 @@ def infer_provider_id_from_model(model_id: str | None) -> str | None:
     normalized = str(model_id or "").strip().lower()
     if not normalized:
         return None
-    if normalized.startswith("anthropic."):
+    if normalized.startswith(("anthropic.", "us.anthropic.", "global.anthropic.")):
         return "anthropic_bedrock"
     if normalized.startswith("claude"):
         return "anthropic"

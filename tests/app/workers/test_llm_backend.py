@@ -83,7 +83,7 @@ def test_direct_provider_backend_count_input_tokens_requires_direct_provider_met
 
 
 def test_normalize_model_name_translates_bedrock_aliases() -> None:
-    assert normalize_model_name("anthropic_bedrock", "claude-sonnet-4-5") == "anthropic.claude-sonnet-4-5-v1"
+    assert normalize_model_name("anthropic_bedrock", "claude-sonnet-4-5") == "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
     assert normalize_model_name("anthropic", "claude-sonnet-4-5") == "claude-sonnet-4-5"
 
 
@@ -140,7 +140,7 @@ def test_build_model_settings_adds_provider_specific_reasoning_controls() -> Non
 
     bedrock_settings = build_model_settings(
         "anthropic_bedrock",
-        "anthropic.claude-sonnet-4-5-v1",
+        "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
         temperature=0.2,
         max_tokens=32_000,
         use_reasoning=True,

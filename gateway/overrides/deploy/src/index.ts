@@ -28,6 +28,10 @@ import { status } from './status'
 const handler = {
   async fetch(request, env, ctx): Promise<Response> {
     const url = new URL(request.url)
+    if (url.pathname === '/converse' || url.pathname.startsWith('/converse/')) {
+      url.pathname = `/bedrock${url.pathname.slice('/converse'.length)}`
+      request = new Request(url.toString(), request)
+    }
     const limitDb = new LimitDbD1(env.limitsDB)
     const { pathname } = url
     const capacityController = getCapacityController(env)

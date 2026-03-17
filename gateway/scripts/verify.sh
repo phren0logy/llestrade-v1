@@ -95,7 +95,7 @@ bedrock_gateway = gateway_provider(
     base_url=os.environ["GATEWAY_VERIFY_BASE_URL"],
 )
 bedrock_agent = Agent(
-    model=BedrockConverseModel("anthropic.claude-sonnet-4-5-v1", provider=bedrock_gateway),
+    model=BedrockConverseModel("us.anthropic.claude-sonnet-4-6", provider=bedrock_gateway),
     system_prompt="Reply with the single word OK.",
 )
 bedrock_result = bedrock_agent.run_sync(

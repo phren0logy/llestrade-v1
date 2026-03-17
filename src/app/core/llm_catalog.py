@@ -52,7 +52,7 @@ _DEFAULT_MODEL_ENV_VARS: dict[str, str] = {
 
 _MODEL_FAMILY_MATCHERS: dict[str, tuple[str, ...]] = {
     "anthropic": ("claude",),
-    "anthropic_bedrock": ("anthropic.claude", "claude"),
+    "anthropic_bedrock": ("anthropic.claude", "us.anthropic.claude", "global.anthropic.claude", "claude"),
     "openai": ("gpt-", "o1", "o3", "o4", "chatgpt-"),
     "gemini": ("gemini",),
     "azure_openai": ("gpt-", "o1", "o3", "o4", "chatgpt-"),
@@ -79,8 +79,16 @@ _PROVIDER_CACHE_MAX_STALE_SECONDS = 7 * 24 * 60 * 60
 _BEDROCK_ANTHROPIC_ALIASES: dict[str, str] = {
     "anthropic.claude-sonnet-4-5-v1": "claude-sonnet-4-5",
     "anthropic.claude-sonnet-4-5-v1:0": "claude-sonnet-4-5",
+    "us.anthropic.claude-sonnet-4-6": "claude-sonnet-4-6",
+    "global.anthropic.claude-sonnet-4-6": "claude-sonnet-4-6",
+    "us.anthropic.claude-sonnet-4-5-20250929-v1:0": "claude-sonnet-4-5",
+    "global.anthropic.claude-sonnet-4-5-20250929-v1:0": "claude-sonnet-4-5",
     "anthropic.claude-opus-4-6-v1": "claude-opus-4-6",
+    "us.anthropic.claude-opus-4-6-v1": "claude-opus-4-6",
+    "global.anthropic.claude-opus-4-6-v1": "claude-opus-4-6",
     "anthropic.claude-opus-4-1-20250805-v1:0": "claude-opus-4-1-20250805",
+    "us.anthropic.claude-opus-4-1-20250805-v1:0": "claude-opus-4-1-20250805",
+    "global.anthropic.claude-opus-4-1-20250805-v1:0": "claude-opus-4-1-20250805",
 }
 
 CatalogTransport = Literal["direct", "gateway"]
@@ -833,6 +841,8 @@ def calculate_usage_cost(
 
     upstream_provider_id = _CATALOG_PROVIDER_IDS.get(provider_id)
     normalized_model = str(model_id or "").strip()
+    if provider_id == "anthropic_bedrock":
+        normalized_model = _BEDROCK_ANTHROPIC_ALIASES.get(normalized_model, normalized_model)
     if not upstream_provider_id or not normalized_model:
         return None
 
@@ -1621,10 +1631,11 @@ def _resolve_snapshot_catalog_model(provider_id: str, model_id: str) -> LLMModel
     upstream_provider_id = _CATALOG_PROVIDER_IDS.get(provider_id)
     if not upstream_provider_id:
         return None
+    normalized_model_id = _BEDROCK_ANTHROPIC_ALIASES.get(model_id, model_id) if provider_id == "anthropic_bedrock" else model_id
 
     try:
         _provider, model = snapshot.find_provider_model(
-            model_id,
+            normalized_model_id,
             None,
             upstream_provider_id,
             None,

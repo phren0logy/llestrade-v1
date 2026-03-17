@@ -54,7 +54,7 @@ def test_settings_from_report_preferences_preserves_context_for_unknown_custom_m
 
 def test_infer_provider_id_from_model_supports_current_selector_families() -> None:
     assert infer_provider_id_from_model("claude-sonnet-4-5") == "anthropic"
-    assert infer_provider_id_from_model("anthropic.claude-sonnet-4-5-v1") == "anthropic_bedrock"
+    assert infer_provider_id_from_model("us.anthropic.claude-sonnet-4-5-20250929-v1:0") == "anthropic_bedrock"
     assert infer_provider_id_from_model("gemini-2.5-pro") == "gemini"
     assert infer_provider_id_from_model("gpt-4.1") == "openai"
 

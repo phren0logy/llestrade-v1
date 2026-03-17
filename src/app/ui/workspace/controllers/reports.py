@@ -58,6 +58,7 @@ from .reports_history import HistorySelection, current_history_selection, persis
 from .reports_io import (
     collect_report_inputs,
     default_prompt_path,
+    normalize_prompt_path,
     optional_path,
     preview_additional_documents,
     preview_template_section,
@@ -281,13 +282,13 @@ class ReportsController:
         if state.last_transcript:
             self._tab.transcript_edit.setText(state.last_transcript)
         if state.last_generation_user_prompt:
-            self._tab.generation_user_prompt_edit.setText(state.last_generation_user_prompt)
+            self._tab.generation_user_prompt_edit.setText(normalize_prompt_path(state.last_generation_user_prompt))
         if state.last_refinement_user_prompt:
-            self._tab.refinement_user_prompt_edit.setText(state.last_refinement_user_prompt)
+            self._tab.refinement_user_prompt_edit.setText(normalize_prompt_path(state.last_refinement_user_prompt))
         if state.last_generation_system_prompt:
-            self._tab.generation_system_prompt_edit.setText(state.last_generation_system_prompt)
+            self._tab.generation_system_prompt_edit.setText(normalize_prompt_path(state.last_generation_system_prompt))
         if state.last_refinement_system_prompt:
-            self._tab.refinement_system_prompt_edit.setText(state.last_refinement_system_prompt)
+            self._tab.refinement_system_prompt_edit.setText(normalize_prompt_path(state.last_refinement_system_prompt))
         if state.last_refinement_draft:
             self._tab.refine_draft_edit.setText(state.last_refinement_draft)
 

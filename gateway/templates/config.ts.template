@@ -16,6 +16,7 @@ export const config: Config<ProviderKeys> = {
   routingGroups: {
     anthropic: [{ key: 'anthropic' }],
     anthropic_bedrock: [{ key: 'bedrock' }],
+    converse: [{ key: 'bedrock' }],
     openai: [{ key: 'openai' }],
     gemini: [{ key: 'google-vertex' }],
     'google-vertex': [{ key: 'google-vertex' }],

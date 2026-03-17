@@ -650,7 +650,7 @@ def test_report_worker_normalizes_bedrock_model_names(tmp_path: Path, qt_app: QA
         llm_backend=_NoNativeBackend(),
     )
 
-    assert worker._model == "anthropic.claude-sonnet-4-5-v1"
+    assert worker._model == "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
 
 
 def test_report_draft_trace_attributes_match_between_legacy_and_gateway(

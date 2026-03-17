@@ -305,7 +305,7 @@ def test_bulk_map_resolve_provider_normalizes_bedrock_model(tmp_path: Path) -> N
     config = worker._resolve_provider()
 
     assert config.provider_id == "anthropic_bedrock"
-    assert config.model == "anthropic.claude-sonnet-4-5-v1"
+    assert config.model == "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
 
 
 def test_bulk_map_resolve_provider_requires_saved_provider_selection(tmp_path: Path) -> None:

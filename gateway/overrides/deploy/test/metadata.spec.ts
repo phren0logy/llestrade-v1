@@ -159,9 +159,10 @@ describe('metadata', () => {
     ])
     expect(payload.providers[0]?.models.map((model) => model.model_id)).toEqual(['claude-sonnet-4-20250514'])
     expect(payload.providers[1]?.models.map((model) => model.model_id)).toEqual([
-      'anthropic.claude-opus-4-1-20250805-v1:0',
-      'anthropic.claude-opus-4-6-v1',
-      'anthropic.claude-sonnet-4-5-v1',
+      'us.anthropic.claude-opus-4-1-20250805-v1:0',
+      'us.anthropic.claude-opus-4-6-v1',
+      'us.anthropic.claude-sonnet-4-5-20250929-v1:0',
+      'us.anthropic.claude-sonnet-4-6',
     ])
     expect(payload.providers[2]?.models.map((model) => model.model_id)).toEqual(['gpt-5.4'])
   })
@@ -171,6 +172,11 @@ describe('metadata', () => {
       {
         id: 'anthropic',
         models: [
+          {
+            id: 'claude-sonnet-4-6',
+            context_window: 1000000,
+            prices: { input_mtok: 3, output_mtok: 15 },
+          },
           {
             id: 'claude-sonnet-4-5',
             context_window: 1000000,
@@ -205,9 +211,10 @@ describe('metadata', () => {
     }>
 
     expect(payload.map((item) => item.model_id)).toEqual([
-      'anthropic.claude-opus-4-1-20250805-v1:0',
-      'anthropic.claude-opus-4-6-v1',
-      'anthropic.claude-sonnet-4-5-v1',
+      'us.anthropic.claude-opus-4-1-20250805-v1:0',
+      'us.anthropic.claude-opus-4-6-v1',
+      'us.anthropic.claude-sonnet-4-5-20250929-v1:0',
+      'us.anthropic.claude-sonnet-4-6',
     ])
     expect(payload[0]).toEqual(
       expect.objectContaining({
