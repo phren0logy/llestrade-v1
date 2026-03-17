@@ -64,6 +64,51 @@ def test_api_key_dialog_loads_and_saves_gateway_settings(
     assert reloaded.get_api_key("pydantic_ai_gateway") == "gateway-key-2"
 
 
+def test_api_key_dialog_loads_and_saves_transport_mode(
+    tmp_path: Path,
+    qt_app: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert qt_app is not None
+    monkeypatch.setenv("LLESTRADE_SETTINGS_DIR", str(tmp_path / "settings"))
+    monkeypatch.setattr(QMessageBox, "information", lambda *args, **kwargs: QMessageBox.Ok)
+    monkeypatch.setattr(QMessageBox, "warning", lambda *args, **kwargs: QMessageBox.Ok)
+
+    settings = SecureSettings()
+    settings.set("llm_transport_mode", "gateway")
+
+    dialog = APIKeyDialog(settings)
+    try:
+        assert dialog.transport_mode_combo.currentData() == "gateway"
+        dialog.transport_mode_combo.setCurrentIndex(dialog.transport_mode_combo.findData("direct"))
+        dialog.save_keys()
+    finally:
+        dialog.deleteLater()
+
+    reloaded = SecureSettings()
+    assert reloaded.get("llm_transport_mode") == "direct"
+
+
+def test_api_key_dialog_disables_gateway_transport_when_feature_flag_is_off(
+    tmp_path: Path,
+    qt_app: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert qt_app is not None
+    monkeypatch.setenv("LLESTRADE_SETTINGS_DIR", str(tmp_path / "settings"))
+    monkeypatch.setenv("FRD_ENABLE_PYDANTIC_AI_GATEWAY", "false")
+
+    dialog = APIKeyDialog(SecureSettings())
+    try:
+        assert dialog.transport_mode_combo.findData("gateway") >= 0
+        gateway_item = dialog.transport_mode_combo.model().item(dialog.transport_mode_combo.findData("gateway"))
+        assert gateway_item is not None
+        assert gateway_item.isEnabled() is False
+        assert dialog.gateway_unavailable_note.isHidden() is False
+    finally:
+        dialog.deleteLater()
+
+
 def test_api_key_dialog_show_reveals_saved_gateway_key_without_overwriting(
     tmp_path: Path,
     qt_app: QApplication,
@@ -340,6 +385,7 @@ def test_api_key_dialog_resets_gateway_probe_cache_and_warns_on_invalid_gateway_
 
     dialog = APIKeyDialog(settings)
     try:
+        dialog.transport_mode_combo.setCurrentIndex(dialog.transport_mode_combo.findData("gateway"))
         dialog.gateway_base_url.setText("https://gateway.example.com")
         dialog.gateway_route.setText("bulk")
         dialog.gateway_api_key.setText("gateway-key-2")

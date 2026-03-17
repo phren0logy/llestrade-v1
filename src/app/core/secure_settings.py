@@ -151,6 +151,7 @@ class SecureSettings(QObject):
             "version": "1.0",
             "llm_provider": "anthropic",
             "llm_model": default_model,
+            "llm_transport_mode": "direct",
             "pydantic_ai_gateway_settings": {
                 "base_url": None,
                 "route": None,

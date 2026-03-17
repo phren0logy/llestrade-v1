@@ -7,6 +7,7 @@ import json
 from typing import Any, Dict
 from urllib.parse import urlparse
 
+from src.app.core.feature_flags import FeatureFlags
 from src.app.core.llm_catalog import (
     refresh_gateway_provider_catalog,
     reset_provider_catalog_cache,
@@ -45,6 +46,11 @@ class APIKeyDialog(QDialog):
         super().__init__(parent)
         self.settings = settings
         self.logger = logging.getLogger(__name__)
+        self._feature_flags = FeatureFlags.from_settings(settings)
+        self._gateway_transport_available = self._feature_flags.pydantic_ai_gateway_enabled
+        self._transport_restart_notice = (
+            "LLM transport changes apply the next time you reopen the project or restart the app."
+        )
         
         self.setWindowTitle("Configure API Keys & Services")
         self.setModal(True)
@@ -134,6 +140,36 @@ class APIKeyDialog(QDialog):
 
         gateway_group = QGroupBox("Pydantic AI Gateway App Key")
         gateway_layout = QFormLayout(gateway_group)
+
+        self.transport_mode_combo = QComboBox()
+        self.transport_mode_combo.addItem("Direct provider requests", "direct")
+        gateway_index = self.transport_mode_combo.count()
+        self.transport_mode_combo.addItem("Pydantic AI Gateway (PAIG)", "gateway")
+        if not self._gateway_transport_available:
+            item = self.transport_mode_combo.model().item(gateway_index)
+            if item is not None:
+                item.setEnabled(False)
+        gateway_layout.addRow("LLM Transport:", self.transport_mode_combo)
+
+        transport_help = QLabel(
+            "Direct is the recommended default for large bulk runs. "
+            "PAIG remains available as an explicit opt-in."
+        )
+        transport_help.setWordWrap(True)
+        gateway_layout.addRow("", transport_help)
+
+        self.transport_mode_note = QLabel(self._transport_restart_notice)
+        self.transport_mode_note.setWordWrap(True)
+        self.transport_mode_note.setStyleSheet("color: #666;")
+        gateway_layout.addRow("", self.transport_mode_note)
+
+        self.gateway_unavailable_note = QLabel(
+            "Pydantic AI Gateway is currently unavailable in this environment, so direct transport will be used."
+        )
+        self.gateway_unavailable_note.setWordWrap(True)
+        self.gateway_unavailable_note.setStyleSheet("color: #8a6d3b;")
+        self.gateway_unavailable_note.setVisible(not self._gateway_transport_available)
+        gateway_layout.addRow("", self.gateway_unavailable_note)
 
         gateway_info = QLabel(
             "This app key is the credential used for provider/model selections whenever gateway mode is enabled. "
@@ -466,6 +502,12 @@ class APIKeyDialog(QDialog):
         if route:
             self.gateway_route.setText(route)
 
+        transport_mode = str(self.settings.get("llm_transport_mode", "direct") or "direct").strip().lower()
+        if transport_mode == "gateway" and not self._gateway_transport_available:
+            transport_mode = "direct"
+        transport_index = self.transport_mode_combo.findData(transport_mode)
+        self.transport_mode_combo.setCurrentIndex(transport_index if transport_index >= 0 else 0)
+
         observability_settings = self.settings.get("observability_settings", {}) or {}
         self.observability_enabled.setChecked(bool(observability_settings.get("enabled", False)))
         target = str(observability_settings.get("target") or "phoenix_local").strip().lower()
@@ -494,8 +536,24 @@ class APIKeyDialog(QDialog):
         saved_count = 0
         errors = []
         warnings = []
+        notices = []
         previous_gateway_settings = self.settings.get("pydantic_ai_gateway_settings", {}) or {}
         previous_gateway_key = str(self.settings.get_api_key("pydantic_ai_gateway") or "").strip()
+        previous_transport_mode = str(self.settings.get("llm_transport_mode", "direct") or "direct").strip().lower()
+        requested_transport_mode = str(self.transport_mode_combo.currentData() or "direct").strip().lower()
+        transport_mode = (
+            requested_transport_mode
+            if requested_transport_mode == "gateway" and self._gateway_transport_available
+            else "direct"
+        )
+        self.settings.set("llm_transport_mode", transport_mode)
+        transport_changed = transport_mode != previous_transport_mode
+        if requested_transport_mode == "gateway" and not self._gateway_transport_available:
+            notices.append(
+                "PAIG transport is currently unavailable in this environment, so the app will continue using direct transport."
+            )
+        if transport_changed:
+            notices.append(self._transport_restart_notice)
         
         # Save API keys
         for provider, field in self.api_fields.items():
@@ -620,24 +678,30 @@ class APIKeyDialog(QDialog):
                 reset_gateway_access_check_cache()
                 reset_provider_catalog_cache()
                 refresh_gateway_provider_catalog(force=True)
-                gateway_warning = self._validate_saved_gateway_settings(
-                    api_key=gateway_effective_key or None,
-                    base_url=gateway_base_url or None,
-                    route=gateway_route or None,
-                )
-                if gateway_warning:
-                    warnings.append(gateway_warning)
+                if transport_mode == "gateway":
+                    gateway_warning = self._validate_saved_gateway_settings(
+                        api_key=gateway_effective_key or None,
+                        base_url=gateway_base_url or None,
+                        route=gateway_route or None,
+                    )
+                    if gateway_warning:
+                        warnings.append(gateway_warning)
             if warnings:
                 QMessageBox.warning(
                     self,
                     "Gateway Validation Warning",
-                    "\n\n".join(warnings),
+                    "\n\n".join(warnings + notices),
                 )
-            elif saved_count > 0:
+            elif saved_count > 0 or notices:
+                message_parts = notices[:]
+                if saved_count > 0:
+                    message_parts.insert(0, f"Successfully saved {saved_count} API key(s) and settings.")
+                elif not message_parts:
+                    message_parts.append("Settings saved.")
                 QMessageBox.information(
                     self,
                     "Settings Saved",
-                    f"Successfully saved {saved_count} API key(s) and settings."
+                    "\n\n".join(message_parts).strip()
                 )
             self.accept()
 

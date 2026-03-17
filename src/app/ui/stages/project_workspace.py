@@ -31,6 +31,7 @@ from src.app.core.conversion_manager import ConversionJob
 from src.app.core.feature_flags import FeatureFlags
 from src.app.core.file_tracker import WorkspaceMetrics
 from src.app.core.project_manager import ProjectManager, ProjectMetadata
+from src.app.core.secure_settings import SecureSettings
 from src.app.core.bulk_analysis_groups import BulkAnalysisGroup
 from src.app.ui.dialogs.project_settings_dialog import ProjectSettingsDialog
 from src.app.ui.dialogs.bulk_analysis_group_dialog import BulkAnalysisGroupDialog
@@ -101,10 +102,7 @@ class ProjectWorkspace(QWidget):
         self._documents_controller: DocumentsController | None = None
         self._conversion_service = ConversionService(self._workers)
         self._highlight_service = HighlightsService(self._workers)
-        if self._feature_flags.pydantic_ai_gateway_enabled:
-            llm_backend = PydanticAIGatewayBackend()
-        else:
-            llm_backend = PydanticAIDirectBackend()
+        llm_backend = self._build_llm_backend()
         self._llm_transport = backend_transport_name(llm_backend)
         self._bulk_service = BulkAnalysisService(self._workers, llm_backend=llm_backend)
         self._reports_service = ReportsService(self._workers, llm_backend=llm_backend)
@@ -252,9 +250,43 @@ class ProjectWorkspace(QWidget):
     def reports_controller(self) -> ReportsController | None:
         return self._reports_controller
 
+    def _build_llm_backend(self):
+        transport_mode = str(SecureSettings().get("llm_transport_mode", "direct") or "direct").strip().lower()
+        if transport_mode == "gateway" and self._feature_flags.pydantic_ai_gateway_enabled:
+            return PydanticAIGatewayBackend()
+        return PydanticAIDirectBackend()
+
+    def active_job_labels(self) -> list[str]:
+        labels: list[str] = []
+        if self._conversion_service.is_running():
+            labels.append("document conversion")
+        if self._highlights_controller and self._highlights_controller.is_running():
+            labels.append("highlight extraction")
+        if self._bulk_controller and self._bulk_controller.running_groups:
+            count = len(self._bulk_controller.running_groups)
+            labels.append(f"bulk analysis ({count} run{'s' if count != 1 else ''})")
+        if self._reports_controller and self._reports_controller.is_running():
+            labels.append("report generation")
+        return labels
+
+    def has_active_jobs(self) -> bool:
+        return bool(self.active_job_labels())
+
+    def cancel_active_jobs(self) -> None:
+        self._conversion_service.cancel()
+        self._highlight_service.cancel()
+        if self._bulk_controller:
+            self._bulk_controller.cancel_all_runs()
+        if self._reports_controller:
+            self._reports_controller.cancel()
+
+    def wait_for_jobs_done(self, timeout_ms: int) -> bool:
+        return self._workers.wait_for_done(timeout_ms)
+
     def shutdown(self) -> None:
         """Cancel background work before disposing of the workspace."""
 
+        self.cancel_active_jobs()
         self._workers.clear()
         self._documents_controller.shutdown()
         if self._bulk_controller:
