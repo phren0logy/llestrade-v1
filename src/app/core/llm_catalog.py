@@ -31,6 +31,7 @@ SUPPORTED_SELECTOR_PROVIDER_IDS: tuple[str, ...] = (
 
 _CATALOG_PROVIDER_IDS: dict[str, str] = {
     "anthropic": "anthropic",
+    "anthropic_bedrock": "anthropic",
     "openai": "openai",
     "gemini": "google",
     "azure_openai": "azure",
@@ -423,6 +424,8 @@ def resolve_catalog_model(
     normalized = str(model_id or "").strip()
     if not normalized:
         return None
+    if provider_id == "anthropic_bedrock":
+        normalized = _BEDROCK_ANTHROPIC_ALIASES.get(normalized, normalized)
 
     for model in _iter_selector_models(provider_id, transport=transport):
         if model.model_id == normalized:

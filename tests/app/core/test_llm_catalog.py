@@ -643,3 +643,29 @@ def test_resolve_catalog_model_uses_anthropic_metadata_context_window(
 
     assert resolved is not None
     assert resolved.context_window == 1_000_000
+
+
+def test_resolve_catalog_model_normalizes_bedrock_inference_profile_ids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = _FakeSnapshot(
+        providers=[
+            _FakeProvider(
+                id="anthropic",
+                models=[
+                    _FakeModel(
+                        id="claude-sonnet-4-6",
+                        name="Claude Sonnet 4.6",
+                        context_window=1_000_000,
+                    )
+                ],
+            )
+        ]
+    )
+    monkeypatch.setattr(llm_catalog, "_snapshot", lambda: snapshot)
+
+    resolved = llm_catalog.resolve_catalog_model("anthropic_bedrock", "us.anthropic.claude-sonnet-4-6")
+
+    assert resolved is not None
+    assert resolved.model_id == "claude-sonnet-4-6"
+    assert resolved.context_window == 1_000_000

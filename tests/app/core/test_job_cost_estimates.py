@@ -90,3 +90,32 @@ def test_estimate_bulk_map_cost_includes_spent_actual_for_resume(tmp_path: Path)
     assert forecast.remaining_best_estimate is not None
     assert forecast.remaining_ceiling is not None
     assert forecast.projected_total_best_estimate == forecast.spent_actual + forecast.remaining_best_estimate
+
+
+def test_estimate_bulk_map_cost_supports_bedrock_inference_profile_ids(tmp_path: Path) -> None:
+    project_dir = tmp_path
+    converted = project_dir / "converted_documents"
+    converted.mkdir(parents=True, exist_ok=True)
+    source = converted / "doc.md"
+    source.write_text("# Heading\nBody text", encoding="utf-8")
+
+    group = BulkAnalysisGroup.create(
+        "Group",
+        files=["doc.md"],
+        provider_id="anthropic_bedrock",
+        model="us.anthropic.claude-sonnet-4-6",
+    )
+
+    forecast = estimate_bulk_map_cost(
+        project_dir=project_dir,
+        group=group,
+        files=["doc.md"],
+        metadata=ProjectMetadata(case_name="Case"),
+        placeholder_values={},
+        project_name="Case Project",
+        force_rerun=False,
+    )
+
+    assert forecast.available is True
+    assert forecast.best_estimate is not None
+    assert forecast.ceiling is not None
