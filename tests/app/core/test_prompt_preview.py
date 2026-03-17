@@ -36,8 +36,28 @@ def test_prompt_preview_populates_source_placeholders(tmp_path: Path) -> None:
     converted_doc = converted_dir / "sample.md"
     _write_converted_doc(converted_doc, pdf_path=pdf_path, content="# Heading\nBody")
 
+    raw_json = converted_dir / "sample.azure.raw.json"
+    raw_json.write_text(
+        '{"pages":[{"page_number":1,"width":100,"height":200,"unit":"pixel","lines":[{"content":"Body","polygon":[0,0,50,0,50,10,0,10]}]}]}',
+        encoding="utf-8",
+    )
+
     group = BulkAnalysisGroup.create("Preview Group", files=["sample.md"])
     metadata = ProjectMetadata(case_name="Case Name")
+
+    from src.app.core.citations import CitationStore
+
+    store = CitationStore(project_dir)
+    store.index_converted_document(
+        relative_path="sample.md",
+        markdown_text="<!--- sample.pdf#page=1 --->\n# Heading\nBody\n",
+        source_checksum="preview-checksum",
+        azure_raw_json_path=raw_json,
+        pages_pdf=1,
+        pages_detected=1,
+        source_relative_path=pdf_path.name,
+        source_absolute_path=pdf_path.resolve().as_posix(),
+    )
 
     preview = generate_prompt_preview(
         project_dir,
@@ -55,6 +75,8 @@ def test_prompt_preview_populates_source_placeholders(tmp_path: Path) -> None:
     assert "Heading" in preview.values["document_content"]
     # Preview content should include actual document body
     assert "Body" in preview.user_rendered
+    assert "[C1]" in preview.system_appendix
+    assert "Generated Citation Appendix" in preview.system_rendered
 
 
 def test_prompt_preview_combined_includes_reduce_context(tmp_path: Path) -> None:

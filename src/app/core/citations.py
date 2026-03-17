@@ -21,9 +21,10 @@ from typing import Dict, Iterable, Iterator, List, Mapping, Optional, Sequence
 
 PAGE_MARKER_RE = re.compile(r"<!---\s*.+?#page=(\d+)\s*--->")
 CITATION_TOKEN_RE = re.compile(r"\[CIT:(ev_[a-z0-9]{8,64})\]")
+LOCAL_CITATION_TOKEN_RE = re.compile(r"\[(C\d{1,5})\]")
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
 
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -50,6 +51,8 @@ class CitationVerification:
 class EvidenceBundle:
     ev_id: str
     document_relative_path: str
+    source_relative_path: str | None
+    source_absolute_path: str | None
     page_number: int
     text: str
     neighbors: Sequence[Mapping[str, object]]
@@ -70,6 +73,32 @@ class CitationRecordStats:
     valid: int
     warning: int
     invalid: int
+
+
+@dataclass(frozen=True)
+class CitationLedgerEntry:
+    citation_label: str
+    ev_id: str
+    document_relative_path: str
+    page_number: int
+    text: str
+
+
+@dataclass(frozen=True)
+class OutputCitationMention:
+    token: str
+    citation_label: str | None
+    ev_id: str | None
+    status: str
+    reason: str
+    confidence: float
+    start_offset: int
+    line: int
+    column: int
+    document_relative_path: str | None
+    source_relative_path: str | None
+    source_absolute_path: str | None
+    page_number: int | None
 
 
 def parse_citation_tokens(text: str) -> list[CitationToken]:
@@ -114,6 +143,8 @@ class CitationStore:
         azure_raw_json_path: Path | None,
         pages_pdf: int | None,
         pages_detected: int | None,
+        source_relative_path: str | None = None,
+        source_absolute_path: str | None = None,
     ) -> IndexStats:
         """Index converted markdown segments and Azure geometry spans."""
 
@@ -130,6 +161,8 @@ class CitationStore:
                 azure_raw_json_path=azure_raw_json_path,
                 pages_pdf=pages_pdf,
                 pages_detected=pages_detected,
+                source_relative_path=source_relative_path,
+                source_absolute_path=source_absolute_path,
                 indexed_at=indexed_at,
             )
             conn.execute("DELETE FROM segments WHERE document_id = ?", (document_id,))
@@ -161,8 +194,9 @@ class CitationStore:
                 conn.executemany(
                     (
                         "INSERT INTO geometry_spans ("
-                        "document_id, page_number, text, normalized_text, polygon_json, bbox_json, unit, source_path, chunk_index"
-                        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                        "document_id, page_number, text, normalized_text, polygon_json, bbox_json, "
+                        "normalized_bbox_json, page_width, page_height, unit, source_path, chunk_index"
+                        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
                     ),
                     [
                         (
@@ -172,6 +206,9 @@ class CitationStore:
                             item.get("normalized_text", ""),
                             item.get("polygon_json"),
                             item.get("bbox_json"),
+                            item.get("normalized_bbox_json"),
+                            item.get("page_width"),
+                            item.get("page_height"),
                             item.get("unit"),
                             item.get("source_path"),
                             item.get("chunk_index"),
@@ -287,6 +324,95 @@ class CitationStore:
 
         return "\n".join(lines).strip() + "\n"
 
+    def list_local_citation_entries(
+        self,
+        *,
+        relative_path: str,
+        page_numbers: Sequence[int] | None = None,
+        max_entries: int = 120,
+    ) -> list[CitationLedgerEntry]:
+        """Return deterministic local citation labels for one converted document."""
+
+        page_numbers = list(page_numbers or [])
+        with self._connection() as conn:
+            doc_row = conn.execute(
+                "SELECT id FROM documents WHERE relative_path = ?",
+                (relative_path,),
+            ).fetchone()
+            if doc_row is None:
+                return []
+
+            query = (
+                "SELECT ev_id, page_number, text FROM segments "
+                "WHERE document_id = ? "
+            )
+            params: list[object] = [int(doc_row[0])]
+            if page_numbers:
+                placeholders = ",".join("?" for _ in page_numbers)
+                query += f"AND page_number IN ({placeholders}) "
+                params.extend(int(page) for page in page_numbers)
+            query += "ORDER BY page_number ASC, ordinal ASC LIMIT ?"
+            params.append(int(max_entries))
+            rows = conn.execute(query, tuple(params)).fetchall()
+
+        entries: list[CitationLedgerEntry] = []
+        for index, row in enumerate(rows, start=1):
+            entries.append(
+                CitationLedgerEntry(
+                    citation_label=f"C{index}",
+                    ev_id=str(row["ev_id"]),
+                    document_relative_path=relative_path,
+                    page_number=int(row["page_number"]),
+                    text=str(row["text"]),
+                )
+            )
+        return entries
+
+    def build_local_citation_appendix(
+        self,
+        *,
+        relative_path: str,
+        page_numbers: Sequence[int] | None = None,
+        max_entries: int = 120,
+        max_excerpt_chars: int = 180,
+    ) -> tuple[str, dict[str, str]]:
+        """Return a bulk-map citation appendix and label-to-evidence mapping."""
+
+        entries = self.list_local_citation_entries(
+            relative_path=relative_path,
+            page_numbers=page_numbers,
+            max_entries=max_entries,
+        )
+        appendix = self.render_local_citation_appendix(entries, max_excerpt_chars=max_excerpt_chars)
+        mapping = {entry.citation_label: entry.ev_id for entry in entries}
+        return appendix, mapping
+
+    def render_local_citation_appendix(
+        self,
+        entries: Sequence[CitationLedgerEntry],
+        *,
+        max_excerpt_chars: int = 180,
+    ) -> str:
+        """Render a previously assigned local citation set without renumbering it."""
+
+        if not entries:
+            return ""
+
+        lines: list[str] = []
+        lines.append("Use only citation labels from this appendix for factual claims.")
+        lines.append("Exact inline citation format: [C1], [C2], [C3], etc.")
+        lines.append("If supporting evidence is missing, explicitly say the evidence is unavailable.")
+        lines.append("")
+        lines.append("Available citations:")
+        for entry in entries:
+            excerpt = _squash_whitespace(entry.text)
+            if len(excerpt) > max_excerpt_chars:
+                excerpt = excerpt[: max_excerpt_chars - 1].rstrip() + "…"
+            lines.append(
+                f"- [{entry.citation_label}] {entry.document_relative_path} p. {entry.page_number}: {excerpt}"
+            )
+        return "\n".join(lines).strip() + "\n"
+
     def list_evidence_ids_for_documents(
         self,
         *,
@@ -320,79 +446,90 @@ class CitationStore:
         if not tokens:
             return []
 
-        ev_ids = sorted({token.ev_id for token in tokens})
-        segment_lookup: dict[str, sqlite3.Row] = {}
-
-        with self._connection() as conn:
-            placeholders = ",".join("?" for _ in ev_ids)
-            rows = conn.execute(
-                (
-                    "SELECT s.ev_id, s.page_number, s.normalized_text, d.relative_path, d.id AS document_id "
-                    "FROM segments s JOIN documents d ON d.id = s.document_id "
-                    f"WHERE s.ev_id IN ({placeholders})"
-                ),
-                tuple(ev_ids),
-            ).fetchall()
-            for row in rows:
-                segment_lookup[str(row["ev_id"])] = row
-
-            geometry_count: dict[tuple[int, int], int] = {}
-            if rows:
-                pairs = {(int(row["document_id"]), int(row["page_number"])) for row in rows}
-                for document_id, page_number in pairs:
-                    count_row = conn.execute(
-                        "SELECT COUNT(*) AS count FROM geometry_spans WHERE document_id = ? AND page_number = ?",
-                        (document_id, page_number),
-                    ).fetchone()
-                    geometry_count[(document_id, page_number)] = int(count_row["count"] if count_row else 0)
+        segment_lookup, geometry_count = self._segment_lookup_for_ids(token.ev_id for token in tokens)
 
         verifications: list[CitationVerification] = []
         for token in tokens:
-            segment = segment_lookup.get(token.ev_id)
+            verifications.append(self._verify_token(token=token, text=text, segment_lookup=segment_lookup, geometry_count=geometry_count))
+
+        return verifications
+
+    def verify_local_citations(
+        self,
+        text: str,
+        *,
+        label_mapping: Mapping[str, str],
+    ) -> list[dict[str, object]]:
+        """Parse and verify local output-scoped citation labels like ``[C1]``."""
+
+        matches = list(LOCAL_CITATION_TOKEN_RE.finditer(text))
+        if not matches:
+            return []
+
+        ev_ids = [label_mapping[label] for label in {match.group(1) for match in matches} if label in label_mapping]
+        segment_lookup, geometry_count = self._segment_lookup_for_ids(ev_ids)
+
+        results: list[dict[str, object]] = []
+        for match in matches:
+            label = match.group(1)
+            start = int(match.start())
+            line, column = _line_and_column(text, start)
+            ev_id = label_mapping.get(label)
+            segment = segment_lookup.get(ev_id) if ev_id else None
             if segment is None:
-                verifications.append(
-                    CitationVerification(
-                        token=token,
-                        status="invalid",
-                        reason="unknown evidence id",
-                        confidence=0.0,
-                        document_relative_path=None,
-                        page_number=None,
-                    )
+                results.append(
+                    {
+                        "token": match.group(0),
+                        "citation_label": label,
+                        "ev_id": ev_id,
+                        "status": "invalid",
+                        "reason": "unknown citation label",
+                        "confidence": 0.0,
+                        "start_offset": start,
+                        "line": line,
+                        "column": column,
+                        "document_relative_path": None,
+                        "source_relative_path": None,
+                        "source_absolute_path": None,
+                        "page_number": None,
+                    }
                 )
                 continue
 
-            context = text[max(0, token.start_offset - 240): min(len(text), token.end_offset + 240)]
-            context = context.replace(token.token, "")
+            context = text[max(0, start - 240): min(len(text), int(match.end()) + 240)]
+            context = context.replace(match.group(0), "")
             overlap = _token_overlap_ratio(_normalize_text(context), str(segment["normalized_text"]))
             doc_id = int(segment["document_id"])
             page_number = int(segment["page_number"])
             geometry_hits = geometry_count.get((doc_id, page_number), 0)
-
+            status = "valid"
+            reason = "verified"
             if overlap < 0.06:
                 status = "warning"
                 reason = "low textual overlap with cited evidence"
-            else:
-                status = "valid"
-                reason = "verified"
-
             if geometry_hits <= 0:
                 if status == "valid":
                     status = "warning"
                 reason = "verified without geometry mapping"
 
-            verifications.append(
-                CitationVerification(
-                    token=token,
-                    status=status,
-                    reason=reason,
-                    confidence=round(overlap, 4),
-                    document_relative_path=str(segment["relative_path"]),
-                    page_number=page_number,
-                )
+            results.append(
+                {
+                    "token": match.group(0),
+                    "citation_label": label,
+                    "ev_id": ev_id,
+                    "status": status,
+                    "reason": reason,
+                    "confidence": round(overlap, 4),
+                    "start_offset": start,
+                    "line": line,
+                    "column": column,
+                    "document_relative_path": str(segment["relative_path"]),
+                    "source_relative_path": str(segment["source_relative_path"] or "") or None,
+                    "source_absolute_path": str(segment["source_absolute_path"] or "") or None,
+                    "page_number": page_number,
+                }
             )
-
-        return verifications
+        return results
 
     def record_output_citations(
         self,
@@ -401,6 +538,7 @@ class CitationStore:
         output_text: str,
         generator: str,
         prompt_hash: str | None,
+        label_mapping: Mapping[str, str] | None = None,
         created_at: datetime | None = None,
     ) -> CitationRecordStats:
         """Persist citation verification results for an output artifact."""
@@ -409,6 +547,8 @@ class CitationStore:
         output_path_resolved = output_path.resolve().as_posix()
         checksum = hashlib.sha256(output_text.encode("utf-8")).hexdigest()
         verifications = self.verify_citations(output_text)
+        local_verifications = self.verify_local_citations(output_text, label_mapping=label_mapping or {})
+        total_verifications = len(verifications) + len(local_verifications)
 
         with self._connection() as conn:
             conn.execute("BEGIN")
@@ -437,14 +577,15 @@ class CitationStore:
                 conn.executemany(
                     (
                         "INSERT INTO output_citations ("
-                        "output_id, token, ev_id, status, reason, confidence, start_offset, line, column, "
-                        "document_relative_path, page_number, created_at"
-                        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                        "output_id, token, citation_label, ev_id, status, reason, confidence, start_offset, line, column, "
+                        "document_relative_path, source_relative_path, source_absolute_path, page_number, created_at"
+                        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
                     ),
                     [
                         (
                             output_id,
                             item.token.token,
+                            None,
                             item.token.ev_id,
                             item.status,
                             item.reason,
@@ -453,25 +594,175 @@ class CitationStore:
                             int(item.token.line),
                             int(item.token.column),
                             item.document_relative_path,
+                            None,
+                            None,
                             item.page_number,
                             timestamp,
                         )
                         for item in verifications
                     ],
                 )
+            if local_verifications:
+                conn.executemany(
+                    (
+                        "INSERT INTO output_citations ("
+                        "output_id, token, citation_label, ev_id, status, reason, confidence, start_offset, line, column, "
+                        "document_relative_path, source_relative_path, source_absolute_path, page_number, created_at"
+                        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                    ),
+                    [
+                        (
+                            output_id,
+                            str(item["token"]),
+                            item["citation_label"],
+                            item["ev_id"] or "",
+                            item["status"],
+                            item["reason"],
+                            float(item["confidence"]),
+                            int(item["start_offset"]),
+                            int(item["line"]),
+                            int(item["column"]),
+                            item["document_relative_path"],
+                            item["source_relative_path"],
+                            item["source_absolute_path"],
+                            item["page_number"],
+                            timestamp,
+                        )
+                        for item in local_verifications
+                    ],
+                )
 
             conn.commit()
 
-        valid = sum(1 for item in verifications if item.status == "valid")
-        warning = sum(1 for item in verifications if item.status == "warning")
-        invalid = sum(1 for item in verifications if item.status == "invalid")
+        valid = sum(1 for item in verifications if item.status == "valid") + sum(
+            1 for item in local_verifications if item["status"] == "valid"
+        )
+        warning = sum(1 for item in verifications if item.status == "warning") + sum(
+            1 for item in local_verifications if item["status"] == "warning"
+        )
+        invalid = sum(1 for item in verifications if item.status == "invalid") + sum(
+            1 for item in local_verifications if item["status"] == "invalid"
+        )
 
         return CitationRecordStats(
             output_path=output_path_resolved,
-            total=len(verifications),
+            total=total_verifications,
             valid=valid,
             warning=warning,
             invalid=invalid,
+        )
+
+    def list_output_citation_mentions(self, output_path: Path) -> list[OutputCitationMention]:
+        """Return stored citation mentions for one output artifact."""
+
+        output_path_resolved = output_path.resolve().as_posix()
+        with self._connection() as conn:
+            rows = conn.execute(
+                (
+                    "SELECT token, citation_label, ev_id, status, reason, confidence, start_offset, line, column, "
+                    "document_relative_path, source_relative_path, source_absolute_path, page_number "
+                    "FROM output_citations oc "
+                    "JOIN outputs o ON o.id = oc.output_id "
+                    "WHERE o.output_path = ? "
+                    "ORDER BY oc.start_offset ASC, oc.id ASC"
+                ),
+                (output_path_resolved,),
+            ).fetchall()
+
+        mentions: list[OutputCitationMention] = []
+        for row in rows:
+            mentions.append(
+                OutputCitationMention(
+                    token=str(row["token"]),
+                    citation_label=str(row["citation_label"] or "") or None,
+                    ev_id=str(row["ev_id"] or "") or None,
+                    status=str(row["status"]),
+                    reason=str(row["reason"] or ""),
+                    confidence=float(row["confidence"] or 0.0),
+                    start_offset=int(row["start_offset"] or 0),
+                    line=int(row["line"] or 0),
+                    column=int(row["column"] or 0),
+                    document_relative_path=str(row["document_relative_path"] or "") or None,
+                    source_relative_path=str(row["source_relative_path"] or "") or None,
+                    source_absolute_path=str(row["source_absolute_path"] or "") or None,
+                    page_number=_to_int(row["page_number"]),
+                )
+            )
+        return mentions
+
+    def _segment_lookup_for_ids(
+        self,
+        ev_ids: Iterable[str],
+    ) -> tuple[dict[str, sqlite3.Row], dict[tuple[int, int], int]]:
+        ids = sorted({str(ev_id) for ev_id in ev_ids if ev_id})
+        if not ids:
+            return {}, {}
+
+        segment_lookup: dict[str, sqlite3.Row] = {}
+        geometry_count: dict[tuple[int, int], int] = {}
+        with self._connection() as conn:
+            placeholders = ",".join("?" for _ in ids)
+            rows = conn.execute(
+                (
+                    "SELECT s.ev_id, s.page_number, s.normalized_text, d.relative_path, d.id AS document_id, "
+                    "d.source_relative_path, d.source_absolute_path "
+                    "FROM segments s JOIN documents d ON d.id = s.document_id "
+                    f"WHERE s.ev_id IN ({placeholders})"
+                ),
+                tuple(ids),
+            ).fetchall()
+            for row in rows:
+                segment_lookup[str(row["ev_id"])] = row
+
+            for document_id, page_number in {(int(row["document_id"]), int(row["page_number"])) for row in rows}:
+                count_row = conn.execute(
+                    "SELECT COUNT(*) AS count FROM geometry_spans WHERE document_id = ? AND page_number = ?",
+                    (document_id, page_number),
+                ).fetchone()
+                geometry_count[(document_id, page_number)] = int(count_row["count"] if count_row else 0)
+        return segment_lookup, geometry_count
+
+    def _verify_token(
+        self,
+        *,
+        token: CitationToken,
+        text: str,
+        segment_lookup: Mapping[str, sqlite3.Row],
+        geometry_count: Mapping[tuple[int, int], int],
+    ) -> CitationVerification:
+        segment = segment_lookup.get(token.ev_id)
+        if segment is None:
+            return CitationVerification(
+                token=token,
+                status="invalid",
+                reason="unknown evidence id",
+                confidence=0.0,
+                document_relative_path=None,
+                page_number=None,
+            )
+
+        context = text[max(0, token.start_offset - 240): min(len(text), token.end_offset + 240)]
+        context = context.replace(token.token, "")
+        overlap = _token_overlap_ratio(_normalize_text(context), str(segment["normalized_text"]))
+        doc_id = int(segment["document_id"])
+        page_number = int(segment["page_number"])
+        geometry_hits = geometry_count.get((doc_id, page_number), 0)
+        status = "valid"
+        reason = "verified"
+        if overlap < 0.06:
+            status = "warning"
+            reason = "low textual overlap with cited evidence"
+        if geometry_hits <= 0:
+            if status == "valid":
+                status = "warning"
+            reason = "verified without geometry mapping"
+        return CitationVerification(
+            token=token,
+            status=status,
+            reason=reason,
+            confidence=round(overlap, 4),
+            document_relative_path=str(segment["relative_path"]),
+            page_number=page_number,
         )
 
     def get_evidence_bundle(self, ev_id: str, *, window: int = 2) -> EvidenceBundle | None:
@@ -480,7 +771,8 @@ class CitationStore:
         with self._connection() as conn:
             row = conn.execute(
                 (
-                    "SELECT s.ev_id, s.document_id, s.page_number, s.ordinal, s.text, d.relative_path "
+                    "SELECT s.ev_id, s.document_id, s.page_number, s.ordinal, s.text, d.relative_path, "
+                    "d.source_relative_path, d.source_absolute_path "
                     "FROM segments s JOIN documents d ON d.id = s.document_id "
                     "WHERE s.ev_id = ?"
                 ),
@@ -522,7 +814,8 @@ class CitationStore:
 
             geometry_rows = conn.execute(
                 (
-                    "SELECT text, polygon_json, bbox_json, unit, source_path, chunk_index, normalized_text "
+                    "SELECT text, polygon_json, bbox_json, normalized_bbox_json, page_width, page_height, "
+                    "unit, source_path, chunk_index, normalized_text "
                     "FROM geometry_spans WHERE document_id = ? AND page_number = ?"
                 ),
                 (document_id, page),
@@ -539,6 +832,9 @@ class CitationStore:
                         "text": str(geo["text"] or ""),
                         "polygon": _json_or_none(geo["polygon_json"]),
                         "bbox": _json_or_none(geo["bbox_json"]),
+                        "normalized_bbox": _json_or_none(geo["normalized_bbox_json"]),
+                        "page_width": geo["page_width"],
+                        "page_height": geo["page_height"],
                         "unit": str(geo["unit"] or ""),
                         "source_path": str(geo["source_path"] or ""),
                         "chunk_index": geo["chunk_index"],
@@ -553,6 +849,8 @@ class CitationStore:
         return EvidenceBundle(
             ev_id=str(row["ev_id"]),
             document_relative_path=str(row["relative_path"]),
+            source_relative_path=str(row["source_relative_path"] or "") or None,
+            source_absolute_path=str(row["source_absolute_path"] or "") or None,
             page_number=page,
             text=str(row["text"]),
             neighbors=neighbors,
@@ -579,6 +877,8 @@ class CitationStore:
                 if not isinstance(page, dict):
                     continue
                 page_number = _to_int(page.get("page_number")) or _to_int(page.get("pageNumber")) or (pidx + 1)
+                page_width = _to_float(page.get("width"))
+                page_height = _to_float(page.get("height"))
                 unit = str(page.get("unit") or "")
                 lines = page.get("lines")
                 if isinstance(lines, list) and lines:
@@ -590,6 +890,7 @@ class CitationStore:
                             continue
                         polygon = line.get("polygon")
                         bbox = _polygon_to_bbox(polygon)
+                        normalized_bbox = _normalize_bbox(bbox, page_width=page_width, page_height=page_height)
                         norm = _normalize_text(text)
                         key = (int(page_number), norm, json.dumps(bbox, sort_keys=True) if bbox else "")
                         if key in seen:
@@ -602,6 +903,9 @@ class CitationStore:
                                 "normalized_text": norm,
                                 "polygon_json": json.dumps(polygon) if polygon is not None else None,
                                 "bbox_json": json.dumps(bbox) if bbox is not None else None,
+                                "normalized_bbox_json": json.dumps(normalized_bbox) if normalized_bbox is not None else None,
+                                "page_width": page_width,
+                                "page_height": page_height,
                                 "unit": unit,
                                 "source_path": f"{source_path}.pages[{pidx}].lines[{lidx}]",
                                 "chunk_index": chunk_index,
@@ -620,6 +924,7 @@ class CitationStore:
                         continue
                     polygon = para.get("polygon")
                     bbox = _polygon_to_bbox(polygon)
+                    normalized_bbox = _normalize_bbox(bbox, page_width=page_width, page_height=page_height)
                     norm = _normalize_text(text)
                     key = (int(page_number), norm, json.dumps(bbox, sort_keys=True) if bbox else "")
                     if key in seen:
@@ -632,6 +937,9 @@ class CitationStore:
                             "normalized_text": norm,
                             "polygon_json": json.dumps(polygon) if polygon is not None else None,
                             "bbox_json": json.dumps(bbox) if bbox is not None else None,
+                            "normalized_bbox_json": json.dumps(normalized_bbox) if normalized_bbox is not None else None,
+                            "page_width": page_width,
+                            "page_height": page_height,
                             "unit": unit,
                             "source_path": f"{source_path}.pages[{pidx}].paragraphs[{ridx}]",
                             "chunk_index": chunk_index,
@@ -649,6 +957,8 @@ class CitationStore:
         azure_raw_json_path: Path | None,
         pages_pdf: int | None,
         pages_detected: int | None,
+        source_relative_path: str | None,
+        source_absolute_path: str | None,
         indexed_at: str,
     ) -> int:
         azure_rel = ""
@@ -666,10 +976,20 @@ class CitationStore:
             cur = conn.execute(
                 (
                     "INSERT INTO documents ("
-                    "relative_path, source_checksum, azure_raw_json_path, pages_pdf, pages_detected, indexed_at"
-                    ") VALUES (?, ?, ?, ?, ?, ?)"
+                    "relative_path, source_checksum, azure_raw_json_path, pages_pdf, pages_detected, "
+                    "source_relative_path, source_absolute_path, indexed_at"
+                    ") VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
                 ),
-                (relative_path, source_checksum, azure_rel, pages_pdf, pages_detected, indexed_at),
+                (
+                    relative_path,
+                    source_checksum,
+                    azure_rel,
+                    pages_pdf,
+                    pages_detected,
+                    source_relative_path,
+                    source_absolute_path,
+                    indexed_at,
+                ),
             )
             return int(cur.lastrowid)
 
@@ -677,9 +997,18 @@ class CitationStore:
         conn.execute(
             (
                 "UPDATE documents SET source_checksum = ?, azure_raw_json_path = ?, pages_pdf = ?, "
-                "pages_detected = ?, indexed_at = ? WHERE id = ?"
+                "pages_detected = ?, source_relative_path = ?, source_absolute_path = ?, indexed_at = ? WHERE id = ?"
             ),
-            (source_checksum, azure_rel, pages_pdf, pages_detected, indexed_at, document_id),
+            (
+                source_checksum,
+                azure_rel,
+                pages_pdf,
+                pages_detected,
+                source_relative_path,
+                source_absolute_path,
+                indexed_at,
+                document_id,
+            ),
         )
         return document_id
 
@@ -691,8 +1020,14 @@ class CitationStore:
 
             if version < 1:
                 self._apply_schema_v1(conn)
-                conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
-                conn.commit()
+                version = 1
+
+            if version < 2:
+                self._apply_schema_v2(conn)
+                version = 2
+
+            conn.execute(f"PRAGMA user_version = {version}")
+            conn.commit()
 
     def _apply_schema_v1(self, conn: sqlite3.Connection) -> None:
         conn.executescript(
@@ -704,6 +1039,8 @@ class CitationStore:
                 azure_raw_json_path TEXT,
                 pages_pdf INTEGER,
                 pages_detected INTEGER,
+                source_relative_path TEXT,
+                source_absolute_path TEXT,
                 indexed_at TEXT NOT NULL
             );
 
@@ -731,6 +1068,9 @@ class CitationStore:
                 normalized_text TEXT,
                 polygon_json TEXT,
                 bbox_json TEXT,
+                normalized_bbox_json TEXT,
+                page_width REAL,
+                page_height REAL,
                 unit TEXT,
                 source_path TEXT,
                 chunk_index INTEGER,
@@ -753,7 +1093,8 @@ class CitationStore:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 output_id INTEGER NOT NULL,
                 token TEXT NOT NULL,
-                ev_id TEXT NOT NULL,
+                citation_label TEXT,
+                ev_id TEXT,
                 status TEXT NOT NULL,
                 reason TEXT,
                 confidence REAL,
@@ -761,6 +1102,8 @@ class CitationStore:
                 line INTEGER,
                 column INTEGER,
                 document_relative_path TEXT,
+                source_relative_path TEXT,
+                source_absolute_path TEXT,
                 page_number INTEGER,
                 created_at TEXT NOT NULL,
                 FOREIGN KEY(output_id) REFERENCES outputs(id) ON DELETE CASCADE
@@ -773,6 +1116,25 @@ class CitationStore:
             ON output_citations(ev_id);
             """
         )
+
+    def _apply_schema_v2(self, conn: sqlite3.Connection) -> None:
+        statements = [
+            "ALTER TABLE documents ADD COLUMN source_relative_path TEXT",
+            "ALTER TABLE documents ADD COLUMN source_absolute_path TEXT",
+            "ALTER TABLE geometry_spans ADD COLUMN normalized_bbox_json TEXT",
+            "ALTER TABLE geometry_spans ADD COLUMN page_width REAL",
+            "ALTER TABLE geometry_spans ADD COLUMN page_height REAL",
+            "ALTER TABLE output_citations ADD COLUMN citation_label TEXT",
+            "ALTER TABLE output_citations ADD COLUMN source_relative_path TEXT",
+            "ALTER TABLE output_citations ADD COLUMN source_absolute_path TEXT",
+        ]
+        for statement in statements:
+            try:
+                conn.execute(statement)
+            except sqlite3.OperationalError as exc:
+                if "duplicate column name" not in str(exc).lower():
+                    raise
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_output_citations_label ON output_citations(citation_label)")
 
     @contextmanager
     def _connection(self) -> Iterator[sqlite3.Connection]:
@@ -980,6 +1342,35 @@ def _to_int(value: object) -> int | None:
         return None
 
 
+def _to_float(value: object) -> float | None:
+    try:
+        return float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalize_bbox(
+    bbox: Mapping[str, object] | None,
+    *,
+    page_width: float | None,
+    page_height: float | None,
+) -> dict[str, float] | None:
+    if not bbox or not page_width or not page_height or page_width <= 0 or page_height <= 0:
+        return None
+    x_min = _to_float(bbox.get("x_min"))
+    x_max = _to_float(bbox.get("x_max"))
+    y_min = _to_float(bbox.get("y_min"))
+    y_max = _to_float(bbox.get("y_max"))
+    if None in {x_min, x_max, y_min, y_max}:
+        return None
+    return {
+        "x_min": max(0.0, min(float(x_min) / page_width, 1.0)),
+        "y_min": max(0.0, min(float(y_min) / page_height, 1.0)),
+        "x_max": max(0.0, min(float(x_max) / page_width, 1.0)),
+        "y_max": max(0.0, min(float(y_max) / page_height, 1.0)),
+    }
+
+
 def _json_or_none(value: object) -> object:
     if value is None:
         return None
@@ -999,11 +1390,13 @@ def _utcnow_iso() -> str:
 
 
 __all__ = [
+    "CitationLedgerEntry",
     "CitationRecordStats",
     "CitationStore",
     "CitationToken",
     "CitationVerification",
     "EvidenceBundle",
     "IndexStats",
+    "OutputCitationMention",
     "parse_citation_tokens",
 ]

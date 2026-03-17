@@ -179,6 +179,47 @@ def test_workspace_run_executes_worker_and_updates_ui(tmp_path: Path, qt_app: QA
     workspace.deleteLater()
 
 
+def test_bulk_actions_show_review_button_only_for_map_groups(
+    tmp_path: Path,
+    qt_app: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert qt_app is not None
+
+    manager, _group = _create_project_with_group(tmp_path)
+    pool = _CaptureThreadPool()
+    monkeypatch.setattr(project_workspace, "get_worker_pool", lambda: pool)
+
+    workspace = ProjectWorkspace()
+    workspace.set_project(manager)
+    QCoreApplication.processEvents()
+
+    action_widget = workspace.bulk_controller.tab.table.cellWidget(0, 6)  # type: ignore[union-attr]
+    assert _find_button(action_widget, "Review Outputs…")
+    workspace.deleteLater()
+
+
+def test_bulk_actions_hide_review_button_for_combined_groups(
+    tmp_path: Path,
+    qt_app: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert qt_app is not None
+
+    manager, _group = _create_project_with_combined_group(tmp_path)
+    pool = _CaptureThreadPool()
+    monkeypatch.setattr(project_workspace, "get_worker_pool", lambda: pool)
+
+    workspace = ProjectWorkspace()
+    workspace.set_project(manager)
+    QCoreApplication.processEvents()
+
+    action_widget = workspace.bulk_controller.tab.table.cellWidget(0, 6)  # type: ignore[union-attr]
+    with pytest.raises(AssertionError):
+        _find_button(action_widget, "Review Outputs…")
+    workspace.deleteLater()
+
+
 def test_workspace_defaults_to_bulk_tab_when_converted_docs_exist(
     tmp_path: Path,
     qt_app: QApplication,

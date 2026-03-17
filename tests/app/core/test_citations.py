@@ -154,3 +154,68 @@ def test_citation_store_ingests_chunked_azure_json(tmp_path: Path) -> None:
 
     assert stats.segments_indexed >= 1
     assert stats.geometry_spans_indexed >= 1
+
+
+def test_citation_store_builds_and_records_local_citation_labels(tmp_path: Path) -> None:
+    project_dir = tmp_path
+    store = CitationStore(project_dir)
+
+    raw_json = project_dir / "converted_documents" / "case" / "doc.azure.raw.json"
+    raw_json.parent.mkdir(parents=True, exist_ok=True)
+    raw_json.write_text(
+        json.dumps(
+            {
+                "pages": [
+                    {
+                        "page_number": 1,
+                        "width": 1000,
+                        "height": 2000,
+                        "unit": "pixel",
+                        "lines": [
+                            {
+                                "content": "Patient reported insomnia and anxiety.",
+                                "polygon": [100, 200, 600, 200, 600, 260, 100, 260],
+                            }
+                        ],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    markdown = "<!--- case/doc.pdf#page=1 --->\nPatient reported insomnia and anxiety.\n"
+    store.index_converted_document(
+        relative_path="case/doc.md",
+        markdown_text=markdown,
+        source_checksum="checksum-local",
+        azure_raw_json_path=raw_json,
+        pages_pdf=1,
+        pages_detected=1,
+        source_relative_path="case/doc.pdf",
+        source_absolute_path=(project_dir / "case" / "doc.pdf").as_posix(),
+    )
+
+    appendix, label_mapping = store.build_local_citation_appendix(relative_path="case/doc.md", page_numbers=[1])
+    assert "[C1]" in appendix
+    assert label_mapping["C1"].startswith("ev_")
+
+    output_path = project_dir / "bulk_analysis" / "demo" / "case" / "doc_analysis.md"
+    record = store.record_output_citations(
+        output_path=output_path,
+        output_text="Patient reported insomnia and anxiety. [C1]",
+        generator="bulk_analysis_worker",
+        prompt_hash="hash-local",
+        label_mapping=label_mapping,
+    )
+    assert record.total == 1
+    assert record.valid == 1
+
+    mentions = store.list_output_citation_mentions(output_path)
+    assert len(mentions) == 1
+    assert mentions[0].citation_label == "C1"
+
+    bundle = store.get_evidence_bundle(label_mapping["C1"])
+    assert bundle is not None
+    assert bundle.source_relative_path == "case/doc.pdf"
+    assert bundle.geometry[0]["normalized_bbox"]["x_min"] == 0.1

@@ -33,9 +33,10 @@ from src.app.core.bulk_analysis_runner import (
     render_user_prompt,
     should_chunk,
 )
-from src.app.core.citations import PAGE_MARKER_RE, CitationRecordStats, CitationStore
+from src.app.core.citations import PAGE_MARKER_RE, CitationLedgerEntry, CitationRecordStats, CitationStore
 from src.app.core.bulk_prompt_context import build_bulk_placeholders
 from src.app.core.placeholders.system import SourceFileContext
+from src.app.core.prompt_assembly import append_generated_prompt_section
 from src.app.core.project_manager import ProjectMetadata
 from src.common.llm.budgets import compute_input_token_budget
 from src.common.llm.request_budget import (
@@ -100,6 +101,7 @@ class _ChunkTaskSpec:
     chunk_total: int
     chunk_checksum: str
     prompt: str
+    system_prompt: str
     context_label: str
     trace_attributes: dict[str, object]
 
@@ -702,6 +704,7 @@ class BulkAnalysisWorker(DashboardWorker):
                             output_path=document.output_path,
                             output_text=summary,
                             prompt_hash=prompt_hash,
+                            label_mapping=run_details.get("citation_label_mapping"),
                         )
                         successes += 1
                         ran_timestamp = written_at.isoformat()
@@ -840,15 +843,17 @@ class BulkAnalysisWorker(DashboardWorker):
             body,
             placeholder_values=doc_placeholders,
         )
-        full_ledger = self._build_document_evidence_ledger(
+        citation_entries = self._build_document_citation_entries(
             relative_path=document.relative_path,
             content=body,
         )
-        full_prompt = self._append_citation_ledger(full_prompt, full_ledger)
+        full_citation_appendix = self._render_citation_appendix(entries=citation_entries)
+        citation_label_mapping = {entry.citation_label: entry.ev_id for entry in citation_entries}
+        effective_system_prompt = self._append_citation_appendix(system_prompt, full_citation_appendix)
         full_prompt_tokens = self._count_prompt_tokens(
             provider,
             provider_config,
-            system_prompt,
+            effective_system_prompt,
             full_prompt,
             max_tokens=map_max_tokens,
             allow_backend_preflight=False,
@@ -882,7 +887,7 @@ class BulkAnalysisWorker(DashboardWorker):
             provider=provider,
             provider_config=provider_config,
             bundle=bundle,
-            system_prompt=system_prompt,
+            system_prompt=effective_system_prompt,
             document=document,
             placeholder_values=doc_placeholders,
             max_tokens=map_max_tokens,
@@ -902,12 +907,13 @@ class BulkAnalysisWorker(DashboardWorker):
                     provider,
                     provider_config,
                     full_prompt,
-                    system_prompt,
+                    effective_system_prompt,
                     max_tokens=map_max_tokens,
                     input_budget=input_budget,
                     preflight_input_budget=preflight_input_budget,
                     context_label=f"document '{document.relative_path}'",
                 )
+                run_details["citation_label_mapping"] = dict(citation_label_mapping)
                 return result, run_details, doc_placeholders
             except _ProviderPromptLimitError as exc:
                 learned_limit = self._register_provider_input_budget(provider_config, exc.configured_limit)
@@ -1014,13 +1020,14 @@ class BulkAnalysisWorker(DashboardWorker):
                 provider=provider,
                 provider_config=provider_config,
                 bundle=bundle,
-                system_prompt=system_prompt,
+                system_prompt=effective_system_prompt,
                 document=document,
                 body=body,
                 placeholder_values=doc_placeholders,
                 input_budget=preflight_input_budget or input_budget,
                 initial_chunk_tokens=adjusted_chunk_target,
                 max_tokens=map_max_tokens,
+                citation_entries=citation_entries,
             )
             if not chunks:
                 run_details["chunk_count"] = 1
@@ -1035,12 +1042,13 @@ class BulkAnalysisWorker(DashboardWorker):
                     provider,
                     provider_config,
                     full_prompt,
-                    system_prompt,
+                    effective_system_prompt,
                     max_tokens=map_max_tokens,
                     input_budget=input_budget,
                     preflight_input_budget=preflight_input_budget,
                     context_label=f"document '{document.relative_path}'",
                 )
+                run_details["citation_label_mapping"] = dict(citation_label_mapping)
                 return result, run_details, doc_placeholders
             try:
                 self._emit_progress_detail(
@@ -1053,7 +1061,7 @@ class BulkAnalysisWorker(DashboardWorker):
                     provider=provider,
                     provider_config=provider_config,
                     bundle=bundle,
-                    system_prompt=system_prompt,
+                    system_prompt=effective_system_prompt,
                     document=document,
                     doc_placeholders=doc_placeholders,
                     manifest=manifest,
@@ -1069,6 +1077,8 @@ class BulkAnalysisWorker(DashboardWorker):
                     preflight_input_budget=preflight_input_budget or input_budget,
                     map_max_tokens=map_max_tokens,
                     chunk_fanout_override=chunk_fanout_override,
+                    citation_entries=citation_entries,
+                    citation_label_mapping=citation_label_mapping,
                 )
             except _ProviderPromptLimitError as exc:
                 provider_limit_retries += 1
@@ -1159,6 +1169,8 @@ class BulkAnalysisWorker(DashboardWorker):
         preflight_input_budget: int,
         map_max_tokens: int,
         chunk_fanout_override: int | None = None,
+        citation_entries: Sequence[CitationLedgerEntry] = (),
+        citation_label_mapping: Mapping[str, str] | None = None,
     ) -> tuple[str, Dict[str, object], Dict[str, str]]:
         documents = manifest.setdefault("documents", {})  # type: ignore[assignment]
         entry: Dict[str, object] = dict(documents.get(document.relative_path, {}) or {})
@@ -1284,6 +1296,8 @@ class BulkAnalysisWorker(DashboardWorker):
                         chunk_total=total_chunks,
                         chunk_checksum=chunk_checksum,
                         provider_config=provider_config,
+                        system_prompt=system_prompt,
+                        citation_entries=citation_entries,
                     )
                 )
 
@@ -1539,6 +1553,7 @@ class BulkAnalysisWorker(DashboardWorker):
         recovery_documents[document.relative_path] = recovery_entry
         _save_manifest(manifest_path, manifest)
         recovery_store.save_map_manifest(recovery_manifest)
+        run_details["citation_label_mapping"] = dict(citation_label_mapping or {})
         return result, run_details, doc_placeholders
 
     def _chunk_fanout_max_concurrency(self) -> int:
@@ -1612,6 +1627,8 @@ class BulkAnalysisWorker(DashboardWorker):
         chunk_total: int,
         chunk_checksum: str,
         provider_config: ProviderConfig,
+        system_prompt: str,
+        citation_entries: Sequence[CitationLedgerEntry],
     ) -> _ChunkTaskSpec:
         chunk_prompt = render_user_prompt(
             bundle,
@@ -1622,15 +1639,20 @@ class BulkAnalysisWorker(DashboardWorker):
             chunk_total=chunk_total,
             placeholder_values=doc_placeholders,
         )
-        chunk_ledger = self._build_document_evidence_ledger(
-            relative_path=document.relative_path,
+        chunk_entries = self._filter_citation_entries_for_content(
+            entries=citation_entries,
             content=chunk,
+        )
+        chunk_system_prompt = self._append_citation_appendix(
+            system_prompt,
+            self._render_citation_appendix(entries=chunk_entries),
         )
         return _ChunkTaskSpec(
             chunk_index=chunk_index,
             chunk_total=chunk_total,
             chunk_checksum=chunk_checksum,
-            prompt=self._append_citation_ledger(chunk_prompt, chunk_ledger),
+            prompt=chunk_prompt,
+            system_prompt=chunk_system_prompt,
             context_label=f"chunk {chunk_index}/{chunk_total} for '{document.relative_path}'",
             trace_attributes=self._chunk_trace_attributes(
                 provider_config=provider_config,
@@ -1660,7 +1682,6 @@ class BulkAnalysisWorker(DashboardWorker):
             future = executor.submit(
                 self._execute_chunk_task,
                 provider_config=provider_config,
-                system_prompt=system_prompt,
                 spec=spec,
                 map_max_tokens=map_max_tokens,
                 input_budget=input_budget,
@@ -1686,7 +1707,6 @@ class BulkAnalysisWorker(DashboardWorker):
         self,
         *,
         provider_config: ProviderConfig,
-        system_prompt: str,
         spec: _ChunkTaskSpec,
         map_max_tokens: int,
         input_budget: int,
@@ -1699,7 +1719,7 @@ class BulkAnalysisWorker(DashboardWorker):
                     provider,
                     provider_config,
                     spec.prompt,
-                    system_prompt,
+                    spec.system_prompt,
                     max_tokens=map_max_tokens,
                     input_budget=input_budget,
                     preflight_input_budget=preflight_input_budget,
@@ -2122,6 +2142,7 @@ class BulkAnalysisWorker(DashboardWorker):
         input_budget: int,
         initial_chunk_tokens: int,
         max_tokens: int,
+        citation_entries: Sequence[CitationLedgerEntry] = (),
     ) -> List[str]:
         chunk_target = max(initial_chunk_tokens, _MIN_CHUNK_TOKEN_TARGET)
         allow_backend_preflight = self._chunk_fit_count_mode(provider_config) == "exact"
@@ -2143,15 +2164,18 @@ class BulkAnalysisWorker(DashboardWorker):
                     chunk_total=total_chunks,
                     placeholder_values=placeholder_values,
                 )
-                chunk_ledger = self._build_document_evidence_ledger(
-                    relative_path=document.relative_path,
+                chunk_entries = self._filter_citation_entries_for_content(
+                    entries=citation_entries,
                     content=chunk,
                 )
-                prompt = self._append_citation_ledger(prompt, chunk_ledger)
+                chunk_system_prompt = self._append_citation_appendix(
+                    system_prompt,
+                    self._render_citation_appendix(entries=chunk_entries),
+                )
                 prompt_tokens, count_mode = self._count_prompt_tokens_with_mode(
                     provider,
                     provider_config,
-                    system_prompt,
+                    chunk_system_prompt,
                     prompt,
                     max_tokens=max_tokens,
                     allow_backend_preflight=allow_backend_preflight,
@@ -2548,31 +2572,62 @@ class BulkAnalysisWorker(DashboardWorker):
     def _serialise_placeholders(self, placeholders: Mapping[str, str]) -> Dict[str, str]:
         return {key: placeholders.get(key, "") for key in sorted(placeholders)}
 
-    def _append_citation_ledger(self, prompt: str, ledger: str) -> str:
-        if not ledger.strip():
-            return prompt
-        return f"{prompt.rstrip()}\\n\\n{ledger.rstrip()}\\n"
+    def _append_citation_appendix(self, system_prompt: str, appendix: str) -> str:
+        return append_generated_prompt_section(system_prompt, appendix)
 
     def _build_document_evidence_ledger(self, *, relative_path: str, content: str) -> str:
+        entries = self._build_document_citation_entries(relative_path=relative_path, content=content)
+        return self._render_citation_appendix(entries=entries)
+
+    def _build_document_citation_entries(
+        self,
+        *,
+        relative_path: str,
+        content: str,
+    ) -> list[CitationLedgerEntry]:
         if self._citation_store is None:
-            return ""
+            return []
         pages = self._extract_page_numbers(content)
         if not pages:
-            return ""
+            return []
         try:
-            return self._citation_store.build_evidence_ledger(
+            return self._citation_store.list_local_citation_entries(
                 relative_path=relative_path,
                 page_numbers=pages,
                 max_entries=120,
             )
         except Exception:
             self.logger.debug(
-                "%s failed to build evidence ledger for %s",
+                "%s failed to build citation entries for %s",
                 self.job_tag,
                 relative_path,
                 exc_info=True,
             )
+            return []
+
+    def _render_citation_appendix(
+        self,
+        *,
+        entries: Sequence[CitationLedgerEntry],
+    ) -> str:
+        if self._citation_store is None:
             return ""
+        try:
+            return self._citation_store.render_local_citation_appendix(entries)
+        except Exception:
+            self.logger.debug("%s failed to render citation appendix", self.job_tag, exc_info=True)
+            return ""
+
+    def _filter_citation_entries_for_content(
+        self,
+        *,
+        entries: Sequence[CitationLedgerEntry],
+        content: str,
+    ) -> list[CitationLedgerEntry]:
+        pages = set(self._extract_page_numbers(content))
+        if not pages:
+            return list(entries)
+        return [entry for entry in entries if entry.page_number in pages]
 
     def _extract_page_numbers(self, content: str) -> list[int]:
         pages = [int(match.group(1)) for match in PAGE_MARKER_RE.finditer(content)]
@@ -2587,6 +2642,7 @@ class BulkAnalysisWorker(DashboardWorker):
         output_path: Path,
         output_text: str,
         prompt_hash: str,
+        label_mapping: Mapping[str, str] | None = None,
     ) -> CitationRecordStats | None:
         if self._citation_store is None:
             return None
@@ -2596,6 +2652,7 @@ class BulkAnalysisWorker(DashboardWorker):
                 output_text=output_text,
                 generator="bulk_analysis_worker",
                 prompt_hash=prompt_hash,
+                label_mapping=label_mapping,
             )
         except Exception:
             self.logger.debug(

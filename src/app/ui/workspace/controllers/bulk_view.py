@@ -131,6 +131,7 @@ def build_action_widget(
     on_recover: Callable[[BulkAnalysisGroup], None],
     on_edit: Callable[[BulkAnalysisGroup], None],
     on_open_group_folder: Callable[[BulkAnalysisGroup], None],
+    on_review_outputs: Callable[[BulkAnalysisGroup], None],
     on_preview_prompt: Callable[[BulkAnalysisGroup], None],
     on_open_latest_combined: Callable[[BulkAnalysisGroup], None],
     on_delete: Callable[[BulkAnalysisGroup], None],
@@ -185,6 +186,12 @@ def build_action_widget(
     open_button = QPushButton("Open Folder")
     open_button.clicked.connect(lambda _, g=group: on_open_group_folder(g))
     layout.addWidget(open_button)
+
+    if op_type != "combined":
+        review_button = QPushButton("Review Outputs…")
+        review_button.setEnabled(not is_running and not is_cancelling)
+        review_button.clicked.connect(lambda _, g=group: on_review_outputs(g))
+        layout.addWidget(review_button)
 
     prompt_button = QPushButton("Preview Prompt")
     prompt_button.clicked.connect(lambda _, g=group: on_preview_prompt(g))

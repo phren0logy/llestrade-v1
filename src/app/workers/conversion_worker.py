@@ -557,6 +557,8 @@ class ConversionWorker(DashboardWorker):
             metadata_map.update(metadata)
 
         source_checksum: str | None = None
+        source_relative_path: str | None = None
+        source_absolute_path: str | None = None
         sources = metadata_map.get("sources")
         if isinstance(sources, list):
             for source in sources:
@@ -565,9 +567,26 @@ class ConversionWorker(DashboardWorker):
                 checksum = source.get("checksum")
                 if isinstance(checksum, str) and checksum:
                     source_checksum = checksum
+                relative_value = source.get("relative")
+                if isinstance(relative_value, str) and relative_value.strip() and not source_relative_path:
+                    source_relative_path = relative_value.strip()
+                path_value = source.get("path")
+                if isinstance(path_value, str) and path_value.strip() and not source_absolute_path:
+                    try:
+                        candidate = Path(path_value).expanduser()
+                        if not candidate.is_absolute():
+                            candidate = (project_dir / candidate).resolve()
+                        source_absolute_path = candidate.resolve().as_posix()
+                    except Exception:
+                        source_absolute_path = path_value.strip()
+                if source_checksum and source_relative_path and source_absolute_path:
                     break
         if not source_checksum:
             source_checksum = compute_file_checksum(job.source_path)
+        if not source_relative_path:
+            source_relative_path = job.relative_path
+        if not source_absolute_path:
+            source_absolute_path = job.source_path.resolve().as_posix()
 
         if raw_json_path is None:
             raw_json_value = metadata_map.get("azure_raw_json_path")
@@ -591,6 +610,8 @@ class ConversionWorker(DashboardWorker):
                 azure_raw_json_path=raw_json_path,
                 pages_pdf=pages_pdf_val,
                 pages_detected=pages_detected_val,
+                source_relative_path=source_relative_path,
+                source_absolute_path=source_absolute_path,
             )
             self.logger.info(
                 "%s indexed citation evidence for %s (segments=%s, geometry=%s)",

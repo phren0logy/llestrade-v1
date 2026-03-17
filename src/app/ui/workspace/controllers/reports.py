@@ -688,6 +688,8 @@ class ReportsController:
         preview = PromptPreview(
             system_template=system_template,
             user_template=user_template,
+            system_appendix="",
+            user_appendix="",
             system_rendered=system_rendered,
             user_rendered=user_rendered,
             values=values,

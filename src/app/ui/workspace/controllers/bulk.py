@@ -35,6 +35,7 @@ from src.app.core.job_cost_estimates import (
 from src.app.core.prompt_placeholders import get_prompt_spec
 from src.app.ui.workspace.bulk_tab import BulkAnalysisTab
 from src.app.ui.workspace.services import BulkAnalysisService
+from src.app.ui.dialogs.bulk_citation_review_dialog import BulkCitationReviewDialog
 from src.app.ui.dialogs.bulk_recovery_dialog import BulkRecoveryDialog, RecoveryAction
 from src.app.core.placeholders.analyzer import PlaceholderAnalysis
 from src.app.workers.progress import WorkerProgressDetail
@@ -297,6 +298,7 @@ class BulkAnalysisController:
             on_recover=self.open_recovery_dialog,
             on_edit=self._on_edit_group,
             on_open_group_folder=self._on_open_group_folder,
+            on_review_outputs=self.open_review_dialog,
             on_preview_prompt=self._on_show_prompt_preview,
             on_open_latest_combined=self._on_open_latest_combined,
             on_delete=self._on_delete_group,
@@ -313,6 +315,18 @@ class BulkAnalysisController:
                 parent.addChild(QTreeWidgetItem(["File", file_path]))
             tree.addTopLevelItem(parent)
         tree.expandAll()
+
+    def open_review_dialog(self, group: BulkAnalysisGroup) -> None:
+        manager = self._project_manager
+        if manager is None or not manager.project_dir:
+            QMessageBox.warning(self._workspace, "Citation Review", "Open a project first.")
+            return
+        dialog = BulkCitationReviewDialog(
+            project_dir=Path(manager.project_dir),
+            group=group,
+            parent=self._workspace,
+        )
+        dialog.exec()
 
     def _analyse_placeholders(self, group: BulkAnalysisGroup) -> tuple[PlaceholderAnalysis | None, set[str], set[str]]:
         return analyse_group_placeholders(

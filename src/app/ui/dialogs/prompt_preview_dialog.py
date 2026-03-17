@@ -27,6 +27,7 @@ from src.app.core.placeholders.analyzer import (
     highlight_placeholders_raw,
     render_preview_html,
 )
+from src.app.core.prompt_assembly import GENERATED_CITATION_APPENDIX_TITLE
 from src.app.core.prompt_preview import PromptPreview
 
 class PromptPreviewDialog(QDialog):
@@ -136,16 +137,41 @@ class PromptPreviewDialog(QDialog):
                 raw_html = preview_html = blank
             return raw_html, preview_html
 
-        self._raw_system_html, self._preview_system_html = _html_or_placeholder(
+        self._raw_system_html, _ = _html_or_placeholder(
             preview.system_template,
             lambda tpl: highlight_placeholders_raw(tpl, values=preview.values, required=required_set),
             lambda tpl: render_preview_html(tpl, values=preview.values, required=required_set),
         )
-        self._raw_user_html, self._preview_user_html = _html_or_placeholder(
+        self._raw_user_html, _ = _html_or_placeholder(
             preview.user_template,
             lambda tpl: highlight_placeholders_raw(tpl, values=preview.values, required=required_set),
             lambda tpl: render_preview_html(tpl, values=preview.values, required=required_set),
         )
+
+        if preview.system_appendix.strip():
+            appendix_html = (
+                f"\n\n<hr><div style='font-weight:600; margin: 0.6rem 0 0.4rem 0;'>"
+                f"{GENERATED_CITATION_APPENDIX_TITLE}</div><pre>{preview.system_appendix}</pre>"
+            )
+            self._raw_system_html += appendix_html
+        if preview.user_appendix.strip():
+            appendix_html = (
+                f"\n\n<hr><div style='font-weight:600; margin: 0.6rem 0 0.4rem 0;'>"
+                "Generated User Appendix</div><pre>"
+                f"{preview.user_appendix}</pre>"
+            )
+            self._raw_user_html += appendix_html
+
+        self._preview_system_html = css + "<pre>" + render_preview_html(
+            preview.system_rendered,
+            values=preview.values,
+            required=required_set,
+        ) + "</pre>"
+        self._preview_user_html = css + "<pre>" + render_preview_html(
+            preview.user_rendered,
+            values=preview.values,
+            required=required_set,
+        ) + "</pre>"
 
         self._preview = preview
         self._analysis = analysis

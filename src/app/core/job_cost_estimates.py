@@ -339,7 +339,7 @@ def estimate_bulk_map_cost(
     provider_config = worker._resolve_provider()
     bundle = load_prompts(project_dir, group, metadata)
     global_placeholders = worker._build_placeholder_map()
-    system_prompt = render_system_prompt(bundle, metadata, placeholder_values=global_placeholders)
+    base_system_prompt = render_system_prompt(bundle, metadata, placeholder_values=global_placeholders)
     documents = [
         BulkAnalysisDocument(
             source_path=project_dir / "converted_documents" / relative,
@@ -403,10 +403,18 @@ def estimate_bulk_map_cost(
             body,
             placeholder_values=doc_placeholders,
         )
+        citation_entries = worker._build_document_citation_entries(
+            relative_path=document.relative_path,
+            content=body,
+        )
+        effective_system_prompt = worker._append_citation_appendix(
+            base_system_prompt,
+            worker._render_citation_appendix(entries=citation_entries),
+        )
         full_request = evaluate_request_budget(
             provider_id=provider_config.provider_id,
             model_id=provider_config.model,
-            system_prompt=system_prompt,
+            system_prompt=effective_system_prompt,
             user_prompt=full_prompt,
             raw_context_window=raw_context_window,
             max_output_tokens=map_max_tokens,
@@ -461,7 +469,7 @@ def estimate_bulk_map_cost(
             provider=object(),
             provider_config=provider_config,
             bundle=bundle,
-            system_prompt=system_prompt,
+            system_prompt=effective_system_prompt,
             document=document,
             body=body,
             placeholder_values=doc_placeholders,
@@ -471,6 +479,7 @@ def estimate_bulk_map_cost(
                 default_chunk_tokens=default_chunk_tokens,
             ),
             max_tokens=map_max_tokens,
+            citation_entries=citation_entries,
         )
         best_summary_tokens: list[int] = []
         ceiling_summary_tokens: list[int] = []
@@ -484,10 +493,15 @@ def estimate_bulk_map_cost(
                 chunk_total=len(chunks),
                 placeholder_values=doc_placeholders,
             )
+            chunk_entries = worker._filter_citation_entries_for_content(entries=citation_entries, content=chunk)
+            chunk_system_prompt = worker._append_citation_appendix(
+                base_system_prompt,
+                worker._render_citation_appendix(entries=chunk_entries),
+            )
             input_tokens = evaluate_request_budget(
                 provider_id=provider_config.provider_id,
                 model_id=provider_config.model,
-                system_prompt=system_prompt,
+                system_prompt=chunk_system_prompt,
                 user_prompt=prompt,
                 raw_context_window=raw_context_window,
                 max_output_tokens=map_max_tokens,
@@ -507,7 +521,7 @@ def estimate_bulk_map_cost(
                 document_name=document.relative_path,
                 metadata=metadata,
                 placeholder_values=doc_placeholders,
-                system_prompt=system_prompt,
+                system_prompt=effective_system_prompt,
                 provider_id=provider_config.provider_id,
                 model_id=provider_config.model,
                 summary_tokens=best_summary_tokens,
@@ -522,7 +536,7 @@ def estimate_bulk_map_cost(
                 document_name=document.relative_path,
                 metadata=metadata,
                 placeholder_values=doc_placeholders,
-                system_prompt=system_prompt,
+                system_prompt=effective_system_prompt,
                 provider_id=provider_config.provider_id,
                 model_id=provider_config.model,
                 summary_tokens=ceiling_summary_tokens,

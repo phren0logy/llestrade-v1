@@ -13,6 +13,8 @@ from src.app.core.bulk_analysis_runner import load_prompts
 from src.app.core.bulk_analysis_runner import _metadata_context  # type: ignore[attr-defined]
 from src.app.core.project_manager import ProjectMetadata
 from src.app.core.bulk_analysis_groups import BulkAnalysisGroup
+from src.app.core.citations import CitationStore, PAGE_MARKER_RE
+from src.app.core.prompt_assembly import append_generated_prompt_section
 from src.app.core.prompt_placeholders import get_prompt_spec, format_prompt
 from src.app.core.placeholders.system import SourceFileContext
 from src.app.core.bulk_paths import (
@@ -32,6 +34,8 @@ class PromptPreviewError(RuntimeError):
 class PromptPreview:
     system_template: str
     user_template: str
+    system_appendix: str
+    user_appendix: str
     system_rendered: str
     user_rendered: str
     values: dict[str, str]
@@ -104,7 +108,7 @@ def generate_prompt_preview(
     )
     system_context = dict(metadata_context)
     system_context.update(system_placeholders)
-    system_rendered = format_prompt(bundle.system_template, system_context)
+    system_template_rendered = format_prompt(bundle.system_template, system_context)
 
     document_placeholders = build_bulk_placeholders(
         base_placeholders=base_placeholder_values,
@@ -120,7 +124,18 @@ def generate_prompt_preview(
         }
     )
     user_context.update(document_placeholders)
-    user_rendered = format_prompt(bundle.user_template, user_context)
+    user_template_rendered = format_prompt(bundle.user_template, user_context)
+
+    system_appendix = ""
+    if operation != "combined":
+        system_appendix = _build_bulk_citation_appendix(
+            project_dir=project_dir,
+            preview_path=preview_path,
+            content=body,
+        )
+    system_rendered = append_generated_prompt_section(system_template_rendered, system_appendix)
+    user_appendix = ""
+    user_rendered = append_generated_prompt_section(user_template_rendered, user_appendix)
 
     required: set[str] = set()
     optional: set[str] = set()
@@ -139,6 +154,8 @@ def generate_prompt_preview(
     return PromptPreview(
         system_template=bundle.system_template,
         user_template=bundle.user_template,
+        system_appendix=system_appendix,
+        user_appendix=user_appendix,
         system_rendered=system_rendered,
         user_rendered=user_rendered,
         values=values,
@@ -192,6 +209,32 @@ def _resolve_first_per_document_input(
 
     first_relative = ordered[0]
     return file_map[first_relative], first_relative
+
+
+def _build_bulk_citation_appendix(
+    *,
+    project_dir: Path,
+    preview_path: Path,
+    content: str,
+) -> str:
+    converted_root = project_dir / "converted_documents"
+    try:
+        relative_path = preview_path.resolve().relative_to(converted_root.resolve()).as_posix()
+    except Exception:
+        return ""
+
+    pages = [int(match.group(1)) for match in PAGE_MARKER_RE.finditer(content)]
+
+    try:
+        store = CitationStore(project_dir)
+        appendix, _ = store.build_local_citation_appendix(
+            relative_path=relative_path,
+            page_numbers=list(dict.fromkeys(pages))[:40] if pages else None,
+            max_entries=120,
+        )
+        return appendix
+    except Exception:
+        return ""
 
 
 def _truncate_markdown(content: str, max_lines: int) -> str:

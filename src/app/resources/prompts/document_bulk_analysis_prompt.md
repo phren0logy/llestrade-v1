@@ -29,9 +29,9 @@ Please analyze the document content, wrapped in "document-content" tags, and pro
 - Adverse life events
 - A timeline of events in a markdown table format with columns for Date, Event, and Significance
 
-Include citation markers for every factual claim using only IDs from the Citation Evidence Ledger appended below.
-Use the exact format `[CIT:ev_<id>]` and place one or more markers at the end of each claim.
-Never invent IDs. If no supporting evidence exists in the ledger, explicitly say that evidence is unavailable.
+Include citation markers for every factual claim using only labels from the Generated Citation Appendix.
+Use the exact inline format defined there, such as `[C1]`, and place one or more markers at the end of each claim.
+Never invent citation labels. If no supporting evidence exists in the appendix, explicitly say that evidence is unavailable.
 
 ## Timeline Instructions
 
