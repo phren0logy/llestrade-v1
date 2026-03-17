@@ -18,6 +18,7 @@ from src.app.core.bulk_analysis_runner import (
     should_chunk,
 )
 from src.app.core.bulk_prompt_context import build_bulk_placeholders
+from src.app.core.citations import strip_citation_tokens
 from src.app.core.bulk_recovery import BulkRecoveryStore
 from src.app.core.llm_catalog import calculate_usage_cost
 from src.app.core.llm_operation_settings import LLMOperationSettings, normalize_context_window_override
@@ -49,7 +50,11 @@ from src.app.workers.bulk_reduce_worker import (
     BulkReduceWorker,
     ProviderConfig as ReduceProviderConfig,
 )
-from src.app.workers.report_common import ReportWorkerBase, _MIN_REPORT_INPUT_BUDGET
+from src.app.workers.report_common import (
+    ReportWorkerBase,
+    _MIN_REPORT_INPUT_BUDGET,
+    build_report_citation_appendix,
+)
 from src.app.workers.llm_backend import PydanticAIDirectBackend
 
 
@@ -595,6 +600,11 @@ def estimate_bulk_reduce_cost(
             contexts[ctx.relative_path] = ctx
     placeholders = worker._build_placeholder_map(reduce_sources=list(contexts.values()))
     system_prompt = render_system_prompt(bundle, metadata, placeholder_values=placeholders)
+    citation_entries = worker._build_reduce_citation_entries(inputs)
+    system_prompt = worker._append_citation_appendix(
+        system_prompt,
+        worker._render_reduce_citation_appendix(citation_entries),
+    )
     content = worker._assemble_combined_content(inputs)
     raw_context_window = normalize_context_window_override(
         provider_id=provider_cfg.provider_id,
@@ -797,10 +807,15 @@ def estimate_report_draft_cost(
         llm_backend=PydanticAIDirectBackend(),
     )
     placeholder_map = worker._placeholder_map()
-    combined_content, _ = worker._combine_inputs()
+    combined_content, inputs_metadata = worker._combine_inputs()
     transcript_text = transcript_path.read_text(encoding="utf-8").strip() if transcript_path and transcript_path.exists() else ""
     system_template = generation_system_prompt_path.read_text(encoding="utf-8").strip()
     system_prompt = format_prompt(system_template, placeholder_map)
+    system_appendix, _ = build_report_citation_appendix(
+        citation_store=worker._citation_store,
+        inputs_metadata=inputs_metadata,
+    )
+    system_prompt = worker._append_citation_appendix(system_prompt, system_appendix)
     user_template = read_generation_prompt(generation_user_prompt_path)
     sections = load_template_sections(template_path)
     best_costs: list[float | None] = []
@@ -866,12 +881,18 @@ def estimate_report_refinement_cost(
         llm_backend=PydanticAIDirectBackend(),
     )
     placeholder_map = worker._placeholder_map()
-    draft_text = draft_path.read_text(encoding="utf-8").strip()
+    draft_text = strip_citation_tokens(draft_path.read_text(encoding="utf-8")).strip()
+    _, inputs_metadata = worker._combine_inputs()
     template_text = template_path.read_text(encoding="utf-8").strip() if template_path and template_path.exists() else ""
     transcript_text = transcript_path.read_text(encoding="utf-8").strip() if transcript_path and transcript_path.exists() else ""
     user_template = read_refinement_prompt(refinement_user_prompt_path)
     system_template = refinement_system_prompt_path.read_text(encoding="utf-8").strip()
     system_prompt = format_prompt(system_template, placeholder_map)
+    system_appendix, _ = build_report_citation_appendix(
+        citation_store=worker._citation_store,
+        inputs_metadata=inputs_metadata,
+    )
+    system_prompt = worker._append_citation_appendix(system_prompt, system_appendix)
     user_placeholders = build_report_refinement_placeholders(
         base_placeholders=placeholder_map,
         draft_report=draft_text,

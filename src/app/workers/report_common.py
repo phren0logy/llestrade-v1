@@ -5,11 +5,18 @@ from __future__ import annotations
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
-from src.app.core.citations import CitationRecordStats, CitationStore, parse_citation_tokens
+from src.app.core.citations import (
+    CitationLedgerEntry,
+    CitationRecordStats,
+    CitationStore,
+    parse_citation_tokens,
+    strip_citation_tokens,
+)
 from src.app.core.llm_catalog import calculate_usage_cost
 from src.app.core.llm_operation_settings import LLMReasoningSettings
+from src.app.core.prompt_assembly import append_generated_prompt_section
 from src.app.core.report_prompt_context import build_report_base_placeholders
 from src.app.core.project_manager import ProjectMetadata
 from src.app.core.report_inputs import category_display_name
@@ -32,6 +39,92 @@ from .llm_backend import (
 from .progress import WorkerProgressDetail
 _CITATION_ID_RE = re.compile(r"^ev_[a-z0-9]{8,64}$")
 _MIN_REPORT_INPUT_BUDGET = 4_000
+
+
+def build_report_citation_appendix(
+    *,
+    citation_store: CitationStore | None,
+    inputs_metadata: Sequence[dict],
+) -> tuple[str, dict[str, str]]:
+    """Build a local-label citation appendix for report execution and preview."""
+
+    if citation_store is None:
+        return "", {}
+
+    converted_relatives: list[str] = []
+    reusable_ev_ids: list[str] = []
+    seen_ids: set[str] = set()
+
+    for item in inputs_metadata:
+        relative = str(item.get("relative_path") or "")
+        absolute_raw = item.get("absolute_path")
+        if relative.startswith("converted_documents/"):
+            converted_relatives.append(relative[len("converted_documents/"):])
+
+        if not absolute_raw:
+            continue
+        mentions = citation_store.list_output_citation_mentions(Path(str(absolute_raw)))
+        if mentions:
+            for mention in mentions:
+                if not mention.ev_id or mention.ev_id in seen_ids:
+                    continue
+                seen_ids.add(mention.ev_id)
+                reusable_ev_ids.append(mention.ev_id)
+                if len(reusable_ev_ids) >= 220:
+                    break
+            if len(reusable_ev_ids) >= 220:
+                break
+            continue
+
+        try:
+            text = Path(str(absolute_raw)).read_text(encoding="utf-8")
+        except Exception:
+            continue
+        for token in parse_citation_tokens(text):
+            if token.ev_id in seen_ids or not _CITATION_ID_RE.match(token.ev_id):
+                continue
+            seen_ids.add(token.ev_id)
+            reusable_ev_ids.append(token.ev_id)
+            if len(reusable_ev_ids) >= 220:
+                break
+        if len(reusable_ev_ids) >= 220:
+            break
+
+    entries: list[CitationLedgerEntry] = []
+    if converted_relatives:
+        converted_relatives = list(dict.fromkeys(converted_relatives))
+        entries.extend(
+            citation_store.list_local_citation_entries_for_documents(
+                relative_paths=converted_relatives,
+                max_per_document=25,
+                max_total=220,
+            )
+        )
+    if reusable_ev_ids:
+        used_ev_ids = {entry.ev_id for entry in entries}
+        remaining = [ev_id for ev_id in reusable_ev_ids if ev_id not in used_ev_ids]
+        if remaining:
+            next_index = len(entries) + 1
+            extra = citation_store.list_local_citation_entries_for_evidence_ids(
+                ev_ids=remaining,
+                max_total=max(220 - len(entries), 0),
+            )
+            relabeled: list[CitationLedgerEntry] = []
+            for offset, entry in enumerate(extra, start=0):
+                relabeled.append(
+                    CitationLedgerEntry(
+                        citation_label=f"C{next_index + offset}",
+                        ev_id=entry.ev_id,
+                        document_relative_path=entry.document_relative_path,
+                        page_number=entry.page_number,
+                        text=entry.text,
+                    )
+                )
+            entries.extend(relabeled)
+
+    appendix = citation_store.render_local_citation_appendix(entries)
+    mapping = {entry.citation_label: entry.ev_id for entry in entries}
+    return appendix, mapping
 
 
 class ReportWorkerBase(DashboardWorker):
@@ -133,11 +226,11 @@ class ReportWorkerBase(DashboardWorker):
                 raise FileNotFoundError(f"Selected input missing: {relative}")
             if absolute.suffix.lower() not in {".md", ".txt"}:
                 raise RuntimeError(f"Unsupported input type: {relative}")
-            content = absolute.read_text(encoding="utf-8")
+            content = strip_citation_tokens(absolute.read_text(encoding="utf-8")).strip()
             section_header = self._render_section_header(category, relative)
             lines.append(f"<!--- report-input: {category} | {relative} --->")
             lines.append(section_header)
-            lines.append(content.strip())
+            lines.append(content)
             lines.append("")
             token_count = estimate_text_input_tokens(
                 text=content,
@@ -287,65 +380,17 @@ class ReportWorkerBase(DashboardWorker):
     # ------------------------------------------------------------------
     # Citation helpers
     # ------------------------------------------------------------------
-    def _append_citation_ledger(self, prompt: str, ledger: str) -> str:
-        if not ledger.strip():
-            return prompt
-        return f"{prompt.rstrip()}\n\n{ledger.rstrip()}\n"
+    def _append_citation_appendix(self, system_prompt: str, appendix: str) -> str:
+        return append_generated_prompt_section(system_prompt, appendix)
 
-    def _build_report_evidence_ledger(self, inputs_metadata: Sequence[dict]) -> str:
-        sections: list[str] = []
-
-        converted_relatives: list[str] = []
-        existing_ids: list[str] = []
-        seen_ids: set[str] = set()
-
-        for item in inputs_metadata:
-            relative = str(item.get("relative_path") or "")
-            absolute_raw = item.get("absolute_path")
-            if relative.startswith("converted_documents/"):
-                converted_relatives.append(relative[len("converted_documents/"):])
-
-            if not absolute_raw:
-                continue
-            try:
-                text = Path(str(absolute_raw)).read_text(encoding="utf-8")
-            except Exception:
-                continue
-            for token in parse_citation_tokens(text):
-                if token.ev_id in seen_ids or not _CITATION_ID_RE.match(token.ev_id):
-                    continue
-                seen_ids.add(token.ev_id)
-                existing_ids.append(token.ev_id)
-                if len(existing_ids) >= 220:
-                    break
-            if len(existing_ids) >= 220:
-                break
-
-        if self._citation_store is not None and converted_relatives:
-            converted_relatives = list(dict.fromkeys(converted_relatives))
-            try:
-                ledger = self._citation_store.build_evidence_ledger_for_documents(
-                    relative_paths=converted_relatives,
-                    max_per_document=25,
-                    max_total=220,
-                )
-            except Exception:
-                ledger = ""
-            if ledger.strip():
-                sections.append(ledger.strip())
-
-        if existing_ids:
-            lines = [
-                "## Existing Citation IDs",
-                "Reuse these IDs when the claim is supported by already-cited evidence.",
-                "",
-            ]
-            lines.extend(f"- {ev_id}" for ev_id in existing_ids[:220])
-            sections.append("\n".join(lines).strip())
-
-        if not sections:
-            return ""
-        return "\n\n".join(sections).strip() + "\n"
+    def _build_report_citation_appendix(
+        self,
+        inputs_metadata: Sequence[dict],
+    ) -> tuple[str, dict[str, str]]:
+        return build_report_citation_appendix(
+            citation_store=self._citation_store,
+            inputs_metadata=inputs_metadata,
+        )
 
     def _record_output_citations(
         self,
@@ -353,6 +398,7 @@ class ReportWorkerBase(DashboardWorker):
         output_path: Path,
         output_text: str,
         generator: str,
+        label_mapping: Mapping[str, str] | None = None,
     ) -> CitationRecordStats | None:
         if self._citation_store is None:
             return None
@@ -362,6 +408,7 @@ class ReportWorkerBase(DashboardWorker):
                 output_text=output_text,
                 generator=generator,
                 prompt_hash=None,
+                label_mapping=label_mapping,
             )
         except Exception:
             self.logger.debug("Failed to record report citations for %s", output_path, exc_info=True)
@@ -396,4 +443,4 @@ class ReportWorkerBase(DashboardWorker):
             f"{self._provider_id}/{model_name}"
         )
 
-__all__ = ["ReportWorkerBase"]
+__all__ = ["ReportWorkerBase", "build_report_citation_appendix"]

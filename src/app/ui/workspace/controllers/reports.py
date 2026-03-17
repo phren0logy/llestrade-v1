@@ -22,6 +22,8 @@ from src.app.core.job_cost_estimates import (
     format_forecast_confirmation,
     format_forecast_inline,
 )
+from src.app.core.citations import CitationStore, strip_citation_tokens
+from src.app.core.prompt_assembly import append_generated_prompt_section
 from src.app.core.prompt_placeholders import format_prompt, placeholder_summary, get_prompt_spec
 from src.app.core.placeholders.analyzer import analyse_prompts
 from src.app.core.prompt_preview import PromptPreview
@@ -53,6 +55,7 @@ from src.app.ui.workspace.services import (
     ReportsService,
 )
 from src.app.workers.progress import WorkerProgressDetail
+from src.app.workers.report_common import build_report_citation_appendix
 from src.app.ui.dialogs.prompt_preview_dialog import PromptPreviewDialog
 from .reports_history import HistorySelection, current_history_selection, persist_report_history
 from .reports_io import (
@@ -636,6 +639,18 @@ class ReportsController:
         system_rendered = ""
         if system_template:
             system_rendered = format_prompt(system_template, base_placeholders)
+        system_appendix = ""
+        if project_dir is not None:
+            input_metadata = self._preview_inputs_metadata(project_dir, selected_descriptors)
+            try:
+                store = CitationStore(project_dir)
+            except Exception:
+                store = None
+            system_appendix, _ = build_report_citation_appendix(
+                citation_store=store,
+                inputs_metadata=input_metadata,
+            )
+            system_rendered = append_generated_prompt_section(system_rendered, system_appendix)
 
         user_placeholders = dict(base_placeholders)
         user_rendered = ""
@@ -654,7 +669,7 @@ class ReportsController:
             if user_template:
                 user_rendered = format_prompt(user_template, user_placeholders)
         elif prompt_spec_key == "refinement_prompt":
-            draft_text = self._safe_read_text(draft_path)
+            draft_text = strip_citation_tokens(self._safe_read_text(draft_path))
             template_text = self._safe_read_text(template_path)
             transcript_text = self._safe_read_text(transcript_path)
             user_placeholders = build_report_refinement_placeholders(
@@ -688,7 +703,7 @@ class ReportsController:
         preview = PromptPreview(
             system_template=system_template,
             user_template=user_template,
-            system_appendix="",
+            system_appendix=system_appendix,
             user_appendix="",
             system_rendered=system_rendered,
             user_rendered=user_rendered,
@@ -716,6 +731,23 @@ class ReportsController:
         manager = self._project_manager
         project_dir = Path(manager.project_dir) if manager and manager.project_dir else None
         return preview_additional_documents(project_dir, descriptors)
+
+    def _preview_inputs_metadata(
+        self,
+        project_dir: Path,
+        descriptors: Sequence[ReportInputDescriptor],
+    ) -> list[dict[str, str]]:
+        items: list[dict[str, str]] = []
+        for descriptor in descriptors:
+            candidate = (project_dir / descriptor.relative_path).resolve()
+            items.append(
+                {
+                    "category": descriptor.category,
+                    "relative_path": descriptor.relative_path,
+                    "absolute_path": str(candidate),
+                }
+            )
+        return items
 
     # ------------------------------------------------------------------
     # Job orchestration

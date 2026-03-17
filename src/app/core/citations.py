@@ -22,6 +22,7 @@ from typing import Dict, Iterable, Iterator, List, Mapping, Optional, Sequence
 PAGE_MARKER_RE = re.compile(r"<!---\s*.+?#page=(\d+)\s*--->")
 CITATION_TOKEN_RE = re.compile(r"\[CIT:(ev_[a-z0-9]{8,64})\]")
 LOCAL_CITATION_TOKEN_RE = re.compile(r"\[(C\d{1,5})\]")
+INLINE_CITATION_TOKEN_RE = re.compile(r"\[CIT:(ev_[a-z0-9]{8,64})\]|\[(C\d{1,5})\]")
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
 
 _SCHEMA_VERSION = 2
@@ -119,6 +120,17 @@ def parse_citation_tokens(text: str) -> list[CitationToken]:
             )
         )
     return tokens
+
+
+def strip_citation_tokens(text: str) -> str:
+    """Remove inline citation markers while preserving surrounding prose."""
+
+    stripped = INLINE_CITATION_TOKEN_RE.sub("", text)
+    stripped = re.sub(r"[ \t]+\n", "\n", stripped)
+    stripped = re.sub(r"\n{3,}", "\n\n", stripped)
+    stripped = re.sub(r"[ \t]{2,}", " ", stripped)
+    stripped = re.sub(r"\s+([,.;:!?])", r"\1", stripped)
+    return stripped
 
 
 class CitationStore:
@@ -368,6 +380,87 @@ class CitationStore:
             )
         return entries
 
+    def list_local_citation_entries_for_documents(
+        self,
+        *,
+        relative_paths: Sequence[str],
+        max_per_document: int = 40,
+        max_total: int = 220,
+    ) -> list[CitationLedgerEntry]:
+        """Return deterministic local labels for segments across multiple documents."""
+
+        raw_entries: list[tuple[str, int, int, str, str]] = []
+        with self._connection() as conn:
+            for rel in relative_paths:
+                doc_row = conn.execute(
+                    "SELECT id FROM documents WHERE relative_path = ?",
+                    (rel,),
+                ).fetchone()
+                if doc_row is None:
+                    continue
+                rows = conn.execute(
+                    (
+                        "SELECT ev_id, page_number, ordinal, text FROM segments "
+                        "WHERE document_id = ? ORDER BY page_number ASC, ordinal ASC LIMIT ?"
+                    ),
+                    (int(doc_row[0]), int(max_per_document)),
+                ).fetchall()
+                raw_entries.extend(
+                    (rel, int(row["page_number"]), int(row["ordinal"]), str(row["ev_id"]), str(row["text"]))
+                    for row in rows
+                )
+
+        raw_entries.sort(key=lambda item: (item[0], item[1], item[2], item[3]))
+        out: list[CitationLedgerEntry] = []
+        for index, (rel, page_number, _ordinal, ev_id, text) in enumerate(raw_entries[:max_total], start=1):
+            out.append(
+                CitationLedgerEntry(
+                    citation_label=f"C{index}",
+                    ev_id=ev_id,
+                    document_relative_path=rel,
+                    page_number=page_number,
+                    text=text,
+                )
+            )
+        return out
+
+    def list_local_citation_entries_for_evidence_ids(
+        self,
+        *,
+        ev_ids: Sequence[str],
+        max_total: int = 220,
+    ) -> list[CitationLedgerEntry]:
+        """Return deterministic local labels for an explicit evidence-id set."""
+
+        ids = sorted({str(ev_id) for ev_id in ev_ids if ev_id})
+        if not ids:
+            return []
+
+        with self._connection() as conn:
+            placeholders = ",".join("?" for _ in ids)
+            rows = conn.execute(
+                (
+                    "SELECT s.ev_id, s.page_number, s.ordinal, s.text, d.relative_path "
+                    "FROM segments s JOIN documents d ON d.id = s.document_id "
+                    f"WHERE s.ev_id IN ({placeholders}) "
+                    "ORDER BY d.relative_path ASC, s.page_number ASC, s.ordinal ASC"
+                ),
+                tuple(ids),
+            ).fetchall()
+
+        out: list[CitationLedgerEntry] = []
+        for index, row in enumerate(rows[:max_total], start=1):
+            out.append(
+                CitationLedgerEntry(
+                    citation_label=f"C{index}",
+                    ev_id=str(row["ev_id"]),
+                    document_relative_path=str(row["relative_path"]),
+                    page_number=int(row["page_number"]),
+                    text=str(row["text"]),
+                )
+            )
+        return out
+
     def build_local_citation_appendix(
         self,
         *,
@@ -382,6 +475,38 @@ class CitationStore:
             relative_path=relative_path,
             page_numbers=page_numbers,
             max_entries=max_entries,
+        )
+        appendix = self.render_local_citation_appendix(entries, max_excerpt_chars=max_excerpt_chars)
+        mapping = {entry.citation_label: entry.ev_id for entry in entries}
+        return appendix, mapping
+
+    def build_local_citation_appendix_for_documents(
+        self,
+        *,
+        relative_paths: Sequence[str],
+        max_per_document: int = 40,
+        max_total: int = 220,
+        max_excerpt_chars: int = 180,
+    ) -> tuple[str, dict[str, str]]:
+        entries = self.list_local_citation_entries_for_documents(
+            relative_paths=relative_paths,
+            max_per_document=max_per_document,
+            max_total=max_total,
+        )
+        appendix = self.render_local_citation_appendix(entries, max_excerpt_chars=max_excerpt_chars)
+        mapping = {entry.citation_label: entry.ev_id for entry in entries}
+        return appendix, mapping
+
+    def build_local_citation_appendix_for_evidence_ids(
+        self,
+        *,
+        ev_ids: Sequence[str],
+        max_total: int = 220,
+        max_excerpt_chars: int = 180,
+    ) -> tuple[str, dict[str, str]]:
+        entries = self.list_local_citation_entries_for_evidence_ids(
+            ev_ids=ev_ids,
+            max_total=max_total,
         )
         appendix = self.render_local_citation_appendix(entries, max_excerpt_chars=max_excerpt_chars)
         mapping = {entry.citation_label: entry.ev_id for entry in entries}

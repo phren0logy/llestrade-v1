@@ -11,6 +11,7 @@ import frontmatter
 from PySide6.QtCore import Signal
 
 from src.app.core.project_manager import ProjectMetadata
+from src.app.core.citations import strip_citation_tokens
 from src.app.core.prompt_placeholders import format_prompt
 from src.app.core.refinement_prompt import (
     read_generation_prompt,
@@ -145,7 +146,7 @@ class DraftReportWorker(ReportWorkerBase):
             )
             combined_content, inputs_metadata = self._combine_inputs()
             inputs_metadata = list(inputs_metadata)
-            evidence_ledger = self._build_report_evidence_ledger(inputs_metadata)
+            citation_appendix, citation_label_mapping = self._build_report_citation_appendix(inputs_metadata)
             input_sources = self._input_sources(inputs_metadata)
             inputs_payload = build_document_metadata(
                 project_path=self._project_dir,
@@ -178,6 +179,10 @@ class DraftReportWorker(ReportWorkerBase):
                 generation_system_prompt,
                 placeholder_map,
             )
+            generation_system_prompt = self._append_citation_appendix(
+                generation_system_prompt,
+                citation_appendix,
+            )
 
             sections = load_template_sections(self._template_path)
             if not sections:
@@ -206,7 +211,6 @@ class DraftReportWorker(ReportWorkerBase):
                 transcript_text=transcript_text,
                 system_prompt=generation_system_prompt,
                 placeholder_map=placeholder_map,
-                evidence_ledger=evidence_ledger,
             )
 
             draft_content = self._combine_section_outputs(section_outputs)
@@ -248,6 +252,7 @@ class DraftReportWorker(ReportWorkerBase):
                 output_path=draft_path,
                 output_text=draft_body,
                 generator="draft_report_worker",
+                label_mapping=citation_label_mapping,
             )
 
             manifest = self._build_draft_manifest(
@@ -311,8 +316,9 @@ class DraftReportWorker(ReportWorkerBase):
         transcript_text: str,
         system_prompt: str,
         placeholder_map: Mapping[str, str],
-        evidence_ledger: str,
+        evidence_ledger: str = "",
     ) -> List[dict]:
+        _ = evidence_ledger
         self.log_message.emit(self._llm_execution_summary())
         provider = self._create_provider()
         outputs: List[dict] = []
@@ -327,7 +333,6 @@ class DraftReportWorker(ReportWorkerBase):
                 additional_documents=additional_documents,
             )
             prompt = format_prompt(user_prompt_template, generation_placeholders)
-            prompt = self._append_citation_ledger(prompt, evidence_ledger)
 
             pct = 5 + int(60 * index / max(total, 1))
             self.progress.emit(pct, f"Generating section {index} of {total}: {section.title}")
@@ -576,7 +581,7 @@ class ReportRefinementWorker(ReportWorkerBase):
 
             combined_content, inputs_metadata = self._combine_inputs()
             inputs_metadata = list(inputs_metadata)
-            evidence_ledger = self._build_report_evidence_ledger(inputs_metadata)
+            citation_appendix, citation_label_mapping = self._build_report_citation_appendix(inputs_metadata)
             input_sources = self._input_sources(inputs_metadata)
             if combined_content:
                 inputs_payload = build_document_metadata(
@@ -603,7 +608,7 @@ class ReportRefinementWorker(ReportWorkerBase):
             draft_document = frontmatter.loads(
                 self._draft_path.read_text(encoding="utf-8")
             )
-            draft_content = draft_document.content.strip()
+            draft_content = strip_citation_tokens(draft_document.content or "").strip()
             if not draft_content:
                 raise RuntimeError("Draft content is empty; cannot run refinement.")
 
@@ -620,6 +625,10 @@ class ReportRefinementWorker(ReportWorkerBase):
             refinement_system_prompt = format_prompt(
                 refinement_system_prompt,
                 placeholder_map,
+            )
+            refinement_system_prompt = self._append_citation_appendix(
+                refinement_system_prompt,
+                citation_appendix,
             )
 
             template_raw = ""
@@ -644,7 +653,6 @@ class ReportRefinementWorker(ReportWorkerBase):
                 transcript=transcript_raw,
             )
             refine_prompt = format_prompt(refinement_user_prompt, refinement_placeholders)
-            refine_prompt = self._append_citation_ledger(refine_prompt, evidence_ledger)
             refined_content, reasoning_content = self._run_refinement(
                 prompt=refine_prompt,
                 system_prompt=refinement_system_prompt,
@@ -696,6 +704,7 @@ class ReportRefinementWorker(ReportWorkerBase):
                 output_path=refined_path,
                 output_text=refined_content,
                 generator="report_refinement_worker",
+                label_mapping=citation_label_mapping,
             )
             self.log_message.emit(f"Refined report saved to {refined_path.name}.")
 

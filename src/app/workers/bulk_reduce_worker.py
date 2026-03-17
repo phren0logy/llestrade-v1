@@ -30,7 +30,13 @@ from src.app.core.bulk_analysis_runner import (
     render_user_prompt,
     should_chunk,
 )
-from src.app.core.citations import CitationRecordStats, CitationStore
+from src.app.core.citations import (
+    CitationLedgerEntry,
+    CitationRecordStats,
+    CitationStore,
+    parse_citation_tokens,
+    strip_citation_tokens,
+)
 from src.app.core.bulk_paths import (
     iter_map_outputs,
     iter_map_outputs_under,
@@ -38,6 +44,7 @@ from src.app.core.bulk_paths import (
     resolve_map_output_path,
 )
 from src.app.core.bulk_prompt_context import build_bulk_placeholders
+from src.app.core.prompt_assembly import append_generated_prompt_section
 from src.app.core.placeholders.system import SourceFileContext
 from src.app.core.project_manager import ProjectMetadata
 from src.common.llm.budgets import compute_input_token_budget
@@ -413,6 +420,10 @@ class BulkReduceWorker(DashboardWorker):
                 self._metadata,
                 placeholder_values=placeholders_global,
             )
+            citation_entries = self._build_reduce_citation_entries(inputs)
+            citation_appendix = self._render_reduce_citation_appendix(citation_entries)
+            effective_system_prompt = self._append_citation_appendix(system_prompt, citation_appendix)
+            citation_label_mapping = {entry.citation_label: entry.ev_id for entry in citation_entries}
             prompt_hash = _compute_prompt_hash(
                 bundle,
                 provider_cfg,
@@ -510,7 +521,6 @@ class BulkReduceWorker(DashboardWorker):
                 status_message = f"Reading {total} input files…"
             self.progress.emit(0, 1, status_message)
             combined_content = self._assemble_combined_content(inputs)
-            evidence_ledger = self._build_reduce_evidence_ledger(inputs)
 
             if self.is_cancelled():
                 raise BulkAnalysisCancelled
@@ -549,12 +559,11 @@ class BulkReduceWorker(DashboardWorker):
                     combined_content,
                     placeholder_values=placeholders_global,
                 )
-                prompt = self._append_citation_ledger(prompt, evidence_ledger)
                 result = self._invoke_provider(
                     provider,
                     provider_cfg,
                     prompt,
-                    system_prompt,
+                    effective_system_prompt,
                     input_budget=input_budget,
                     preflight_input_budget=preflight_input_budget,
                 )
@@ -581,12 +590,11 @@ class BulkReduceWorker(DashboardWorker):
                         combined_content,
                         placeholder_values=placeholders_global,
                     )
-                    prompt = self._append_citation_ledger(prompt, evidence_ledger)
                     result = self._invoke_provider(
                         provider,
                         provider_cfg,
                         prompt,
-                        system_prompt,
+                        effective_system_prompt,
                         input_budget=input_budget,
                         on_response=lambda response: self._record_recovery_actuals(
                             recovery_store,
@@ -652,16 +660,11 @@ class BulkReduceWorker(DashboardWorker):
                                 chunk_total=total_chunks,
                                 placeholder_values=placeholders_global,
                             )
-                            chunk_ledger = self._build_reduce_chunk_ledger(
-                                chunk=chunk,
-                                base_ledger=evidence_ledger,
-                            )
-                            prompt = self._append_citation_ledger(prompt, chunk_ledger)
                             summary = self._invoke_provider(
                                 provider,
                                 provider_cfg,
                                 prompt,
-                                system_prompt,
+                                effective_system_prompt,
                                 input_budget=input_budget,
                                 on_response=lambda response, chunk_index=chunk_key: self._record_recovery_actuals(
                                     recovery_store,
@@ -707,7 +710,7 @@ class BulkReduceWorker(DashboardWorker):
                             provider,
                             provider_cfg,
                             prompt,
-                            system_prompt,
+                            effective_system_prompt,
                             input_budget=input_budget,
                             preflight_input_budget=preflight_input_budget,
                         )
@@ -716,7 +719,7 @@ class BulkReduceWorker(DashboardWorker):
                         evaluation = evaluate_request_budget(
                             provider_id=provider_cfg.provider_id,
                             model_id=provider_cfg.model,
-                            system_prompt=system_prompt,
+                            system_prompt=effective_system_prompt,
                             user_prompt=prompt,
                             max_output_tokens=32_000,
                             minimum_budget=_MIN_INPUT_TOKEN_BUDGET,
@@ -727,7 +730,7 @@ class BulkReduceWorker(DashboardWorker):
                                 LLMInvocationRequest(
                                     prompt=prompt,
                                     model=provider_cfg.model,
-                                    system_prompt=system_prompt,
+                                    system_prompt=effective_system_prompt,
                                     model_settings=self._llm_backend.build_model_settings(
                                         provider_cfg.provider_id,
                                         provider_cfg.model,
@@ -822,6 +825,7 @@ class BulkReduceWorker(DashboardWorker):
                 output_path=output_path,
                 output_text=result,
                 prompt_hash=prompt_hash,
+                label_mapping=citation_label_mapping,
             )
             run_manifest = self._build_run_manifest(
                 inputs,
@@ -1037,7 +1041,7 @@ class BulkReduceWorker(DashboardWorker):
             if self.is_cancelled():
                 raise BulkAnalysisCancelled
             try:
-                text = _prompt_body_from_text(abs_path.read_text(encoding="utf-8"))
+                text = strip_citation_tokens(_prompt_body_from_text(abs_path.read_text(encoding="utf-8")))
             except Exception as exc:
                 self.file_failed.emit(rel_key, str(exc))
                 text = ""
@@ -1047,52 +1051,92 @@ class BulkReduceWorker(DashboardWorker):
             parts.append("<!--- section-end --->\n\n")
         return "".join(parts).rstrip() + "\n"
 
-    def _append_citation_ledger(self, prompt: str, ledger: str) -> str:
-        if not ledger.strip():
-            return prompt
-        return f"{prompt.rstrip()}\n\n{ledger.rstrip()}\n"
+    def _append_citation_appendix(self, system_prompt: str, appendix: str) -> str:
+        return append_generated_prompt_section(system_prompt, appendix)
 
-    def _build_reduce_evidence_ledger(self, inputs: Sequence[tuple[str, Path, str]]) -> str:
+    def _build_reduce_citation_entries(
+        self,
+        inputs: Sequence[tuple[str, Path, str]],
+    ) -> list[CitationLedgerEntry]:
         if self._citation_store is None:
-            return ""
+            return []
         converted_relatives: list[str] = []
+        reusable_ev_ids: list[str] = []
+        seen_ids: set[str] = set()
         converted_prefix = "converted/"
-        for kind, _, rel_key in inputs:
-            if kind != "converted":
+        for kind, abs_path, rel_key in inputs:
+            if kind == "converted":
+                if rel_key.startswith(converted_prefix):
+                    converted_relatives.append(rel_key[len(converted_prefix):])
                 continue
-            if rel_key.startswith(converted_prefix):
-                converted_relatives.append(rel_key[len(converted_prefix):])
-        converted_relatives = list(dict.fromkeys(converted_relatives))
-        if not converted_relatives:
+            mentions = self._citation_store.list_output_citation_mentions(abs_path)
+            if mentions:
+                for mention in mentions:
+                    if not mention.ev_id or mention.ev_id in seen_ids:
+                        continue
+                    seen_ids.add(mention.ev_id)
+                    reusable_ev_ids.append(mention.ev_id)
+                    if len(reusable_ev_ids) >= 220:
+                        break
+                if len(reusable_ev_ids) >= 220:
+                    break
+                continue
+            try:
+                text = abs_path.read_text(encoding="utf-8")
+            except Exception:
+                continue
+            for token in parse_citation_tokens(text):
+                if token.ev_id in seen_ids:
+                    continue
+                seen_ids.add(token.ev_id)
+                reusable_ev_ids.append(token.ev_id)
+                if len(reusable_ev_ids) >= 220:
+                    break
+            if len(reusable_ev_ids) >= 220:
+                break
+
+        entries: list[CitationLedgerEntry] = []
+        try:
+            if converted_relatives:
+                entries.extend(
+                    self._citation_store.list_local_citation_entries_for_documents(
+                        relative_paths=list(dict.fromkeys(converted_relatives)),
+                        max_per_document=30,
+                        max_total=220,
+                    )
+                )
+            if reusable_ev_ids:
+                used_ev_ids = {entry.ev_id for entry in entries}
+                remaining = [ev_id for ev_id in reusable_ev_ids if ev_id not in used_ev_ids]
+                if remaining:
+                    next_index = len(entries) + 1
+                    extra = self._citation_store.list_local_citation_entries_for_evidence_ids(
+                        ev_ids=remaining,
+                        max_total=max(220 - len(entries), 0),
+                    )
+                    for offset, entry in enumerate(extra, start=0):
+                        entries.append(
+                            CitationLedgerEntry(
+                                citation_label=f"C{next_index + offset}",
+                                ev_id=entry.ev_id,
+                                document_relative_path=entry.document_relative_path,
+                                page_number=entry.page_number,
+                                text=entry.text,
+                            )
+                        )
+        except Exception:
+            self.logger.debug("Failed to build reduce citation appendix entries", exc_info=True)
+            return []
+        return entries
+
+    def _render_reduce_citation_appendix(self, entries: Sequence[CitationLedgerEntry]) -> str:
+        if self._citation_store is None or not entries:
             return ""
         try:
-            return self._citation_store.build_evidence_ledger_for_documents(
-                relative_paths=converted_relatives,
-                max_per_document=30,
-                max_total=220,
-            )
+            return self._citation_store.render_local_citation_appendix(entries)
         except Exception:
-            self.logger.debug("Failed to build reduce citation ledger", exc_info=True)
+            self.logger.debug("Failed to render reduce citation appendix", exc_info=True)
             return ""
-
-    def _build_reduce_chunk_ledger(self, *, chunk: str, base_ledger: str) -> str:
-        if not base_ledger.strip():
-            return ""
-        pages = {int(match.group(1)) for match in _PAGE_MARKER_RE.finditer(chunk)}
-        if not pages:
-            return base_ledger
-
-        filtered_lines: list[str] = []
-        for line in base_ledger.splitlines():
-            if "|p" not in line:
-                filtered_lines.append(line)
-                continue
-            page_match = re.search(r"\|p(\d+)\]", line)
-            if page_match and int(page_match.group(1)) in pages:
-                filtered_lines.append(line)
-        if len(filtered_lines) < 4:
-            return base_ledger
-        return "\n".join(filtered_lines).strip() + "\n"
 
     def _record_output_citations(
         self,
@@ -1100,6 +1144,7 @@ class BulkReduceWorker(DashboardWorker):
         output_path: Path,
         output_text: str,
         prompt_hash: str,
+        label_mapping: Mapping[str, str] | None = None,
     ) -> CitationRecordStats | None:
         if self._citation_store is None:
             return None
@@ -1109,6 +1154,7 @@ class BulkReduceWorker(DashboardWorker):
                 output_text=output_text,
                 generator="bulk_reduce_worker",
                 prompt_hash=prompt_hash,
+                label_mapping=label_mapping,
             )
         except Exception:
             self.logger.debug("Failed to record reduce citations", exc_info=True)

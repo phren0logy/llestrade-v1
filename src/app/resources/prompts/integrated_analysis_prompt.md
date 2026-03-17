@@ -81,4 +81,4 @@ Please create a comprehensive integrated analysis that:
    - Note areas requiring further assessment or clarification
    - Highlight factors relevant to forensic evaluation
 
-Format all sections with clear headers and maintain a professional, objective tone throughout. Use markdown formatting for clarity and organization. Use citation markers for factual claims with the exact format `[CIT:ev_<id>]`, using only IDs supplied in the Citation Evidence Ledger. Never invent IDs.
+Format all sections with clear headers and maintain a professional, objective tone throughout. Use markdown formatting for clarity and organization. Use citation markers for factual claims with the exact format defined in the Generated Citation Appendix, such as `[C1]`, using only labels supplied there. Never invent citation labels.

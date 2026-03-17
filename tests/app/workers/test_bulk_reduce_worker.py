@@ -297,7 +297,7 @@ def test_bulk_reduce_worker_applies_placeholder_values(tmp_path: Path, monkeypat
     assert expected_url in user_prompt
 
 
-def test_bulk_reduce_prompt_strips_frontmatter_but_keeps_body_markers_and_citations(
+def test_bulk_reduce_prompt_strips_frontmatter_and_embedded_citations(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -363,8 +363,86 @@ def test_bulk_reduce_prompt_strips_frontmatter_but_keeps_body_markers_and_citati
     assert "sources:" not in prompt
     assert "<!--- section-begin: converted/doc.md --->" in prompt
     assert "<!--- source doc.pdf#page=7 --->" in prompt
-    assert "[CIT:ev_deadbeef]" in prompt
+    assert "[CIT:ev_deadbeef]" not in prompt
     assert "Body text with" in prompt
+
+
+def test_bulk_reduce_uses_generated_citation_appendix_and_records_local_citations(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_dir = tmp_path
+    converted_dir = project_dir / "converted_documents"
+    converted_dir.mkdir(parents=True, exist_ok=True)
+
+    doc_path = converted_dir / "doc.md"
+    doc_path.write_text("<!--- doc.pdf#page=1 --->\nBody text.\n", encoding="utf-8")
+    raw_json = converted_dir / "doc.azure.raw.json"
+    raw_json.write_text(
+        '{"pages":[{"page_number":1,"width":100,"height":200,"unit":"pixel","lines":[{"content":"Body text.","polygon":[0,0,50,0,50,10,0,10]}]}]}',
+        encoding="utf-8",
+    )
+
+    from src.app.core.citations import CitationStore
+
+    store = CitationStore(project_dir)
+    store.index_converted_document(
+        relative_path="doc.md",
+        markdown_text="<!--- doc.pdf#page=1 --->\nBody text.\n",
+        source_checksum="reduce-citation-checksum",
+        azure_raw_json_path=raw_json,
+        pages_pdf=1,
+        pages_detected=1,
+        source_relative_path="sources/doc.pdf",
+        source_absolute_path=(project_dir / "sources" / "doc.pdf").resolve().as_posix(),
+    )
+
+    group = BulkAnalysisGroup.create("Group")
+    group.combine_converted_files = ["doc.md"]
+
+    monkeypatch.setattr(
+        reduce_module,
+        "load_prompts",
+        lambda *_args, **_kwargs: reduce_module.PromptBundle("System", "User {document_content}"),
+    )
+    monkeypatch.setattr(
+        BulkReduceWorker,
+        "_resolve_provider",
+        lambda self: ProviderConfig(provider_id="anthropic", model="claude-sonnet-4-5", temperature=0.1),
+    )
+    monkeypatch.setattr(BulkReduceWorker, "_create_provider", lambda self, *_: object())
+    monkeypatch.setattr(
+        reduce_module,
+        "should_chunk",
+        lambda *_args, **_kwargs: (False, 100, 2000),
+    )
+
+    captured: dict[str, str] = {}
+
+    def fake_invoke(self, provider, cfg, prompt, system_prompt, **kwargs):  # noqa: ANN001
+        _ = provider, cfg, kwargs
+        captured["prompt"] = prompt
+        captured["system_prompt"] = system_prompt
+        return "summary [C1]"
+
+    monkeypatch.setattr(BulkReduceWorker, "_invoke_provider", fake_invoke)
+
+    worker = BulkReduceWorker(
+        project_dir=project_dir,
+        group=group,
+        metadata=ProjectMetadata(case_name="Case"),
+        force_rerun=True,
+    )
+    worker._run()
+
+    assert "Generated Citation Appendix" in captured["system_prompt"]
+    assert "[C1]" in captured["system_prompt"]
+
+    output_path, _ = worker._output_paths()
+    mentions = store.list_output_citation_mentions(output_path)
+    assert mentions
+    assert mentions[0].citation_label == "C1"
+    assert mentions[0].status in {"valid", "warning"}
 
 
 def test_bulk_reduce_create_provider_skips_native_bootstrap_for_no_native_backend(

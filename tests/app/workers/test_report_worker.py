@@ -426,6 +426,76 @@ def test_refinement_worker_generates_outputs(
     assert manifest["refinement_system_prompt"].endswith("refinement.md")
 
 
+def test_draft_worker_uses_generated_citation_appendix_and_records_local_citations(
+    tmp_path: Path,
+    qt_app: QApplication,
+) -> None:
+    assert qt_app is not None
+
+    project_dir = tmp_path
+    (common_paths, _refinement_system_prompt_path) = _prepare_common_files(project_dir)
+    (
+        template_path,
+        generation_user_prompt_path,
+        _refinement_user_prompt_path,
+        generation_system_prompt_path,
+    ) = common_paths
+
+    raw_json = project_dir / "converted_documents" / "doc.azure.raw.json"
+    raw_json.write_text(
+        '{"pages":[{"page_number":1,"width":100,"height":200,"unit":"pixel","lines":[{"content":"Body","polygon":[0,0,50,0,50,10,0,10]}]}]}',
+        encoding="utf-8",
+    )
+
+    from src.app.core.citations import CitationStore
+
+    store = CitationStore(project_dir)
+    store.index_converted_document(
+        relative_path="doc.md",
+        markdown_text="<!--- doc.pdf#page=1 --->\n# Heading\nBody\n",
+        source_checksum="report-draft-citation-checksum",
+        azure_raw_json_path=raw_json,
+        pages_pdf=1,
+        pages_detected=1,
+        source_relative_path="sources/doc.pdf",
+        source_absolute_path=(project_dir / "sources" / "doc.pdf").resolve().as_posix(),
+    )
+
+    backend = _CapturingBackend(_model_response("Section output [C1]"))
+    worker = DraftReportWorker(
+        project_dir=project_dir,
+        inputs=[(REPORT_CATEGORY_CONVERTED, "converted_documents/doc.md")],
+        provider_id="anthropic",
+        model="claude-sonnet-4-5-20250929",
+        custom_model=None,
+        context_window=None,
+        template_path=template_path,
+        transcript_path=None,
+        generation_user_prompt_path=generation_user_prompt_path,
+        generation_system_prompt_path=generation_system_prompt_path,
+        metadata=ProjectMetadata(case_name="Case"),
+        llm_backend=backend,
+    )
+
+    finished_results: list[dict] = []
+    failures: list[str] = []
+    worker.finished.connect(lambda payload: finished_results.append(payload))
+    worker.failed.connect(failures.append)
+
+    worker.run()
+
+    assert not failures
+    assert finished_results
+    assert any("Generated Citation Appendix" in (request.system_prompt or "") for request in backend.requests)
+    assert any("[C1]" in (request.system_prompt or "") for request in backend.requests)
+
+    draft_path = Path(finished_results[0]["draft_path"])
+    mentions = store.list_output_citation_mentions(draft_path)
+    assert mentions
+    assert mentions[0].citation_label == "C1"
+    assert mentions[0].status in {"valid", "warning"}
+
+
 def test_draft_worker_requires_generation_placeholders(
     tmp_path: Path,
     qt_app: QApplication,

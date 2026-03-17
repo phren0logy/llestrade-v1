@@ -332,3 +332,81 @@ def test_report_progress_detail_updates_progress_label(
 
     assert controller._tab.progress_bar.value() == 35
     assert "Section 2/4: Background" in controller._tab.progress_detail_label.text()
+
+
+def test_report_prompt_preview_includes_generated_citation_appendix(
+    monkeypatch: pytest.MonkeyPatch,
+    qt_app: QApplication,
+    tmp_path: Path,
+) -> None:
+    assert qt_app is not None
+    controller = _build_controller(monkeypatch, tmp_path)
+    controller._project_manager = _ManagerStub(tmp_path, values={"client_name": "ACME"})
+
+    converted_dir = tmp_path / "converted_documents"
+    converted_dir.mkdir(parents=True, exist_ok=True)
+    (converted_dir / "doc.md").write_text("<!--- doc.pdf#page=1 --->\nBody text.\n", encoding="utf-8")
+    raw_json = converted_dir / "doc.azure.raw.json"
+    raw_json.write_text(
+        '{"pages":[{"page_number":1,"width":100,"height":200,"unit":"pixel","lines":[{"content":"Body text.","polygon":[0,0,50,0,50,10,0,10]}]}]}',
+        encoding="utf-8",
+    )
+
+    from src.app.core.citations import CitationStore
+    from src.app.core.report_inputs import ReportInputDescriptor, REPORT_CATEGORY_CONVERTED
+
+    store = CitationStore(tmp_path)
+    store.index_converted_document(
+        relative_path="doc.md",
+        markdown_text="<!--- doc.pdf#page=1 --->\nBody text.\n",
+        source_checksum="reports-preview-citation-checksum",
+        azure_raw_json_path=raw_json,
+        pages_pdf=1,
+        pages_detected=1,
+        source_relative_path="sources/doc.pdf",
+        source_absolute_path=(tmp_path / "sources" / "doc.pdf").resolve().as_posix(),
+    )
+
+    user_prompt_path = tmp_path / "generation_user_prompt.md"
+    user_prompt_path.write_text("Write from {additional_documents}", encoding="utf-8")
+    system_prompt_path = tmp_path / "generation_system_prompt.md"
+    system_prompt_path.write_text("System for {client_name}", encoding="utf-8")
+
+    controller._selected_inputs = {f"{REPORT_CATEGORY_CONVERTED}:converted_documents/doc.md"}
+    monkeypatch.setattr(
+        controller,
+        "_collect_report_inputs",
+        lambda: [
+            ReportInputDescriptor(
+                category=REPORT_CATEGORY_CONVERTED,
+                relative_path="converted_documents/doc.md",
+                label="doc.md",
+            )
+        ],
+    )
+
+    captured: dict[str, object] = {}
+
+    class _Dialog:
+        def __init__(self, _parent) -> None:
+            pass
+
+        def set_preview(self, preview) -> None:  # noqa: ANN001
+            captured["preview"] = preview
+
+        def exec(self) -> int:
+            return 0
+
+    monkeypatch.setattr(reports_module, "PromptPreviewDialog", _Dialog)
+
+    controller._show_prompt_preview(
+        title="Generation Prompt Preview",
+        prompt_path=str(user_prompt_path),
+        system_prompt_path=str(system_prompt_path),
+        prompt_spec_key="report_generation_user_prompt",
+        system_spec_key="report_generation_system_prompt",
+    )
+
+    preview = captured["preview"]
+    assert "[C1]" in preview.system_appendix
+    assert "Generated Citation Appendix" in preview.system_rendered

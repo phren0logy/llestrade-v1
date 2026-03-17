@@ -9,6 +9,7 @@ from PySide6.QtWidgets import QMessageBox
 
 from src.app.core.azure_artifacts import is_azure_raw_artifact
 from src.app.core.bulk_paths import iter_map_outputs
+from src.app.core.citations import strip_citation_tokens
 from src.app.core.report_inputs import (
     REPORT_CATEGORY_BULK_COMBINED,
     REPORT_CATEGORY_BULK_MAP,
@@ -147,7 +148,7 @@ def preview_additional_documents(
         if candidate.suffix.lower() not in {".md", ".txt"}:
             continue
         try:
-            content = candidate.read_text(encoding="utf-8").strip()
+            content = strip_citation_tokens(candidate.read_text(encoding="utf-8")).strip()
         except Exception:
             continue
         header = f"# {descriptor.label} ({descriptor.category})"

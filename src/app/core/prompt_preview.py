@@ -13,7 +13,7 @@ from src.app.core.bulk_analysis_runner import load_prompts
 from src.app.core.bulk_analysis_runner import _metadata_context  # type: ignore[attr-defined]
 from src.app.core.project_manager import ProjectMetadata
 from src.app.core.bulk_analysis_groups import BulkAnalysisGroup
-from src.app.core.citations import CitationStore, PAGE_MARKER_RE
+from src.app.core.citations import CitationLedgerEntry, CitationStore, PAGE_MARKER_RE, parse_citation_tokens, strip_citation_tokens
 from src.app.core.prompt_assembly import append_generated_prompt_section
 from src.app.core.prompt_placeholders import get_prompt_spec, format_prompt
 from src.app.core.placeholders.system import SourceFileContext
@@ -80,6 +80,8 @@ def generate_prompt_preview(
         body, doc_metadata = _read_document(preview_path)
     except FileNotFoundError as exc:  # pragma: no cover - filesystem race
         raise PromptPreviewError(f"Preview source missing: {preview_path}") from exc
+    if operation == "combined":
+        body = strip_citation_tokens(body)
 
     truncated_content = _truncate_markdown(body, max_content_lines)
 
@@ -132,6 +134,11 @@ def generate_prompt_preview(
             project_dir=project_dir,
             preview_path=preview_path,
             content=body,
+        )
+    else:
+        system_appendix = _build_combined_bulk_citation_appendix(
+            project_dir=project_dir,
+            input_paths=_resolve_combined_inputs(project_dir, group),
         )
     system_rendered = append_generated_prompt_section(system_template_rendered, system_appendix)
     user_appendix = ""
@@ -233,6 +240,93 @@ def _build_bulk_citation_appendix(
             max_entries=120,
         )
         return appendix
+    except Exception:
+        return ""
+
+
+def _build_combined_bulk_citation_appendix(
+    *,
+    project_dir: Path,
+    input_paths: Sequence[Path],
+) -> str:
+    if not input_paths:
+        return ""
+
+    try:
+        store = CitationStore(project_dir)
+    except Exception:
+        return ""
+
+    converted_root = project_dir / "converted_documents"
+    converted_relatives: list[str] = []
+    reusable_ev_ids: list[str] = []
+    seen_ids: set[str] = set()
+
+    for path in input_paths:
+        try:
+            relative = path.resolve().relative_to(project_dir.resolve()).as_posix()
+        except Exception:
+            relative = path.name
+        if relative.startswith("converted_documents/"):
+            converted_relatives.append(relative[len("converted_documents/"):])
+            continue
+
+        mentions = store.list_output_citation_mentions(path)
+        if mentions:
+            for mention in mentions:
+                if not mention.ev_id or mention.ev_id in seen_ids:
+                    continue
+                seen_ids.add(mention.ev_id)
+                reusable_ev_ids.append(mention.ev_id)
+                if len(reusable_ev_ids) >= 220:
+                    break
+            if len(reusable_ev_ids) >= 220:
+                break
+            continue
+
+        try:
+            text = path.read_text(encoding="utf-8")
+        except Exception:
+            continue
+        for token in parse_citation_tokens(text):
+            if token.ev_id in seen_ids:
+                continue
+            seen_ids.add(token.ev_id)
+            reusable_ev_ids.append(token.ev_id)
+            if len(reusable_ev_ids) >= 220:
+                break
+        if len(reusable_ev_ids) >= 220:
+            break
+
+    entries: list[CitationLedgerEntry] = []
+    if converted_relatives:
+        entries.extend(
+            store.list_local_citation_entries_for_documents(
+                relative_paths=list(dict.fromkeys(converted_relatives)),
+                max_per_document=30,
+                max_total=220,
+            )
+        )
+    if reusable_ev_ids:
+        used_ev_ids = {entry.ev_id for entry in entries}
+        extra = store.list_local_citation_entries_for_evidence_ids(
+            ev_ids=[ev_id for ev_id in reusable_ev_ids if ev_id not in used_ev_ids],
+            max_total=max(220 - len(entries), 0),
+        )
+        next_index = len(entries) + 1
+        for offset, entry in enumerate(extra, start=0):
+            entries.append(
+                CitationLedgerEntry(
+                    citation_label=f"C{next_index + offset}",
+                    ev_id=entry.ev_id,
+                    document_relative_path=entry.document_relative_path,
+                    page_number=entry.page_number,
+                    text=entry.text,
+                )
+            )
+
+    try:
+        return store.render_local_citation_appendix(entries)
     except Exception:
         return ""
 
