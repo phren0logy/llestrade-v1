@@ -14,6 +14,7 @@ from pydantic_ai.usage import RequestUsage
 from src.app.workers.checkpoint_manager import CheckpointManager
 
 from src.app.core.bulk_analysis_runner import PromptBundle
+from src.app.core import llm_catalog
 from src.app.core.placeholders.system import SourceFileContext
 from src.app.core.project_manager import ProjectMetadata
 from src.app.core.bulk_analysis_groups import BulkAnalysisGroup
@@ -515,6 +516,53 @@ def test_bulk_worker_chunk_fit_uses_local_estimates_for_real_gateway_backend(
     )
 
     assert chunks
+
+
+def test_bulk_worker_resolves_gateway_bedrock_context_window_from_gateway_catalog(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        llm_catalog,
+        "_discover_gateway_provider_catalog_live",
+        lambda: (
+            llm_catalog._GatewayCatalogProvider(
+                provider_id="anthropic_bedrock",
+                label="AWS Bedrock (Claude)",
+                route="bedrock",
+                models=(
+                    llm_catalog.LLMModelOption(
+                        model_id="us.anthropic.claude-sonnet-4-6",
+                        label="Claude Sonnet 4.6",
+                        context_window=1_000_000,
+                    ),
+                ),
+            ),
+        ),
+    )
+    monkeypatch.setattr(llm_catalog, "_load_cached_gateway_provider_catalog", lambda max_age_seconds=None: None)
+    monkeypatch.setattr(llm_catalog, "_write_cached_gateway_provider_catalog", lambda *args, **kwargs: None)
+    llm_catalog.reset_provider_catalog_cache()
+    try:
+        group = BulkAnalysisGroup.create("Group")
+        group.provider_id = "anthropic_bedrock"
+        group.model = "us.anthropic.claude-sonnet-4-6"
+        worker = BulkAnalysisWorker(
+            project_dir=tmp_path,
+            group=group,
+            files=[],
+            metadata=ProjectMetadata(case_name="Case"),
+            force_rerun=False,
+            llm_backend=PydanticAIGatewayBackend(api_key="gateway-key", base_url="https://gateway.example.com"),
+        )
+
+        raw_context_window = worker._resolve_raw_context_window(
+            ProviderConfig(provider_id="anthropic_bedrock", model="us.anthropic.claude-sonnet-4-6")
+        )
+
+        assert raw_context_window == 1_000_000
+    finally:
+        llm_catalog.reset_provider_catalog_cache()
 
 
 def test_bulk_worker_real_gateway_backend_skips_duplicate_exact_preflight(

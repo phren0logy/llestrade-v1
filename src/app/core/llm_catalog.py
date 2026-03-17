@@ -424,12 +424,16 @@ def resolve_catalog_model(
     normalized = str(model_id or "").strip()
     if not normalized:
         return None
-    if provider_id == "anthropic_bedrock":
-        normalized = _BEDROCK_ANTHROPIC_ALIASES.get(normalized, normalized)
 
     for model in _iter_selector_models(provider_id, transport=transport):
         if model.model_id == normalized:
             return model
+
+    if provider_id == "anthropic_bedrock":
+        normalized = _BEDROCK_ANTHROPIC_ALIASES.get(normalized, normalized)
+        for model in _iter_selector_models(provider_id, transport=transport):
+            if model.model_id == normalized:
+                return model
 
     if transport == "gateway":
         return None

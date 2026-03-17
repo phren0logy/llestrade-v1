@@ -669,3 +669,77 @@ def test_resolve_catalog_model_normalizes_bedrock_inference_profile_ids(
     assert resolved is not None
     assert resolved.model_id == "claude-sonnet-4-6"
     assert resolved.context_window == 1_000_000
+
+
+def test_resolve_catalog_model_preserves_bedrock_inference_profile_ids_for_gateway_transport(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        llm_catalog,
+        "_discover_gateway_provider_catalog_live",
+        lambda: (
+            llm_catalog._GatewayCatalogProvider(
+                provider_id="anthropic_bedrock",
+                label="AWS Bedrock (Claude)",
+                route="bedrock",
+                models=(
+                    llm_catalog.LLMModelOption(
+                        model_id="us.anthropic.claude-sonnet-4-6",
+                        label="Claude Sonnet 4.6",
+                        context_window=1_000_000,
+                    ),
+                ),
+            ),
+        ),
+    )
+    monkeypatch.setattr(llm_catalog, "_load_cached_gateway_provider_catalog", lambda max_age_seconds=None: None)
+    monkeypatch.setattr(llm_catalog, "_write_cached_gateway_provider_catalog", lambda *args, **kwargs: None)
+    llm_catalog.reset_provider_catalog_cache()
+    try:
+        resolved = llm_catalog.resolve_catalog_model(
+            "anthropic_bedrock",
+            "us.anthropic.claude-sonnet-4-6",
+            transport="gateway",
+        )
+
+        assert resolved is not None
+        assert resolved.model_id == "us.anthropic.claude-sonnet-4-6"
+        assert resolved.context_window == 1_000_000
+    finally:
+        llm_catalog.reset_provider_catalog_cache()
+
+
+def test_resolve_model_context_window_uses_gateway_bedrock_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        llm_catalog,
+        "_discover_gateway_provider_catalog_live",
+        lambda: (
+            llm_catalog._GatewayCatalogProvider(
+                provider_id="anthropic_bedrock",
+                label="AWS Bedrock (Claude)",
+                route="bedrock",
+                models=(
+                    llm_catalog.LLMModelOption(
+                        model_id="us.anthropic.claude-sonnet-4-6",
+                        label="Claude Sonnet 4.6",
+                        context_window=1_000_000,
+                    ),
+                ),
+            ),
+        ),
+    )
+    monkeypatch.setattr(llm_catalog, "_load_cached_gateway_provider_catalog", lambda max_age_seconds=None: None)
+    monkeypatch.setattr(llm_catalog, "_write_cached_gateway_provider_catalog", lambda *args, **kwargs: None)
+    llm_catalog.reset_provider_catalog_cache()
+    try:
+        resolved = llm_catalog.resolve_model_context_window(
+            "anthropic_bedrock",
+            "us.anthropic.claude-sonnet-4-6",
+            transport="gateway",
+        )
+
+        assert resolved == 1_000_000
+    finally:
+        llm_catalog.reset_provider_catalog_cache()
