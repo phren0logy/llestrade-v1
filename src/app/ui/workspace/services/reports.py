@@ -85,6 +85,12 @@ class ReportsService:
             for key in (self._DRAFT_KEY, self._REFINE_KEY)
         )
 
+    def cancel(self) -> bool:
+        cancelled = False
+        for key in (self._DRAFT_KEY, self._REFINE_KEY):
+            cancelled = self._workers.cancel(key) or cancelled
+        return cancelled
+
     # ------------------------------------------------------------------
     # Draft orchestration
     # ------------------------------------------------------------------

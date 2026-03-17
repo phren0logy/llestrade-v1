@@ -7,6 +7,7 @@ import os
 import logging
 import sys
 from pathlib import Path
+from typing import cast
 
 from PySide6.QtWidgets import (
     QApplication,
@@ -19,6 +20,7 @@ from PySide6.QtWidgets import (
     QWidget,
     QDialogButtonBox,
     QLabel,
+    QPushButton,
 )
 from PySide6.QtCore import Qt, QTimer
 
@@ -428,6 +430,63 @@ class SimplifiedMainWindow(QMainWindow):
         if self._welcome_stage is not None:
             self._welcome_stage.refresh_api_status()
 
+    def _prompt_active_jobs_on_close(self, labels: list[str]) -> str:
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle("Work Still Running")
+        label_text = "\n".join(f"- {label}" for label in labels)
+        box.setText(
+            "The application still has active work:\n\n"
+            f"{label_text}\n\n"
+            "Choose whether to keep the app running or cancel the active work and exit."
+        )
+        keep_button = box.addButton("Keep Running", QMessageBox.RejectRole)
+        cancel_button = box.addButton("Cancel and Exit", QMessageBox.AcceptRole)
+        box.setDefaultButton(cast(QPushButton, keep_button))
+        box.exec()
+        return "cancel" if box.clickedButton() is cancel_button else "keep"
+
+    def _prompt_force_exit(self) -> str:
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle("Workers Still Stopping")
+        box.setText(
+            "Some background jobs are still shutting down.\n\n"
+            "You can keep waiting or force the app to exit now."
+        )
+        wait_button = box.addButton("Keep Waiting", QMessageBox.RejectRole)
+        force_button = box.addButton("Force Exit", QMessageBox.DestructiveRole)
+        box.setDefaultButton(cast(QPushButton, wait_button))
+        box.exec()
+        return "force" if box.clickedButton() is force_button else "wait"
+
+    def _shutdown_workspace_for_exit(self) -> bool:
+        workspace = self._workspace_widget
+        if workspace is None:
+            return True
+
+        has_active_jobs = getattr(workspace, "has_active_jobs", None)
+        active_job_labels = getattr(workspace, "active_job_labels", None)
+        cancel_active_jobs = getattr(workspace, "cancel_active_jobs", None)
+        wait_for_jobs_done = getattr(workspace, "wait_for_jobs_done", None)
+
+        labels = active_job_labels() if callable(active_job_labels) else []
+        if callable(has_active_jobs) and not has_active_jobs():
+            labels = []
+
+        if labels:
+            action = self._prompt_active_jobs_on_close(labels)
+            if action != "cancel":
+                return False
+            if callable(cancel_active_jobs):
+                cancel_active_jobs()
+            while callable(wait_for_jobs_done) and not wait_for_jobs_done(10_000):
+                if self._prompt_force_exit() == "force":
+                    break
+
+        self._teardown_workspace(close_project=True)
+        return True
+
     def _show_about(self) -> None:
         QMessageBox.about(
             self,
@@ -447,8 +506,9 @@ class SimplifiedMainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:  # noqa: N802
         self.settings.save_window_geometry(self.saveGeometry())
-        if self.project_manager:
-            self.project_manager.close_project()
+        if not self._shutdown_workspace_for_exit():
+            event.ignore()
+            return
         stop_background_catalog_refresh()
         super().closeEvent(event)
 

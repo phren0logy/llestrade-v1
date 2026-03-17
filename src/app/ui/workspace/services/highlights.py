@@ -23,6 +23,9 @@ class HighlightsService:
     def is_running(self) -> bool:
         return self._workers.get(self._WORKER_KEY) is not None
 
+    def cancel(self) -> bool:
+        return self._workers.cancel(self._WORKER_KEY)
+
     def run(
         self,
         *,

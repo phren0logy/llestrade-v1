@@ -884,6 +884,17 @@ class BulkAnalysisController:
             self.set_info_message("Bulk analysis cancelled.")
         self._on_refresh_groups()
 
+    def cancel_all_runs(self) -> bool:
+        cancelled = False
+        for group_id in list(self._running_groups):
+            if self._service.cancel(group_id):
+                self._cancelling_groups.add(group_id)
+                cancelled = True
+        if cancelled:
+            self.set_info_message("Cancelling bulk analysis…")
+            self._on_refresh_groups()
+        return cancelled
+
     # ------------------------------------------------------------------
     # Worker callbacks
     # ------------------------------------------------------------------

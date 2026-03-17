@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 PySide6 = pytest.importorskip("PySide6")
+from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import QApplication
 
 _ = PySide6
@@ -96,5 +97,50 @@ def test_activate_workspace_does_not_reapply_project_to_created_workspace(
     window._activate_workspace(manager_stub)
 
     assert workspace.set_project_calls == 0
+
+    window.deleteLater()
+
+
+def test_close_event_aborts_when_workspace_close_is_cancelled(
+    monkeypatch: pytest.MonkeyPatch,
+    qt_app: QApplication,
+) -> None:
+    assert qt_app is not None
+    window = _build_window(monkeypatch)
+
+    monkeypatch.setattr(window, "_shutdown_workspace_for_exit", lambda: False)
+
+    event = QCloseEvent()
+    window.closeEvent(event)
+
+    assert event.isAccepted() is False
+
+    window.deleteLater()
+
+
+def test_close_event_tears_down_workspace_before_stopping_catalog_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+    qt_app: QApplication,
+) -> None:
+    assert qt_app is not None
+    window = _build_window(monkeypatch)
+    called = {"shutdown": 0, "refresh": 0}
+
+    monkeypatch.setattr(
+        window,
+        "_shutdown_workspace_for_exit",
+        lambda: called.__setitem__("shutdown", called["shutdown"] + 1) or True,
+    )
+    monkeypatch.setattr(
+        main_window_module,
+        "stop_background_catalog_refresh",
+        lambda: called.__setitem__("refresh", called["refresh"] + 1),
+    )
+
+    event = QCloseEvent()
+    window.closeEvent(event)
+
+    assert event.isAccepted() is True
+    assert called == {"shutdown": 1, "refresh": 1}
 
     window.deleteLater()

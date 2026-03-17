@@ -66,6 +66,22 @@ class WorkerCoordinator:
         for key in keys:
             self.cancel(key)
 
+    def cancel_all(self) -> list[str]:
+        keys = list(self._workers.keys())
+        self.cancel_many(keys)
+        return keys
+
+    def active_keys(self) -> list[str]:
+        return list(self._workers.keys())
+
+    def wait_for_done(self, timeout_ms: int) -> bool:
+        timeout = max(-1, int(timeout_ms))
+        try:
+            return bool(self._pool.waitForDone(timeout))
+        except TypeError:  # pragma: no cover - older Qt variants
+            self._pool.waitForDone()
+            return True
+
     def clear(self) -> None:
         # Cancel and safely delete all tracked workers
         try:

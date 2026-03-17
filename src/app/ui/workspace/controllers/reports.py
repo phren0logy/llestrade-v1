@@ -121,6 +121,7 @@ class ReportsController:
         self._update_report_controls()
 
     def shutdown(self) -> None:
+        self._service.cancel()
         self._report_running = False
         self._selected_inputs.clear()
         self._last_result = None
@@ -212,6 +213,9 @@ class ReportsController:
 
     def is_running(self) -> bool:
         return self._report_running
+
+    def cancel(self) -> bool:
+        return self._service.cancel()
 
     # ------------------------------------------------------------------
     # Signal wiring
