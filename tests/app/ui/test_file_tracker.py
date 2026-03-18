@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 import pytest
 
+from src.app.core.converted_documents import converted_artifact_relative
 from src.app.core.file_tracker import FileTracker
 
 
@@ -23,6 +24,12 @@ def load_tracker_snapshot(root: Path) -> dict:
     payload = json.loads((root / "file_tracker.json").read_text())
     payload["counts"] = {k: int(v) for k, v in payload.get("counts", {}).items()}
     return payload
+
+
+def write_converted_pdf(path: Path, source_relative: str, content: str = "sample") -> str:
+    relative = converted_artifact_relative(source_relative)
+    write_file(path, relative, content)
+    return relative
 
 
 def test_scan_empty_project_creates_tracker(project_root: Path):
@@ -51,11 +58,10 @@ def test_scan_empty_project_creates_tracker(project_root: Path):
 
 
 def test_scan_detects_missing_bulk_outputs(project_root: Path):
-    # Mark converted doc as originating from PDF so highlights are expected
-    write_file(
+    converted_relative = write_converted_pdf(
         project_root / "converted_documents",
-        "case/doc1.md",
-        "---\nsource_format: pdf\n---\ncontent",
+        "case/doc1.pdf",
+        "<loc_0><loc_0><loc_200><loc_40>content\n",
     )
 
     tracker = FileTracker(project_root)
@@ -63,45 +69,45 @@ def test_scan_detects_missing_bulk_outputs(project_root: Path):
 
     assert snapshot.imported_count == 1
     assert snapshot.bulk_analysis_count == 0
-    assert snapshot.missing["bulk_analysis_missing"] == ["case/doc1.md"]
-    assert snapshot.missing["highlights_missing"] == ["case/doc1.md"]
+    assert snapshot.missing["bulk_analysis_missing"] == [converted_relative]
+    assert snapshot.missing["highlights_missing"] == [converted_relative]
 
 
 def test_scan_updates_when_new_files_added(project_root: Path):
     tracker = FileTracker(project_root)
     tracker.scan()
 
-    write_file(
+    converted_relative = write_converted_pdf(
         project_root / "converted_documents",
-        "doc1.md",
-        "---\nsource_format: pdf\n---\ncontent",
+        "doc1.pdf",
+        "<loc_0><loc_0><loc_200><loc_40>content\n",
     )
     snapshot = tracker.scan()
     assert snapshot.imported_count == 1
     assert tracker.snapshot is snapshot
-    assert snapshot.missing["highlights_missing"] == ["doc1.md"]
+    assert snapshot.missing["highlights_missing"] == [converted_relative]
 
-    write_file(project_root / "bulk_analysis", "doc1.md")
+    write_file(project_root / "bulk_analysis", "group/doc1.pdf_analysis.md")
     snapshot = tracker.scan()
     assert snapshot.bulk_analysis_count == 1
-    assert snapshot.files["bulk_analysis"] == ["doc1.md"]
+    assert snapshot.files["bulk_analysis"] == ["group/doc1.pdf_analysis.md"]
     assert snapshot.missing["bulk_analysis_missing"] == []
 
-    write_file(project_root / "highlights" / "documents", "doc1.highlights.md")
+    write_file(project_root / "highlights" / "documents", "doc1.pdf.highlights.md")
     snapshot = tracker.scan()
     assert snapshot.highlights_count == 1
     assert snapshot.missing["highlights_missing"] == []
 
 
 def test_scan_normalises_summary_bulk_outputs(project_root: Path) -> None:
-    write_file(
+    write_converted_pdf(
         project_root / "converted_documents",
-        "case/doc1.md",
-        "---\nsource_format: pdf\n---\ncontent",
+        "case/doc1.pdf",
+        "<loc_0><loc_0><loc_200><loc_40>content\n",
     )
     write_file(
         project_root / "bulk_analysis",
-        "summary/case/doc1_analysis.md",
+        "summary/case/doc1.pdf_analysis.md",
     )
 
     tracker = FileTracker(project_root)
@@ -127,8 +133,8 @@ def test_load_reads_previous_snapshot(project_root: Path):
 
 
 def test_scan_ignores_bulk_analysis_noise_files(project_root: Path) -> None:
-    write_file(project_root / "converted_documents", "case/doc1.md")
-    write_file(project_root / "bulk_analysis", "case/doc1_analysis.md")
+    write_converted_pdf(project_root / "converted_documents", "case/doc1.pdf")
+    write_file(project_root / "bulk_analysis", "case/doc1.pdf_analysis.md")
     write_file(project_root / "bulk_analysis", ".DS_Store", "")
     write_file(project_root / "bulk_analysis", "case/.DS_Store", "")
     write_file(project_root / "bulk_analysis", "case/config.json", "{}")
@@ -137,11 +143,11 @@ def test_scan_ignores_bulk_analysis_noise_files(project_root: Path) -> None:
     snapshot = tracker.scan()
 
     assert snapshot.bulk_analysis_count == 1
-    assert snapshot.files["bulk_analysis"] == ["case/doc1_analysis.md"]
+    assert snapshot.files["bulk_analysis"] == ["case/doc1.pdf_analysis.md"]
 
 
 def test_scan_ignores_azure_raw_sidecars(project_root: Path) -> None:
-    write_file(project_root / "converted_documents", "case/doc1.md")
+    converted_relative = write_converted_pdf(project_root / "converted_documents", "case/doc1.pdf")
     write_file(project_root / "converted_documents", "case/doc1.azure.raw.md")
     write_file(project_root / "converted_documents", "case/doc1.azure.raw.json", "{}")
 
@@ -149,4 +155,4 @@ def test_scan_ignores_azure_raw_sidecars(project_root: Path) -> None:
     snapshot = tracker.scan()
 
     assert snapshot.imported_count == 1
-    assert snapshot.files["imported"] == ["case/doc1.md"]
+    assert snapshot.files["imported"] == [converted_relative]

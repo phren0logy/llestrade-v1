@@ -5,6 +5,8 @@ import os
 from pathlib import Path
 from types import SimpleNamespace
 
+from src.app.core.citations import CitationStore
+from src.app.core.converted_documents import converted_artifact_relative
 from src.app.core.conversion_manager import build_conversion_jobs
 
 
@@ -23,11 +25,18 @@ def _write_source(project_dir: Path, relative: str, content: bytes) -> Path:
 
 
 def _write_converted_with_checksum(project_dir: Path, relative: str, checksum: str) -> Path:
-    destination = (project_dir / "converted_documents" / relative).with_suffix(".md")
+    destination = project_dir / "converted_documents" / converted_artifact_relative(relative)
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(
-        f"---\nsources:\n  - checksum: {checksum}\n---\nconverted\n",
+        "<page_header><loc_0><loc_0><loc_50><loc_20>converted</page_header>\n",
         encoding="utf-8",
+    )
+    CitationStore(project_dir).index_doctags_document(
+        relative_path=destination.relative_to(project_dir / "converted_documents").as_posix(),
+        doctags_text=destination.read_text(encoding="utf-8"),
+        source_checksum=checksum,
+        pages_pdf=1,
+        pages_detected=1,
     )
     return destination
 
@@ -72,8 +81,8 @@ def test_build_conversion_jobs_adds_job_when_checksum_mismatch(tmp_path: Path) -
 
 
 def test_build_conversion_jobs_skips_when_destination_is_newer(tmp_path: Path) -> None:
-    source = _write_source(tmp_path, "docs/notes.docx", b"docx")
-    destination = (tmp_path / "converted_documents" / "docs/notes.md")
+    source = _write_source(tmp_path, "docs/notes.pdf", b"pdf")
+    destination = tmp_path / "converted_documents" / converted_artifact_relative("docs/notes.pdf")
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text("converted", encoding="utf-8")
 
@@ -108,10 +117,11 @@ def test_build_conversion_jobs_ignores_hidden_and_unsupported_files(tmp_path: Pa
     _write_source(tmp_path, ".hidden.pdf", b"hidden")
     _write_source(tmp_path, "docs/data.csv", b"ignored")
     _write_source(tmp_path, "docs/note.txt", b"copy-me")
+    _write_source(tmp_path, "docs/note.pdf", b"pdf")
 
     manager = _manager(tmp_path, selected=["", "docs"])
     plan = build_conversion_jobs(manager)
 
     assert len(plan.jobs) == 1
-    assert plan.jobs[0].relative_path == "docs/note.txt"
-    assert plan.jobs[0].conversion_type == "copy"
+    assert plan.jobs[0].relative_path == "docs/note.pdf"
+    assert plan.jobs[0].conversion_type == "pdf"

@@ -6,14 +6,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Mapping, Optional, Sequence
 
-import frontmatter
-
-from src.app.core.azure_artifacts import is_azure_raw_artifact
 from src.app.core.bulk_analysis_runner import load_prompts
 from src.app.core.bulk_analysis_runner import _metadata_context  # type: ignore[attr-defined]
 from src.app.core.project_manager import ProjectMetadata
 from src.app.core.bulk_analysis_groups import BulkAnalysisGroup
-from src.app.core.citations import CitationLedgerEntry, CitationStore, PAGE_MARKER_RE, strip_citation_tokens
+from src.app.core.citations import CitationLedgerEntry, CitationStore, strip_citation_tokens
+from src.app.core.converted_documents import (
+    is_doctags_artifact,
+    load_converted_document_text,
+    source_relative_from_artifact,
+)
 from src.app.core.prompt_assembly import append_generated_prompt_section
 from src.app.core.prompt_placeholders import get_prompt_spec, format_prompt
 from src.app.core.placeholders.system import SourceFileContext
@@ -185,9 +187,7 @@ def _resolve_first_per_document_input(
 
     file_map = {}
     for path in converted_root.rglob("*"):
-        if path.is_file() and path.suffix.lower() in {".md", ".txt"}:
-            if is_azure_raw_artifact(path):
-                continue
+        if path.is_file() and is_doctags_artifact(path):
             relative = path.relative_to(converted_root).as_posix().strip("/")
             file_map[relative] = path
 
@@ -230,13 +230,10 @@ def _build_bulk_citation_appendix(
     except Exception:
         return ""
 
-    pages = [int(match.group(1)) for match in PAGE_MARKER_RE.finditer(content)]
-
     try:
         store = CitationStore(project_dir)
         appendix, _ = store.build_local_citation_appendix(
             relative_path=relative_path,
-            page_numbers=list(dict.fromkeys(pages))[:40] if pages else None,
             max_entries=120,
         )
         return appendix
@@ -333,7 +330,7 @@ def _resolve_combined_inputs(project_dir: Path, group: BulkAnalysisGroup, *, lim
     def _add(path: Path) -> None:
         if not path.exists() or not path.is_file():
             return
-        if is_azure_raw_artifact(path):
+        if path.parent == conv_root and not is_doctags_artifact(path):
             return
         if path in items:
             return
@@ -356,9 +353,7 @@ def _resolve_combined_inputs(project_dir: Path, group: BulkAnalysisGroup, *, lim
         base = conv_root / rel_dir
         if not base.exists():
             continue
-        for candidate in sorted(p for p in base.rglob("*.md") if p.is_file()):
-            if is_azure_raw_artifact(candidate):
-                continue
+        for candidate in sorted(p for p in base.rglob("*") if p.is_file() and is_doctags_artifact(p)):
             _add(candidate)
             if limit and len(items) >= limit:
                 return _apply_order(items, group)
@@ -426,14 +421,7 @@ def _apply_order(paths: Sequence[Path], group: BulkAnalysisGroup) -> list[Path]:
 
 
 def _read_document(path: Path) -> tuple[str, dict[str, object]]:
-    raw = path.read_text(encoding="utf-8")
-    try:
-        post = frontmatter.loads(raw)
-    except Exception:
-        return raw, {}
-    content = post.content or ""
-    metadata = dict(post.metadata or {})
-    return content, metadata
+    return load_converted_document_text(path), {}
 
 
 def _extract_primary_source(
@@ -466,6 +454,36 @@ def _extract_source_contexts(
     metadata: Mapping[str, object],
     fallback_relative: str,
 ) -> list[SourceFileContext]:
+    converted_root = project_dir / "converted_documents"
+    store_metadata: dict[str, object] | None = None
+    try:
+        converted_relative = path.resolve().relative_to(converted_root.resolve()).as_posix()
+    except Exception:
+        converted_relative = ""
+    if converted_relative:
+        try:
+            store_metadata = CitationStore(project_dir).get_document_metadata(converted_relative)
+        except Exception:
+            store_metadata = None
+        if store_metadata:
+            source_relative = str(store_metadata.get("source_relative_path") or "").strip()
+            source_absolute = str(store_metadata.get("source_absolute_path") or "").strip()
+            context = _resolve_source_context(
+                project_dir,
+                {
+                    "relative": source_relative,
+                    "path": source_absolute,
+                },
+                fallback_relative,
+            )
+            if context:
+                return [context]
+
+        source_relative = source_relative_from_artifact(converted_relative)
+        if source_relative:
+            absolute = (project_dir / source_relative).resolve()
+            return [SourceFileContext(absolute_path=absolute, relative_path=source_relative)]
+
     sources = metadata.get("sources")
     if not sources and isinstance(metadata.get("metadata"), dict):
         nested = metadata["metadata"]

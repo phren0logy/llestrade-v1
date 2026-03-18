@@ -14,7 +14,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Deque, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
-import frontmatter
 from PySide6.QtCore import Signal
 
 from src.app.core.bulk_analysis_groups import BulkAnalysisGroup
@@ -33,7 +32,9 @@ from src.app.core.bulk_analysis_runner import (
     render_user_prompt,
     should_chunk,
 )
-from src.app.core.citations import PAGE_MARKER_RE, CitationLedgerEntry, CitationRecordStats, CitationStore
+from src.app.core.citations import CitationLedgerEntry, CitationRecordStats, CitationStore
+from src.app.core.converted_documents import source_relative_from_artifact
+from src.app.core.doctags import page_numbers_from_converted, prompt_text_from_converted
 from src.app.core.bulk_prompt_context import build_bulk_placeholders
 from src.app.core.placeholders.system import SourceFileContext
 from src.app.core.prompt_assembly import append_generated_prompt_section
@@ -493,19 +494,25 @@ class BulkAnalysisWorker(DashboardWorker):
                     fallback_relative=document.relative_path,
                 )
 
-        rel_path = document.relative_path
+        rel_path = source_relative_from_artifact(document.relative_path) or document.relative_path
         absolute = (self._project_dir / rel_path).resolve()
         return SourceFileContext(absolute_path=absolute, relative_path=rel_path)
 
     def _load_document(self, document: BulkAnalysisDocument) -> tuple[str, Dict[str, object], SourceFileContext]:
         raw = document.source_path.read_text(encoding="utf-8")
-        try:
-            post = frontmatter.loads(raw)
-            body = post.content or ""
-            metadata = dict(post.metadata or {})
-        except Exception:
-            body = raw
-            metadata = {}
+        body = prompt_text_from_converted(raw, path=document.source_path)
+        metadata: Dict[str, object] = {}
+        if self._citation_store is not None:
+            doc_meta = self._citation_store.get_document_metadata(document.relative_path)
+            if doc_meta:
+                metadata = {
+                    "sources": [
+                        {
+                            "relative": doc_meta.get("source_relative_path"),
+                            "path": doc_meta.get("source_absolute_path"),
+                        }
+                    ]
+                }
         source_context = self._extract_source_context(metadata, document)
         return body, metadata, source_context
 
@@ -2626,11 +2633,17 @@ class BulkAnalysisWorker(DashboardWorker):
         return [entry for entry in entries if entry.page_number in pages]
 
     def _extract_page_numbers(self, content: str) -> list[int]:
-        pages = [int(match.group(1)) for match in PAGE_MARKER_RE.finditer(content)]
+        pages = page_numbers_from_converted(content, path=self._current_document_source_path())
         if not pages:
             return []
         ordered = list(dict.fromkeys(pages))
         return ordered[:40]
+
+    def _current_document_source_path(self) -> Path | None:
+        current = self._current_document_path
+        if not current:
+            return None
+        return self._project_dir / "converted_documents" / current
 
     def _record_output_citations(
         self,

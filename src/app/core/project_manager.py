@@ -166,8 +166,14 @@ class SourceTreeState:
 class ConversionSettings:
     """Conversion helper configuration for a project."""
 
-    helper: str = "azure_di"
-    options: Dict[str, Any] = field(default_factory=dict)
+    helper: str = "docling"
+    options: Dict[str, Any] = field(
+        default_factory=lambda: {
+            "pipeline_mode": "vlm_primary",
+            "vlm_preset": "granite_docling",
+            "standard_profile": "",
+        }
+    )
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -175,7 +181,13 @@ class ConversionSettings:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "ConversionSettings":
         payload = {**data}
+        payload.setdefault("helper", "docling")
         payload.setdefault("options", {})
+        options = dict(payload.get("options") or {})
+        options.setdefault("pipeline_mode", "vlm_primary")
+        options.setdefault("vlm_preset", "granite_docling")
+        options.setdefault("standard_profile", "")
+        payload["options"] = options
         return cls(**payload)
 
 

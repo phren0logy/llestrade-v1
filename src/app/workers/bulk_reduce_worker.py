@@ -13,7 +13,6 @@ from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 import frontmatter
 from PySide6.QtCore import Signal
 
-from src.app.core.azure_artifacts import is_azure_raw_artifact
 from src.app.core.bulk_analysis_groups import BulkAnalysisGroup
 from src.app.core.llm_catalog import calculate_usage_cost
 from src.app.core.llm_operation_settings import normalize_context_window_override
@@ -34,6 +33,11 @@ from src.app.core.citations import (
     CitationRecordStats,
     CitationStore,
     strip_citation_tokens,
+)
+from src.app.core.converted_documents import (
+    is_doctags_artifact,
+    load_converted_document_text,
+    source_relative_from_artifact,
 )
 from src.app.core.bulk_paths import (
     iter_map_outputs,
@@ -95,13 +99,9 @@ def _chunk_chars_per_token(provider_id: str) -> int:
 
 
 def _prompt_body_from_text(raw: str) -> str:
-    """Return prompt-ready content with managed YAML frontmatter removed."""
+    """Return prompt-ready content for a combined-input artifact."""
 
-    try:
-        post = frontmatter.loads(raw)
-    except Exception:
-        return raw
-    return post.content or ""
+    return raw
 
 
 def _manifest_path(project_dir: Path, group: BulkAnalysisGroup) -> Path:
@@ -350,6 +350,37 @@ class BulkReduceWorker(DashboardWorker):
 
     def _extract_source_contexts(self, path: Path) -> List[SourceFileContext]:
         try:
+            fallback_relative = path.relative_to(self._project_dir).as_posix()
+        except Exception:
+            fallback_relative = path.name
+
+        if is_doctags_artifact(path):
+            converted_root = self._project_dir / "converted_documents"
+            try:
+                converted_relative = path.resolve().relative_to(converted_root.resolve()).as_posix()
+            except Exception:
+                converted_relative = fallback_relative
+            if self._citation_store is not None:
+                doc_meta = self._citation_store.get_document_metadata(converted_relative)
+                if doc_meta:
+                    return [
+                        self._resolve_source_context(
+                            relative_hint=doc_meta.get("source_relative_path"),
+                            path_hint=doc_meta.get("source_absolute_path"),
+                            fallback_relative=source_relative_from_artifact(converted_relative) or fallback_relative,
+                        )
+                    ]
+            source_relative = source_relative_from_artifact(converted_relative)
+            if source_relative:
+                return [
+                    self._resolve_source_context(
+                        relative_hint=source_relative,
+                        path_hint=None,
+                        fallback_relative=source_relative,
+                    )
+                ]
+
+        try:
             raw = path.read_text(encoding="utf-8")
             post = frontmatter.loads(raw)
             metadata = dict(post.metadata or {})
@@ -357,10 +388,6 @@ class BulkReduceWorker(DashboardWorker):
             metadata = {}
 
         contexts: List[SourceFileContext] = []
-        try:
-            fallback_relative = path.relative_to(self._project_dir).as_posix()
-        except Exception:
-            fallback_relative = path.name
         sources = metadata.get("sources")
         if not sources and isinstance(metadata.get("metadata"), dict):
             sources = metadata["metadata"].get("sources")
@@ -962,15 +989,15 @@ class BulkReduceWorker(DashboardWorker):
             if not rel:
                 continue
             candidate = conv_root / rel
-            if is_azure_raw_artifact(candidate):
+            if not is_doctags_artifact(candidate):
                 continue
             items.append(("converted", candidate, f"converted/{rel}"))
         for rel_dir in (self._group.combine_converted_directories or []):
             rel_dir = rel_dir.strip("/")
             base = conv_root / rel_dir
             if base.exists():
-                for f in base.rglob("*.md"):
-                    if is_azure_raw_artifact(f):
+                for f in base.rglob("*"):
+                    if not f.is_file() or not is_doctags_artifact(f):
                         continue
                     items.append(("converted", f, f"converted/{f.relative_to(conv_root).as_posix()}"))
 
@@ -1038,7 +1065,11 @@ class BulkReduceWorker(DashboardWorker):
             if self.is_cancelled():
                 raise BulkAnalysisCancelled
             try:
-                text = strip_citation_tokens(_prompt_body_from_text(abs_path.read_text(encoding="utf-8")))
+                if is_doctags_artifact(abs_path):
+                    raw = load_converted_document_text(abs_path)
+                else:
+                    raw = abs_path.read_text(encoding="utf-8")
+                text = strip_citation_tokens(_prompt_body_from_text(raw))
             except Exception as exc:
                 self.file_failed.emit(rel_key, str(exc))
                 text = ""

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, List, Optional, Set
 
+from .converted_documents import converted_artifact_relative
 from .project_manager import ProjectManager
 
 
@@ -16,13 +17,13 @@ class HighlightJob:
     source_pdf: Path
     pdf_relative: str
     converted_relative: str
-    converted_markdown: Path
+    converted_document: Path
     highlight_relative: str
     highlight_output: Path
 
 
 def build_highlight_jobs(project_manager: ProjectManager) -> List[HighlightJob]:
-    """Return highlight jobs for PDFs with existing converted markdown outputs."""
+    """Return highlight jobs for PDFs with existing converted DocTags outputs."""
 
     project_dir = project_manager.project_dir
     if not project_dir:
@@ -62,12 +63,12 @@ def build_highlight_jobs(project_manager: ProjectManager) -> List[HighlightJob]:
                 continue
             seen_relatives.add(relative)
 
-            converted_relative = Path(relative).with_suffix(".md").as_posix()
-            converted_markdown = converted_root / converted_relative
-            if not converted_markdown.exists():
+            converted_relative = converted_artifact_relative(relative)
+            converted_document = converted_root / converted_relative
+            if not converted_document.exists():
                 continue
 
-            highlight_relative = Path(relative).with_suffix(".highlights.md").as_posix()
+            highlight_relative = Path(relative).with_name(Path(relative).name + ".highlights.md").as_posix()
             highlight_output = documents_root / highlight_relative
 
             jobs.append(
@@ -75,7 +76,7 @@ def build_highlight_jobs(project_manager: ProjectManager) -> List[HighlightJob]:
                     source_pdf=pdf_path,
                     pdf_relative=relative,
                     converted_relative=converted_relative,
-                    converted_markdown=converted_markdown,
+                    converted_document=converted_document,
                     highlight_relative=highlight_relative,
                     highlight_output=highlight_output,
                 )

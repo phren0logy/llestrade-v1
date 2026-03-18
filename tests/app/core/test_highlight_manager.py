@@ -4,6 +4,7 @@ from pathlib import Path
 
 import fitz
 
+from src.app.core.converted_documents import converted_artifact_relative
 from src.app.core.highlight_manager import build_highlight_jobs
 from src.app.core.project_manager import ProjectManager, ProjectMetadata, SourceTreeState
 from src.app.workers.highlight_worker import HighlightWorker
@@ -49,7 +50,7 @@ def test_build_highlight_jobs(tmp_path: Path) -> None:
 
     pdf_path = sources_root / "folder" / "doc.pdf"
     _create_pdf(pdf_path, "Important", highlight=True)
-    converted_path = project_root / "converted_documents" / "folder" / "doc.md"
+    converted_path = project_root / "converted_documents" / converted_artifact_relative("folder/doc.pdf")
     converted_path.parent.mkdir(parents=True, exist_ok=True)
     converted_path.write_text("content", encoding="utf-8")
 
@@ -58,8 +59,8 @@ def test_build_highlight_jobs(tmp_path: Path) -> None:
     job = jobs[0]
     assert job.source_pdf == pdf_path
     assert job.pdf_relative == "folder/doc.pdf"
-    assert job.converted_relative == "folder/doc.md"
-    assert job.highlight_output == project_root / "highlights" / "documents" / "folder/doc.highlights.md"
+    assert job.converted_relative == "folder/doc.pdf.doctags.txt"
+    assert job.highlight_output == project_root / "highlights" / "documents" / "folder/doc.pdf.highlights.md"
 
 
 def test_highlight_worker_creates_output(tmp_path: Path) -> None:
@@ -67,7 +68,7 @@ def test_highlight_worker_creates_output(tmp_path: Path) -> None:
 
     pdf_path = sources_root / "folder" / "doc.pdf"
     _create_pdf(pdf_path, "Annotated", highlight=True)
-    converted_path = project_root / "converted_documents" / "folder" / "doc.md"
+    converted_path = project_root / "converted_documents" / converted_artifact_relative("folder/doc.pdf")
     converted_path.parent.mkdir(parents=True, exist_ok=True)
     converted_path.write_text("content", encoding="utf-8")
 
@@ -91,7 +92,7 @@ def test_highlight_worker_creates_placeholder_when_no_highlights(tmp_path: Path)
 
     pdf_path = sources_root / "folder" / "doc.pdf"
     _create_pdf(pdf_path, "Plain", highlight=False)
-    converted_path = project_root / "converted_documents" / "folder" / "doc.md"
+    converted_path = project_root / "converted_documents" / converted_artifact_relative("folder/doc.pdf")
     converted_path.parent.mkdir(parents=True, exist_ok=True)
     converted_path.write_text("content", encoding="utf-8")
 
@@ -113,7 +114,7 @@ def test_highlight_worker_writes_color_aggregates(tmp_path: Path) -> None:
 
     pdf_path = sources_root / "folder" / "doc.pdf"
     _create_pdf(pdf_path, "Color text", highlight=True)
-    converted_path = project_root / "converted_documents" / "folder" / "doc.md"
+    converted_path = project_root / "converted_documents" / converted_artifact_relative("folder/doc.pdf")
     converted_path.parent.mkdir(parents=True, exist_ok=True)
     converted_path.write_text("content", encoding="utf-8")
 
@@ -138,7 +139,7 @@ def test_highlight_worker_migrates_legacy_colors_directory(tmp_path: Path) -> No
 
     pdf_path = sources_root / "folder" / "doc.pdf"
     _create_pdf(pdf_path, "Legacy Colors", highlight=True)
-    converted_path = project_root / "converted_documents" / "folder" / "doc.md"
+    converted_path = project_root / "converted_documents" / converted_artifact_relative("folder/doc.pdf")
     converted_path.parent.mkdir(parents=True, exist_ok=True)
     converted_path.write_text("content", encoding="utf-8")
 

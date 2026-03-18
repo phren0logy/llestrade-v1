@@ -254,40 +254,7 @@ class APIKeyDialog(QDialog):
         openai_layout.addRow("", help_text_openai)
 
         layout.addWidget(openai_group)
-        
-        # Azure Document Intelligence Settings
-        di_group = QGroupBox("Azure Document Intelligence")
-        di_layout = QVBoxLayout(di_group)
-        
-        # API key input
-        key_layout = QHBoxLayout()
-        
-        self.azure_di_key, show_btn = self._create_secret_field(
-            "azure_di",
-            "Enter Azure Document Intelligence API key...",
-        )
-        key_layout.addWidget(self.azure_di_key)
-        key_layout.addWidget(show_btn)
-        
-        di_layout.addLayout(key_layout)
-        
-        # Endpoint
-        endpoint_layout = QFormLayout()
-        self.azure_di_endpoint = QLineEdit()
-        self.azure_di_endpoint.setPlaceholderText("https://your-resource.cognitiveservices.azure.com/")
-        endpoint_layout.addRow("Endpoint:", self.azure_di_endpoint)
-        self.config_fields["azure_di_endpoint"] = self.azure_di_endpoint
-        
-        di_layout.addLayout(endpoint_layout)
-        
-        # Help text
-        help_text = QLabel('<a href="https://portal.azure.com/">Configure in Azure Portal →</a>')
-        help_text.setOpenExternalLinks(True)
-        help_text.setStyleSheet("color: #1976d2;")
-        di_layout.addWidget(help_text)
-        
-        layout.addWidget(di_group)
-        
+
         layout.addStretch()
         return widget
 
@@ -485,15 +452,6 @@ class APIKeyDialog(QDialog):
         if "api_version" in azure_settings:
             self.azure_api_version.setText(azure_settings["api_version"])
         
-        # Load Azure DI settings
-        azure_di_settings = self.settings.get("azure_di_settings", {})
-        if "endpoint" in azure_di_settings:
-            normalized_endpoint, _error = self._normalize_https_endpoint(
-                str(azure_di_settings["endpoint"]),
-                label="Azure Document Intelligence",
-            )
-            self.azure_di_endpoint.setText(normalized_endpoint or str(azure_di_settings["endpoint"]))
-
         gateway_settings = self.settings.get("pydantic_ai_gateway_settings", {}) or {}
         base_url = str(gateway_settings.get("base_url") or "").strip()
         if base_url:
@@ -597,27 +555,6 @@ class APIKeyDialog(QDialog):
                 azure_settings["api_version"] = azure_api_version
             self.settings.set("azure_openai_settings", azure_settings)
         
-        # Save Azure DI settings
-        azure_di_endpoint, azure_di_endpoint_error = self._normalize_https_endpoint(
-            self.azure_di_endpoint.text(),
-            label="Azure Document Intelligence",
-        )
-        if azure_di_endpoint_error:
-            errors.append(azure_di_endpoint_error)
-        azure_di_key = self._effective_secret_field_value(self.azure_di_key)
-        if not azure_di_endpoint_error and azure_di_key and not azure_di_endpoint:
-            errors.append(
-                "Azure Document Intelligence endpoint is required when an API key is set"
-            )
-        elif not azure_di_endpoint_error and azure_di_endpoint and not azure_di_key:
-            errors.append(
-                "Azure Document Intelligence API key is required when an endpoint is set"
-            )
-        if azure_di_endpoint:
-            self.azure_di_endpoint.setText(azure_di_endpoint)
-            azure_di_settings = {"endpoint": azure_di_endpoint}
-            self.settings.set("azure_di_settings", azure_di_settings)
-
         gateway_base_url = self.gateway_base_url.text().strip()
         gateway_route = self.gateway_route.text().strip()
         self.settings.set(

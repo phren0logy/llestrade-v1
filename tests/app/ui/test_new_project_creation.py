@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import frontmatter
-import hashlib
 from pathlib import Path
 import pytest
 
@@ -16,13 +14,12 @@ _ = PySide6
 from src.app.core import llm_catalog
 from src.app.core.llm_catalog import default_model_for_provider
 from src.app.core.bulk_analysis_groups import BulkAnalysisGroup
-from src.app.core.conversion_manager import ConversionJob
+from src.app.core.converted_documents import converted_artifact_relative
 from src.app.core.project_manager import ProjectManager, ProjectMetadata
 from src.app.ui.dialogs.new_project_dialog import NewProjectDialog
 from src.app.ui.dialogs.project_metadata_dialog import ProjectMetadataDialog
 from src.app.ui.dialogs.bulk_analysis_group_dialog import BulkAnalysisGroupDialog
 from src.app.ui.widgets import llm_settings_panel as llm_settings_panel_module
-from src.app.workers.conversion_worker import ConversionWorker
 from src.app.core.file_tracker import FileTracker
 from src.app.ui.stages.project_workspace import ProjectWorkspace
 
@@ -111,7 +108,7 @@ def test_new_project_dialog_collects_helper_and_preview(tmp_path: Path, qt_app: 
 
     assert dialog._helper_combo.count() == 1
     helper_id = dialog._helper_combo.itemData(0)
-    assert helper_id == "azure_di"
+    assert helper_id == "docling"
 
     dialog._on_accept()
     config = dialog.result_config()
@@ -119,7 +116,7 @@ def test_new_project_dialog_collects_helper_and_preview(tmp_path: Path, qt_app: 
     assert config.subject_name == "Jane Doe"
     assert config.date_of_birth == "1975-08-19"
     assert config.case_description == "Referral for competency evaluation"
-    assert config.conversion_helper == "azure_di"
+    assert config.conversion_helper == "docling"
     assert config.conversion_options == {}
     assert config.output_base == output_base
     assert config.selected_folders == ["bundle"]
@@ -127,147 +124,13 @@ def test_new_project_dialog_collects_helper_and_preview(tmp_path: Path, qt_app: 
 
     dialog.deleteLater()
 
-
-def test_conversion_worker_uses_azure_when_configured(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    job = ConversionJob(
-        source_path=tmp_path / "sample.pdf",
-        relative_path="sample.pdf",
-        destination_path=tmp_path / "converted" / "sample.md",
-        conversion_type="pdf",
-    )
-
-    job.source_path.parent.mkdir(parents=True, exist_ok=True)
-    job.source_path.write_bytes(b"pdf")
-
-    produced_markdown = job.destination_path.parent / "sample.md"
-    produced_json = job.destination_path.parent / "sample.json"
-    raw_markdown = job.destination_path.parent / "sample.azure.raw.md"
-    raw_json = job.destination_path.parent / "sample.azure.raw.json"
-
-    def fake_process(_self, source_path, output_dir, json_dir, endpoint, key):
-        assert json_dir == output_dir
-        produced_markdown.parent.mkdir(parents=True, exist_ok=True)
-        produced_markdown.write_text("azure output\n<!-- PageBreak -->\nnext page")
-        produced_json.write_text('{"kind":"raw"}')
-        return str(produced_json), str(produced_markdown)
-
-    class StubSettings:
-        def __init__(self) -> None:
-            pass
-
-        def get(self, key, default=None):
-            if key == "azure_di_settings":
-                return {"endpoint": "https://example"}
-            return default
-
-        def get_api_key(self, provider):
-            if provider == "azure_di":
-                return "secret"
-            return None
-
-    monkeypatch.setattr("src.app.workers.conversion_worker.SecureSettings", StubSettings)
-    monkeypatch.setattr(
-        "src.app.workers.conversion_worker.ConversionWorker._process_with_azure",
-        fake_process,
-    )
-
-    worker = ConversionWorker([job], helper="azure_di")
-    worker._convert_pdf_with_azure(job)
-
-    content = job.destination_path.read_text()
-    assert "<!--- sample.pdf#page=1 --->" in content
-    assert raw_markdown.exists()
-    assert raw_json.exists()
-    assert not produced_json.exists()
-
-    post = frontmatter.load(job.destination_path)
-    assert post.metadata["azure_raw_markdown_path"].endswith("/converted/sample.azure.raw.md")
-    assert post.metadata["azure_raw_json_path"].endswith("/converted/sample.azure.raw.json")
-    assert post.metadata["azure_raw_cached"] is False
-
-
-def test_conversion_worker_reuses_cached_raw_azure_output(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    job = ConversionJob(
-        source_path=tmp_path / "sample.pdf",
-        relative_path="sample.pdf",
-        destination_path=tmp_path / "converted" / "sample.md",
-        conversion_type="pdf",
-    )
-    job.source_path.parent.mkdir(parents=True, exist_ok=True)
-    job.source_path.write_bytes(b"pdf")
-    job.destination_path.parent.mkdir(parents=True, exist_ok=True)
-
-    checksum = hashlib.sha256(b"pdf").hexdigest()
-    job.destination_path.write_text(f"---\nsources:\n  - checksum: {checksum}\n---\nold", encoding="utf-8")
-    raw_markdown = job.destination_path.parent / "sample.azure.raw.md"
-    raw_json = job.destination_path.parent / "sample.azure.raw.json"
-    raw_markdown.write_text("cached raw\n<!-- PageBreak -->\npage2", encoding="utf-8")
-    raw_json.write_text('{"cached": true}', encoding="utf-8")
-
-    class StubSettings:
-        def get(self, key, default=None):
-            if key == "azure_di_settings":
-                return {"endpoint": "https://example"}
-            return default
-
-        def get_api_key(self, provider):
-            return "secret" if provider == "azure_di" else None
-
-    called = {"value": False}
-
-    def should_not_run(*_args, **_kwargs):
-        called["value"] = True
-        raise AssertionError("Azure conversion should not run when cache is valid")
-
-    monkeypatch.setattr("src.app.workers.conversion_worker.SecureSettings", StubSettings)
-    monkeypatch.setattr(
-        "src.app.workers.conversion_worker.ConversionWorker._process_with_azure",
-        should_not_run,
-    )
-
-    worker = ConversionWorker([job], helper="azure_di")
-    worker._convert_pdf_with_azure(job)
-
-    assert called["value"] is False
-    post = frontmatter.load(job.destination_path)
-    assert post.metadata["azure_raw_cached"] is True
-
-
-def test_conversion_worker_raises_without_azure_credentials(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    job = ConversionJob(
-        source_path=tmp_path / "sample.pdf",
-        relative_path="sample.pdf",
-        destination_path=tmp_path / "converted" / "sample.md",
-        conversion_type="pdf",
-    )
-
-    job.source_path.parent.mkdir(parents=True, exist_ok=True)
-    job.source_path.write_bytes(b"pdf")
-
-    class EmptySettings:
-        def __init__(self) -> None:
-            pass
-
-        def get(self, key, default=None):
-            return default
-
-        def get_api_key(self, provider):
-            return None
-
-    monkeypatch.setattr("src.app.workers.conversion_worker.SecureSettings", EmptySettings)
-
-    worker = ConversionWorker([job], helper="azure_di")
-    with pytest.raises(RuntimeError, match="Azure Document Intelligence credentials"):
-        worker._convert_pdf_with_azure(job)
-
-
 def test_project_manager_update_conversion_helper_replaces_options(qt_app: QApplication) -> None:
     assert qt_app is not None
     manager = ProjectManager()
     manager.conversion_settings.options = {"legacy": True}
 
-    manager.update_conversion_helper("azure_di")
-    assert manager.conversion_settings.helper == "azure_di"
+    manager.update_conversion_helper("docling")
+    assert manager.conversion_settings.helper == "docling"
     assert manager.conversion_settings.options == {}
 
 
@@ -294,7 +157,7 @@ def test_file_tracker_counts_converted_documents(tmp_path: Path, qt_app: QApplic
 
     converted_folder = manager.project_dir / "converted_documents"
     converted_folder.mkdir(parents=True, exist_ok=True)
-    (converted_folder / "example.md").write_text("content")
+    (converted_folder / converted_artifact_relative("example.pdf")).write_text("content")
 
     tracker = FileTracker(manager.project_dir)
     snapshot = tracker.scan()
@@ -352,7 +215,7 @@ def test_summary_group_dialog_lists_converted_documents(tmp_path: Path, qt_app: 
 
     converted_root = manager.project_dir / "converted_documents" / "folder"
     converted_root.mkdir(parents=True)
-    (converted_root / "doc.md").write_text("content")
+    (converted_root / Path(converted_artifact_relative("folder/doc.pdf")).name).write_text("content")
 
     dialog = BulkAnalysisGroupDialog(manager.project_dir)
     try:
@@ -361,7 +224,7 @@ def test_summary_group_dialog_lists_converted_documents(tmp_path: Path, qt_app: 
         assert "folder" in top_labels
         folder_item = next(tree.topLevelItem(i) for i in range(tree.topLevelItemCount()) if tree.topLevelItem(i).text(0) == "folder")
         child_names = [folder_item.child(i).text(0) for i in range(folder_item.childCount())]
-        assert "doc.md" in child_names
+        assert "doc.pdf.doctags.txt" in child_names
     finally:
         dialog.deleteLater()
 
@@ -375,7 +238,7 @@ def test_bulk_group_dialog_requires_selection(monkeypatch: pytest.MonkeyPatch, t
 
     converted_root = manager.project_dir / "converted_documents" / "folder"
     converted_root.mkdir(parents=True)
-    (converted_root / "doc.md").write_text("content")
+    (converted_root / Path(converted_artifact_relative("folder/doc.pdf")).name).write_text("content")
 
     warnings: list[str] = []
 
@@ -408,9 +271,12 @@ def test_bulk_group_dialog_marks_legacy_group_without_provider_invalid(
 
     converted_root = manager.project_dir / "converted_documents" / "folder"
     converted_root.mkdir(parents=True)
-    (converted_root / "doc.md").write_text("content")
+    (converted_root / Path(converted_artifact_relative("folder/doc.pdf")).name).write_text("content")
 
-    legacy_group = BulkAnalysisGroup.create("Legacy Group", files=["folder/doc.md"])
+    legacy_group = BulkAnalysisGroup.create(
+        "Legacy Group",
+        files=[converted_artifact_relative("folder/doc.pdf")],
+    )
     legacy_group.provider_id = ""
     legacy_group.model = ""
 
@@ -433,7 +299,7 @@ def test_bulk_group_dialog_llm_settings_section_has_room(tmp_path: Path, qt_app:
 
     converted_root = manager.project_dir / "converted_documents" / "folder"
     converted_root.mkdir(parents=True)
-    (converted_root / "doc.md").write_text("content", encoding="utf-8")
+    (converted_root / Path(converted_artifact_relative("folder/doc.pdf")).name).write_text("content", encoding="utf-8")
 
     dialog = BulkAnalysisGroupDialog(manager.project_dir)
     try:
@@ -456,7 +322,7 @@ def test_bulk_group_dialog_persists_enabled_reasoning(tmp_path: Path, qt_app: QA
 
     converted_root = manager.project_dir / "converted_documents" / "folder"
     converted_root.mkdir(parents=True)
-    (converted_root / "doc.md").write_text("content", encoding="utf-8")
+    (converted_root / Path(converted_artifact_relative("folder/doc.pdf")).name).write_text("content", encoding="utf-8")
 
     dialog = BulkAnalysisGroupDialog(manager.project_dir)
     try:
@@ -560,7 +426,7 @@ def test_bulk_group_dialog_shows_effective_combined_input_counts(tmp_path: Path,
 
     converted_dir = manager.project_dir / "converted_documents" / "folder"
     converted_dir.mkdir(parents=True, exist_ok=True)
-    (converted_dir / "doc.md").write_text("converted", encoding="utf-8")
+    (converted_dir / Path(converted_artifact_relative("folder/doc.pdf")).name).write_text("converted", encoding="utf-8")
 
     map_dir = manager.project_dir / "bulk_analysis" / "per-document-summaries" / "folder"
     map_dir.mkdir(parents=True, exist_ok=True)

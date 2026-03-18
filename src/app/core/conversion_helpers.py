@@ -56,13 +56,13 @@ _registry = HelperRegistry()
 
 _registry.register(
     ConversionHelper(
-        helper_id="azure_di",
-        name="Azure Document Intelligence",
+        helper_id="docling",
+        name="Local Docling MLX",
         description=(
-            "Uploads PDFs and other richly formatted files to Azure Document Intelligence and"
-            " saves the generated Markdown into the project. Plain text files are copied locally."
+            "Converts project PDFs through a local Docling MLX runtime and stores"
+            " DocTags-only artifacts under converted_documents/."
         ),
-        supported_extensions=[".pdf", ".doc", ".docx", ".ppt", ".pptx"],
+        supported_extensions=[".pdf"],
     )
 )
 

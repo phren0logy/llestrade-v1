@@ -33,9 +33,9 @@ from PySide6.QtWidgets import (
 
 from src.config.prompt_store import get_bundled_dir, get_custom_dir
 from src.config.paths import app_resource_root
-from src.app.core.azure_artifacts import is_azure_raw_artifact
 from src.app.core.bulk_paths import iter_map_outputs, iter_map_outputs_under, resolve_map_output_path
 from src.app.core.bulk_analysis_groups import BulkAnalysisGroup
+from src.app.core.converted_documents import is_doctags_artifact
 from src.app.core.llm_catalog import default_model_for_provider
 from src.app.core.project_manager import ProjectMetadata
 from src.app.core.placeholders.analyzer import find_placeholders
@@ -235,9 +235,9 @@ class BulkAnalysisGroupDialog(QDialog):
         self._on_operation_changed()
 
     def _is_allowed_file(self, path: Path) -> bool:
-        """Return True if the file should be selectable (only .md or .txt)."""
+        """Return True if the file should be selectable as a converted input."""
         try:
-            return path.suffix.lower() in {".md", ".txt"} and not is_azure_raw_artifact(path)
+            return is_doctags_artifact(path)
         except Exception:
             return False
 
@@ -557,13 +557,14 @@ class BulkAnalysisGroupDialog(QDialog):
         for path in converted_root.rglob("*"):
             if not path.is_file():
                 continue
-            # Hide Azure DI artefacts from the picker to avoid confusing users.
             if any(
-                part in {".azure-di", ".azure_di"} or part.startswith(".azure-di") or part.startswith(".azure_di")
+                part in {".azure-di", ".azure_di", ".docling", ".llestrade"}
+                or part.startswith(".azure-di")
+                or part.startswith(".azure_di")
+                or part.startswith(".docling")
                 for part in path.parts
             ):
                 continue
-            # Only allow markdown or text files
             if not self._is_allowed_file(path):
                 continue
             converted_files.append(path.relative_to(converted_root).as_posix())
@@ -868,10 +869,10 @@ class BulkAnalysisGroupDialog(QDialog):
 
         files_set: set[str] = set()
         for path in tree_files:
-            if path and Path(path).suffix.lower() in {".md", ".txt"}:
+            if path and is_doctags_artifact(path):
                 files_set.add(self._normalise_text(path))
         for path in manual_files:
-            if path and Path(path).suffix.lower() in {".md", ".txt"}:
+            if path and is_doctags_artifact(path):
                 files_set.add(self._normalise_text(path))
 
         normalized_dirs = sorted({self._normalise_directory(path) for path in directories if path})
@@ -967,14 +968,14 @@ class BulkAnalysisGroupDialog(QDialog):
         converted_paths: set[Path] = set()
         for rel in files:
             candidate = converted_root / rel
-            if candidate.exists() and candidate.is_file() and not is_azure_raw_artifact(candidate):
+            if candidate.exists() and candidate.is_file() and is_doctags_artifact(candidate):
                 converted_paths.add(candidate.resolve())
         for rel_dir in directories:
             base = converted_root / rel_dir
             if not base.exists() or not base.is_dir():
                 continue
-            for path in base.rglob("*.md"):
-                if is_azure_raw_artifact(path):
+            for path in base.rglob("*"):
+                if not path.is_file() or not is_doctags_artifact(path):
                     continue
                 converted_paths.add(path.resolve())
         converted_count = len(converted_paths)

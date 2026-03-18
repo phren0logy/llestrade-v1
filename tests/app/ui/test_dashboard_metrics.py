@@ -13,6 +13,7 @@ from PySide6.QtWidgets import QApplication, QLabel, QScrollArea
 
 _ = PySide6
 
+from src.app.core.converted_documents import converted_artifact_relative
 from src.app.core.file_tracker import DashboardMetrics
 from src.app.core.project_manager import ProjectManager, ProjectMetadata
 from src.app.core.bulk_analysis_groups import BulkAnalysisGroup
@@ -50,8 +51,8 @@ def test_dashboard_metrics_refresh_counts_files(tmp_path: Path, qt_app: QApplica
 
     converted = manager.project_dir / "converted_documents" / "folder"
     converted.mkdir(parents=True, exist_ok=True)
-    (converted / "doc1.md").write_text("converted")
-    (converted / "doc2.md").write_text("converted")
+    (converted / Path(converted_artifact_relative("folder/doc1.pdf")).name).write_text("converted")
+    (converted / Path(converted_artifact_relative("folder/doc2.pdf")).name).write_text("converted")
 
     metrics = manager.get_dashboard_metrics(refresh=True)
 
@@ -68,7 +69,7 @@ def test_dashboard_metrics_persist_across_project_reload(tmp_path: Path, qt_app:
 
     converted = manager.project_dir / "converted_documents"
     converted.mkdir(exist_ok=True)
-    (converted / "doc.md").write_text("---\nsource_format: pdf\n---\nbody")
+    (converted / Path(converted_artifact_relative("doc.pdf")).name).write_text("body")
 
     first_metrics = manager.get_dashboard_metrics(refresh=True)
     manager.save_project()
@@ -91,7 +92,7 @@ def test_read_dashboard_metrics_from_disk(tmp_path: Path, qt_app: QApplication) 
 
     converted = manager.project_dir / "converted_documents"
     converted.mkdir(exist_ok=True)
-    (converted / "doc.md").write_text("---\nsource_format: pdf\n---\nbody")
+    (converted / Path(converted_artifact_relative("doc.pdf")).name).write_text("body")
 
     manager.get_dashboard_metrics(refresh=True)
     manager.save_project()
@@ -109,15 +110,15 @@ def test_workspace_metrics_include_group_coverage(tmp_path: Path, qt_app: QAppli
 
     converted_dir = manager.project_dir / "converted_documents" / "folder"
     converted_dir.mkdir(parents=True, exist_ok=True)
-    (converted_dir / "doc1.md").write_text("converted")
-    (converted_dir / "doc2.md").write_text("converted")
+    (converted_dir / Path(converted_artifact_relative("folder/doc1.pdf")).name).write_text("converted")
+    (converted_dir / Path(converted_artifact_relative("folder/doc2.pdf")).name).write_text("converted")
 
     group = BulkAnalysisGroup.create(name="Case Files", directories=["folder"])
     manager.save_bulk_analysis_group(group)
 
     outputs_dir = manager.project_dir / "bulk_analysis" / group.slug / "outputs" / "folder"
     outputs_dir.mkdir(parents=True, exist_ok=True)
-    (outputs_dir / "doc1.md").write_text("analysis")
+    (outputs_dir / "doc1.pdf_analysis.md").write_text("analysis")
 
     metrics = manager.get_workspace_metrics(refresh=True)
 
@@ -127,7 +128,10 @@ def test_workspace_metrics_include_group_coverage(tmp_path: Path, qt_app: QAppli
     assert group_metrics.converted_count == 2
     assert group_metrics.bulk_analysis_total == 1
     assert group_metrics.pending_bulk_analysis == 1
-    assert set(group_metrics.converted_files) == {"folder/doc1.md", "folder/doc2.md"}
+    assert set(group_metrics.converted_files) == {
+        converted_artifact_relative("folder/doc1.pdf"),
+        converted_artifact_relative("folder/doc2.pdf"),
+    }
 
 
 def test_workspace_metrics_include_combined_last_run_input_count(tmp_path: Path, qt_app: QApplication) -> None:
@@ -183,20 +187,20 @@ def test_overlapping_groups_keep_pending_counts_isolated(tmp_path: Path, qt_app:
 
     converted = manager.project_dir / "converted_documents" / "folder"
     converted.mkdir(parents=True, exist_ok=True)
-    (converted / "doc1.md").write_text("converted 1", encoding="utf-8")
-    (converted / "doc2.md").write_text("converted 2", encoding="utf-8")
+    (converted / Path(converted_artifact_relative("folder/doc1.pdf")).name).write_text("converted 1", encoding="utf-8")
+    (converted / Path(converted_artifact_relative("folder/doc2.pdf")).name).write_text("converted 2", encoding="utf-8")
 
     group_all = manager.save_bulk_analysis_group(
         BulkAnalysisGroup.create(name="All Docs", directories=["folder"])
     )
     group_single = manager.save_bulk_analysis_group(
-        BulkAnalysisGroup.create(name="Single Doc", files=["folder/doc1.md"])
+        BulkAnalysisGroup.create(name="Single Doc", files=[converted_artifact_relative("folder/doc1.pdf")])
     )
 
     outputs_dir = manager.project_dir / "bulk_analysis" / group_all.slug / "folder"
     outputs_dir.mkdir(parents=True, exist_ok=True)
-    (outputs_dir / "doc1_analysis.md").write_text("analysis 1", encoding="utf-8")
-    (outputs_dir / "doc2_analysis.md").write_text("analysis 2", encoding="utf-8")
+    (outputs_dir / "doc1.pdf_analysis.md").write_text("analysis 1", encoding="utf-8")
+    (outputs_dir / "doc2.pdf_analysis.md").write_text("analysis 2", encoding="utf-8")
 
     metrics = manager.get_workspace_metrics(refresh=True)
     all_metrics = metrics.groups[group_all.group_id]
@@ -204,7 +208,7 @@ def test_overlapping_groups_keep_pending_counts_isolated(tmp_path: Path, qt_app:
 
     assert all_metrics.pending_bulk_analysis == 0
     assert single_metrics.pending_bulk_analysis == 1
-    assert single_metrics.pending_files == ("folder/doc1.md",)
+    assert single_metrics.pending_files == (converted_artifact_relative("folder/doc1.pdf"),)
 
 
 def test_welcome_stage_uses_persisted_metrics(
@@ -217,7 +221,7 @@ def test_welcome_stage_uses_persisted_metrics(
 
     converted = manager.project_dir / "converted_documents"
     converted.mkdir(exist_ok=True)
-    (converted / "doc.md").write_text("---\nsource_format: pdf\n---\nbody")
+    (converted / Path(converted_artifact_relative("doc.pdf")).name).write_text("body")
 
     manager.get_dashboard_metrics(refresh=True)
     manager.save_project()
@@ -245,7 +249,7 @@ def test_welcome_stage_refreshes_on_show_event(
 
     converted_dir = manager.project_dir / "converted_documents"
     converted_dir.mkdir(exist_ok=True)
-    (converted_dir / "doc.md").write_text("---\nsource_format: pdf\n---\nbody")
+    (converted_dir / Path(converted_artifact_relative("doc.pdf")).name).write_text("body")
 
     manager.get_dashboard_metrics(refresh=True)
     manager.save_project()
@@ -263,7 +267,7 @@ def test_welcome_stage_refreshes_on_show_event(
 
         outputs_dir = manager.project_dir / "bulk_analysis" / "manual" / "outputs"
         outputs_dir.mkdir(parents=True, exist_ok=True)
-        (outputs_dir / "doc_analysis.md").write_text("analysis")
+        (outputs_dir / "doc.pdf_analysis.md").write_text("analysis")
 
         manager.get_dashboard_metrics(refresh=True)
         manager.save_project()

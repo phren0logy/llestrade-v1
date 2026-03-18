@@ -10,7 +10,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, TYPE_CHECKING
 
-from src.app.core.azure_artifacts import is_azure_raw_artifact
 from src.app.core.bulk_paths import (
     iter_map_outputs,
     iter_map_outputs_under,
@@ -18,6 +17,7 @@ from src.app.core.bulk_paths import (
     resolve_map_output_path,
 )
 from src.app.core.bulk_recovery import recovery_summary
+from src.app.core.converted_documents import converted_artifact_relative, is_doctags_artifact
 
 if TYPE_CHECKING:
     from .bulk_analysis_groups import BulkAnalysisGroup
@@ -283,7 +283,7 @@ class FileTracker:
         collected: set[str] = set()
         for path in folder.rglob("*"):
             if path.is_file():
-                if folder_name == "converted_documents" and is_azure_raw_artifact(path):
+                if folder_name == "converted_documents" and not is_doctags_artifact(path):
                     continue
                 collected.add(path.relative_to(folder).as_posix())
         return collected
@@ -547,12 +547,12 @@ def _iter_project_files(root: Path, rel_dirs: Sequence[str]) -> set[str]:
         if not base.exists():
             continue
         if base.is_file():
-            if is_azure_raw_artifact(base):
+            if not is_doctags_artifact(base):
                 continue
             selected.add(rel)
             continue
-        for path in base.rglob("*.md"):
-            if is_azure_raw_artifact(path):
+        for path in base.rglob("*"):
+            if not path.is_file() or not is_doctags_artifact(path):
                 continue
             try:
                 selected.add(path.relative_to(root).as_posix())
@@ -735,11 +735,10 @@ def _resolve_group_converted_paths(
         return set()
 
     selected: set[str] = set()
-    # Only consider markdown or text files for per-document operations
     normalised_converted = {
         path.strip("/")
         for path in converted_paths
-        if path.lower().endswith(".md") or path.lower().endswith(".txt")
+        if is_doctags_artifact(path)
     }
 
     for path in group.files:
@@ -771,34 +770,14 @@ def _normalize_highlight_entry(relative_path: str) -> str | None:
         normalized = normalized[len("documents/") :]
     if not normalized:
         return None
-    base = normalized[: -len(suffix)] + ".md"
-    return base
+    source_relative = normalized[: -len(suffix)]
+    return converted_artifact_relative(source_relative)
 
 
 def _converted_is_pdf(path: Path) -> bool:
-    """Return True if the converted markdown at `path` originated from a PDF.
+    """Return whether the converted artifact is a PDF-derived DocTags file."""
 
-    Heuristic: inspect the YAML front-matter inserted by the converter and
-    look for a line `source_format: pdf`. Reads only the first ~200 lines.
-    """
-    try:
-        # Read a small portion of the file; YAML header is at the top
-        with path.open("r", encoding="utf-8", errors="ignore") as fh:
-            first = fh.readline()
-            if not first.startswith("---"):
-                return False
-            for _ in range(0, 200):
-                line = fh.readline()
-                if not line:
-                    break
-                if line.strip() == "---":
-                    break
-                # Cheap check without YAML parser
-                if line.strip().lower().startswith("source_format:"):
-                    return line.strip().lower().endswith("pdf")
-    except Exception:
-        return False
-    return False
+    return path.is_file() and is_doctags_artifact(path)
 
 
 def _parse_bulk_output_entry(relative_path: str) -> tuple[str, str] | None:
@@ -819,7 +798,9 @@ def _parse_bulk_output_entry(relative_path: str) -> tuple[str, str] | None:
 
     normalized = remainder
     if remainder.endswith(".md") and remainder[:-3].endswith("_analysis"):
-        normalized = remainder[:-12] + ".md"
+        source_relative = remainder[:-12]
+        if source_relative:
+            normalized = converted_artifact_relative(source_relative)
 
     return slug, normalized
 

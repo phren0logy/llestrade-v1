@@ -19,6 +19,7 @@ except ImportError:
     logging.warning("keyring module not available - secure keychain storage is unavailable")
 
 from PySide6.QtCore import QObject, Signal, QSettings
+
 from src.app.core.llm_catalog import default_model_for_provider, suspend_secure_settings_lookup
 from src.config.paths import app_config_dir
 

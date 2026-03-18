@@ -10,6 +10,7 @@ from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QLabel, QListWidgetItem, QMessageBox, QTreeWidgetItem, QWidget
 
+from src.app.core.converted_documents import source_relative_from_artifact
 from src.app.core.file_tracker import WorkspaceMetrics
 from src.app.core.project_manager import HighlightState, ProjectManager
 from src.app.ui.workspace.highlights_tab import HighlightsTab
@@ -271,7 +272,10 @@ class HighlightsController:
             list_widget.setUpdatesEnabled(False)
             list_widget.clear()
             for relative in sorted(self._current_missing):
-                list_widget.addItem(relative)
+                display = source_relative_from_artifact(relative) or relative
+                item = QListWidgetItem(display)
+                item.setData(Qt.UserRole, relative)
+                list_widget.addItem(item)
             list_widget.setUpdatesEnabled(True)
             list_widget.show()
         else:
@@ -287,8 +291,13 @@ class HighlightsController:
         manager = self._project_manager
         if not manager or not manager.project_dir:
             return
-        relative = Path(item.text())
-        target = manager.project_dir / relative
+        stored_relative = item.data(Qt.UserRole)
+        relative_text = str(stored_relative or item.text())
+        source_relative = source_relative_from_artifact(relative_text)
+        if source_relative:
+            target = manager.project_dir / source_relative
+        else:
+            target = manager.project_dir / Path(relative_text)
         if target.exists():
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(target)))
 

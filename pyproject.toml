@@ -23,6 +23,9 @@ dependencies = [
     "pypandoc-binary==1.16.2",
     "pyside6==6.10.2",
     "pydantic-ai-slim==1.67.0",
+    "docling[vlm]>=2.80.0",
+    "mlx>=0.31.1",
+    "mlx-lm>=0.29.1",
 ]
 
 [dependency-groups]

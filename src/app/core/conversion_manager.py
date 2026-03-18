@@ -11,13 +11,12 @@ from typing import Iterable, List, Sequence
 
 import frontmatter
 
+from .converted_documents import converted_artifact_relative
+from .citations import CitationStore
 from .project_manager import ProjectManager
 
 LOGGER = logging.getLogger(__name__)
 
-SUPPORTED_TEXT_EXTENSIONS = {".txt", ".text"}
-SUPPORTED_MARKDOWN_EXTENSIONS = {".md", ".markdown"}
-SUPPORTED_DOC_EXTENSIONS = {".doc", ".docx"}
 SUPPORTED_PDF_EXTENSIONS = {".pdf"}
 
 
@@ -135,12 +134,6 @@ def _iter_files(folder: Path) -> Iterable[Path]:
 
 def _classify_conversion(source_file: Path) -> str | None:
     suffix = source_file.suffix.lower()
-    if suffix in SUPPORTED_MARKDOWN_EXTENSIONS:
-        return "copy"
-    if suffix in SUPPORTED_TEXT_EXTENSIONS:
-        return "copy"
-    if suffix in SUPPORTED_DOC_EXTENSIONS:
-        return "docx"
     if suffix in SUPPORTED_PDF_EXTENSIONS:
         return "pdf"
     return None
@@ -149,13 +142,7 @@ def _classify_conversion(source_file: Path) -> str | None:
 def _destination_for(project_dir: Path, relative: str, conversion_type: str) -> Path:
     converted_root = project_dir / "converted_documents"
     converted_root.mkdir(parents=True, exist_ok=True)
-
-    destination = converted_root / relative
-    if conversion_type == "copy":
-        return destination
-
-    # For conversions to markdown ensure .md suffix
-    destination = destination.with_suffix(".md")
+    destination = converted_root / converted_artifact_relative(relative)
     return destination
 
 
@@ -186,6 +173,24 @@ def _hash_source(path: Path) -> str | None:
 def _has_matching_checksum(destination: Path, expected_digest: str) -> bool:
     if not destination.exists():
         return False
+    resolved = destination.resolve()
+    project_dir = None
+    parts = resolved.parts
+    try:
+        idx = parts.index("converted_documents")
+    except ValueError:
+        idx = -1
+    if idx > 0:
+        project_dir = Path(*parts[:idx])
+    if project_dir is not None:
+        try:
+            converted_root = (project_dir / "converted_documents").resolve()
+            relative = resolved.relative_to(converted_root).as_posix()
+            metadata = CitationStore(project_dir).get_document_metadata(relative)
+            if metadata and metadata.get("source_checksum") == expected_digest:
+                return True
+        except Exception:
+            pass
     try:
         document = frontmatter.load(destination)
     except Exception:
@@ -203,5 +208,4 @@ def _has_matching_checksum(destination: Path, expected_digest: str) -> bool:
 
 
 def copy_existing_markdown(source: Path, destination: Path) -> None:
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(source, destination)
+    raise RuntimeError("This experimental branch does not support markdown copy-through conversion.")

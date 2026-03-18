@@ -134,7 +134,7 @@ class DocumentsController:
             reply = QMessageBox.question(
                 workspace,
                 "Convert Documents",
-                f"Convert {len(jobs)} new document(s) to markdown now?",
+                f"Convert {len(jobs)} new PDF document(s) to DocTags now?",
                 QMessageBox.Yes | QMessageBox.No,
                 QMessageBox.Yes,
             )

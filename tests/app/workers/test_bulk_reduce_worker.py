@@ -10,6 +10,7 @@ from pydantic_ai.usage import RequestUsage
 
 from src.app.core.project_manager import ProjectMetadata
 from src.app.core.bulk_analysis_groups import BulkAnalysisGroup
+from src.app.core.converted_documents import converted_artifact_relative
 from src.app.workers import bulk_reduce_worker as reduce_module
 from src.app.workers.llm_backend import (
     LLMExecutionBackend,
@@ -148,11 +149,12 @@ def test_bulk_reduce_worker_force_rerun(tmp_path: Path, qtbot, monkeypatch: pyte
     project_dir = tmp_path
     converted = project_dir / "converted_documents" / "folder"
     converted.mkdir(parents=True, exist_ok=True)
-    converted_doc = converted / "doc.md"
-    converted_doc.write_text("content", encoding="utf-8")
+    relative_path = converted_artifact_relative("folder/doc.pdf")
+    converted_doc = converted / "doc.pdf.doctags.txt"
+    converted_doc.write_text("<loc_0><loc_0><loc_200><loc_40>content\n", encoding="utf-8")
 
     group = BulkAnalysisGroup.create("Group")
-    group.combine_converted_files = ["folder/doc.md"]
+    group.combine_converted_files = [relative_path]
     metadata = ProjectMetadata(case_name="Case")
 
     call_count = {"value": 0}
@@ -229,17 +231,26 @@ def test_bulk_reduce_worker_applies_placeholder_values(tmp_path: Path, monkeypat
     pdf_path = project_dir / "sources" / "doc space.pdf"
     pdf_path.parent.mkdir(parents=True, exist_ok=True)
     pdf_path.write_text("pdf", encoding="utf-8")
-
-    import frontmatter
-
-    doc_path = converted_dir / "doc.md"
-    post = frontmatter.Post("Content", metadata={"sources": [{"path": str(pdf_path)}]})
-    doc_path.write_text(frontmatter.dumps(post), encoding="utf-8")
+    relative_path = converted_artifact_relative("doc space.pdf")
+    doc_path = converted_dir / relative_path
+    doc_path.write_text("<loc_0><loc_0><loc_200><loc_40>Content\n", encoding="utf-8")
 
     group = BulkAnalysisGroup.create("Group")
-    group.combine_converted_files = ["doc.md"]
+    group.combine_converted_files = [relative_path]
 
     metadata = ProjectMetadata(case_name="Case")
+    from src.app.core.citations import CitationStore
+
+    store = CitationStore(project_dir)
+    store.index_doctags_document(
+        relative_path=relative_path,
+        doctags_text=doc_path.read_text(encoding="utf-8"),
+        source_checksum="reduce-placeholder-checksum",
+        pages_pdf=1,
+        pages_detected=1,
+        source_relative_path="sources/doc space.pdf",
+        source_absolute_path=pdf_path.resolve().as_posix(),
+    )
 
     monkeypatch.setattr(
         reduce_module,
@@ -287,7 +298,8 @@ def test_bulk_reduce_worker_applies_placeholder_values(tmp_path: Path, monkeypat
 
     assert captured["system"], "expected system prompt captured"
     assert captured["user"], "expected user prompt captured"
-    assert captured["system"][0] == "System for Case Project"
+    assert captured["system"][0].startswith("System for Case Project")
+    assert "Generated Citation Appendix" in captured["system"][0]
     user_prompt = captured["user"][0]
     assert "doc space.pdf" in user_prompt
     assert "ACME" in user_prompt
@@ -305,20 +317,15 @@ def test_bulk_reduce_prompt_strips_frontmatter_and_embedded_citations(
     converted_dir = project_dir / "converted_documents"
     converted_dir.mkdir(parents=True, exist_ok=True)
 
-    import frontmatter
-
-    doc_path = converted_dir / "doc.md"
-    post = frontmatter.Post(
-        "<!--- source doc.pdf#page=7 --->\nBody text with [CIT:ev_deadbeef].\n",
-        metadata={
-            "document_type": "converted-document",
-            "sources": [{"relative": "converted/doc.md"}],
-        },
+    relative_path = converted_artifact_relative("doc.pdf")
+    doc_path = converted_dir / relative_path
+    doc_path.write_text(
+        "<loc_0><loc_0><loc_220><loc_40>Body text with [CIT:ev_deadbeef].\n",
+        encoding="utf-8",
     )
-    doc_path.write_text(frontmatter.dumps(post), encoding="utf-8")
 
     group = BulkAnalysisGroup.create("Group")
-    group.combine_converted_files = ["doc.md"]
+    group.combine_converted_files = [relative_path]
 
     monkeypatch.setattr(
         reduce_module,
@@ -359,10 +366,7 @@ def test_bulk_reduce_prompt_strips_frontmatter_and_embedded_citations(
     worker._run()
 
     prompt = captured["prompt"]
-    assert "document_type:" not in prompt
-    assert "sources:" not in prompt
-    assert "<!--- section-begin: converted/doc.md --->" in prompt
-    assert "<!--- source doc.pdf#page=7 --->" in prompt
+    assert "<!--- section-begin: converted/doc.pdf.doctags.txt --->" in prompt
     assert "[CIT:ev_deadbeef]" not in prompt
     assert "Body text with" in prompt
 
@@ -375,22 +379,17 @@ def test_bulk_reduce_uses_generated_citation_appendix_and_records_local_citation
     converted_dir = project_dir / "converted_documents"
     converted_dir.mkdir(parents=True, exist_ok=True)
 
-    doc_path = converted_dir / "doc.md"
-    doc_path.write_text("<!--- doc.pdf#page=1 --->\nBody text.\n", encoding="utf-8")
-    raw_json = converted_dir / "doc.azure.raw.json"
-    raw_json.write_text(
-        '{"pages":[{"page_number":1,"width":100,"height":200,"unit":"pixel","lines":[{"content":"Body text.","polygon":[0,0,50,0,50,10,0,10]}]}]}',
-        encoding="utf-8",
-    )
+    relative_path = converted_artifact_relative("doc.pdf")
+    doc_path = converted_dir / relative_path
+    doc_path.write_text("<loc_0><loc_0><loc_250><loc_50>Body text.\n", encoding="utf-8")
 
     from src.app.core.citations import CitationStore
 
     store = CitationStore(project_dir)
-    store.index_converted_document(
-        relative_path="doc.md",
-        markdown_text="<!--- doc.pdf#page=1 --->\nBody text.\n",
+    store.index_doctags_document(
+        relative_path=relative_path,
+        doctags_text=doc_path.read_text(encoding="utf-8"),
         source_checksum="reduce-citation-checksum",
-        azure_raw_json_path=raw_json,
         pages_pdf=1,
         pages_detected=1,
         source_relative_path="sources/doc.pdf",
@@ -398,7 +397,7 @@ def test_bulk_reduce_uses_generated_citation_appendix_and_records_local_citation
     )
 
     group = BulkAnalysisGroup.create("Group")
-    group.combine_converted_files = ["doc.md"]
+    group.combine_converted_files = [relative_path]
 
     monkeypatch.setattr(
         reduce_module,
@@ -801,11 +800,12 @@ def test_bulk_reduce_worker_surfaces_gateway_timeout(
     project_dir = tmp_path
     converted = project_dir / "converted_documents"
     converted.mkdir(parents=True, exist_ok=True)
-    converted_doc = converted / "doc.md"
-    converted_doc.write_text("content", encoding="utf-8")
+    relative_path = converted_artifact_relative("doc.pdf")
+    converted_doc = converted / relative_path
+    converted_doc.write_text("<loc_0><loc_0><loc_200><loc_40>content\n", encoding="utf-8")
 
     group = BulkAnalysisGroup.create("Group")
-    group.combine_converted_files = ["doc.md"]
+    group.combine_converted_files = [relative_path]
     metadata = ProjectMetadata(case_name="Case")
 
     monkeypatch.setattr(

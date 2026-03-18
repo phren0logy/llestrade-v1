@@ -7,9 +7,9 @@ from typing import Callable, List, Optional, Sequence
 
 from PySide6.QtWidgets import QMessageBox
 
-from src.app.core.azure_artifacts import is_azure_raw_artifact
 from src.app.core.bulk_paths import iter_map_outputs
 from src.app.core.citations import strip_citation_tokens
+from src.app.core.converted_documents import is_doctags_artifact, load_converted_document_text
 from src.app.core.report_inputs import (
     REPORT_CATEGORY_BULK_COMBINED,
     REPORT_CATEGORY_BULK_MAP,
@@ -148,7 +148,8 @@ def preview_additional_documents(
         if candidate.suffix.lower() not in {".md", ".txt"}:
             continue
         try:
-            content = strip_citation_tokens(candidate.read_text(encoding="utf-8")).strip()
+            raw_content = load_converted_document_text(candidate) if is_doctags_artifact(candidate) else candidate.read_text(encoding="utf-8")
+            content = strip_citation_tokens(raw_content).strip()
         except Exception:
             continue
         header = f"# {descriptor.label} ({descriptor.category})"
@@ -183,9 +184,7 @@ def collect_report_inputs(project_dir: Optional[Path]) -> List[ReportInputDescri
     converted_root = project_dir / "converted_documents"
     if converted_root.exists():
         for path in sorted(converted_root.rglob("*")):
-            if path.is_file() and path.suffix.lower() in {".md", ".txt"}:
-                if is_azure_raw_artifact(path):
-                    continue
+            if path.is_file() and is_doctags_artifact(path):
                 add_descriptor(
                     REPORT_CATEGORY_CONVERTED,
                     path,

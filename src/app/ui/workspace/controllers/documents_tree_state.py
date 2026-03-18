@@ -29,8 +29,10 @@ def apply_directory_flags(item: QTreeWidgetItem) -> None:
 
 
 def should_skip_source_entry(entry: Path) -> bool:
+    internal_names = {".azure-di", ".azure_di", ".docling", ".llestrade"}
     return any(
-        part in {".azure-di", ".azure_di"} or part.startswith(".azure-di") or part.startswith(".azure_di")
+        part in internal_names
+        or any(part.startswith(f"{name}-") for name in internal_names)
         for part in entry.parts
     )
 

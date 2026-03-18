@@ -160,18 +160,15 @@ def test_api_key_dialog_show_reveals_saved_provider_keys_for_all_secret_fields(
     settings = SecureSettings()
     settings.set_api_key("anthropic", "anthropic-key-1")
     settings.set_api_key("azure_openai", "azure-openai-key-1")
-    settings.set_api_key("azure_di", "azure-di-key-1")
 
     dialog = APIKeyDialog(settings)
     try:
         assert dialog.api_fields["anthropic"].text() == "*" * 20
         assert dialog.api_fields["azure_openai"].text() == "*" * 20
-        assert dialog.api_fields["azure_di"].text() == "*" * 20
 
         for provider, expected in (
             ("anthropic", "anthropic-key-1"),
             ("azure_openai", "azure-openai-key-1"),
-            ("azure_di", "azure-di-key-1"),
         ):
             field = dialog.api_fields[provider]
             show_button = next(
@@ -254,62 +251,6 @@ def test_api_key_dialog_reports_secure_storage_failure(
 
     assert warnings
     assert "Error saving pydantic_ai_gateway: keychain write failed" in warnings[0]
-
-
-def test_api_key_dialog_normalizes_azure_di_endpoint_on_save(
-    tmp_path: Path,
-    qt_app: QApplication,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    assert qt_app is not None
-    monkeypatch.setenv("LLESTRADE_SETTINGS_DIR", str(tmp_path / "settings"))
-    monkeypatch.setattr(QMessageBox, "information", lambda *args, **kwargs: QMessageBox.Ok)
-    monkeypatch.setattr(QMessageBox, "warning", lambda *args, **kwargs: QMessageBox.Ok)
-
-    settings = SecureSettings()
-    settings.set_api_key("azure_di", "azure-di-key-1")
-
-    dialog = APIKeyDialog(settings)
-    try:
-        dialog.azure_di_endpoint.setText("https://example.cognitiveservices.azure.com/")
-        dialog.save_keys()
-    finally:
-        dialog.deleteLater()
-
-    reloaded = SecureSettings()
-    assert reloaded.get("azure_di_settings") == {
-        "endpoint": "https://example.cognitiveservices.azure.com"
-    }
-
-
-def test_api_key_dialog_rejects_invalid_azure_di_endpoint(
-    tmp_path: Path,
-    qt_app: QApplication,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    assert qt_app is not None
-    monkeypatch.setenv("LLESTRADE_SETTINGS_DIR", str(tmp_path / "settings"))
-    monkeypatch.setattr(QMessageBox, "information", lambda *args, **kwargs: QMessageBox.Ok)
-    warnings: list[str] = []
-    monkeypatch.setattr(
-        QMessageBox,
-        "warning",
-        lambda _parent, _title, message: warnings.append(message) or QMessageBox.Ok,
-    )
-
-    settings = SecureSettings()
-    settings.set_api_key("azure_di", "azure-di-key-1")
-
-    dialog = APIKeyDialog(settings)
-    try:
-        dialog.azure_di_endpoint.setText("nanton-azure-di")
-        dialog.save_keys()
-    finally:
-        dialog.deleteLater()
-
-    assert warnings
-    assert "Azure Document Intelligence endpoint must be a complete https:// URL" in warnings[0]
-
 
 def test_api_key_dialog_resets_gateway_probe_cache_and_warns_on_invalid_gateway_key(
     tmp_path: Path,

@@ -14,6 +14,7 @@ from pydantic_ai.usage import RequestUsage
 from src.app.workers.checkpoint_manager import CheckpointManager
 
 from src.app.core.bulk_analysis_runner import PromptBundle
+from src.app.core.converted_documents import converted_artifact_relative
 from src.app.core import llm_catalog
 from src.app.core.placeholders.system import SourceFileContext
 from src.app.core.project_manager import ProjectMetadata
@@ -1082,20 +1083,18 @@ def test_bulk_worker_applies_placeholder_values(tmp_path: Path, monkeypatch: pyt
     pdf_path.parent.mkdir(parents=True, exist_ok=True)
     pdf_path.write_text("pdf bytes", encoding="utf-8")
 
-    import frontmatter
+    relative_path = converted_artifact_relative("doc.pdf")
+    source_path = converted / relative_path
+    source_path.write_text("<loc_0><loc_0><loc_200><loc_40>Body text\n", encoding="utf-8")
 
-    source_path = converted / "doc.md"
-    post = frontmatter.Post("Body text", metadata={"sources": [{"path": str(pdf_path)}]})
-    source_path.write_text(frontmatter.dumps(post), encoding="utf-8")
-
-    output_path = project_dir / "bulk_analysis" / "group" / "doc.md"
+    output_path = project_dir / "bulk_analysis" / "group" / "doc.pdf_analysis.md"
     metadata = ProjectMetadata(case_name="Case Name")
-    group = BulkAnalysisGroup.create("Group", files=["doc.md"])
+    group = BulkAnalysisGroup.create("Group", files=[relative_path])
 
     worker = BulkAnalysisWorker(
         project_dir=project_dir,
         group=group,
-        files=["doc.md"],
+        files=[relative_path],
         metadata=metadata,
         force_rerun=True,
         placeholder_values={"client_name": "ACME"},
@@ -1118,7 +1117,7 @@ def test_bulk_worker_applies_placeholder_values(tmp_path: Path, monkeypatch: pyt
     monkeypatch.setattr(BulkAnalysisWorker, "_invoke_provider", fake_invoke)
     document = worker_module.BulkAnalysisDocument(
         source_path=source_path,
-        relative_path="doc.md",
+        relative_path=relative_path,
         output_path=output_path,
     )
     global_placeholders = worker._build_placeholder_map()
@@ -1356,10 +1355,11 @@ def test_bulk_worker_surfaces_gateway_spend_limit_rejection(
     project_dir = tmp_path
     converted = project_dir / "converted_documents"
     converted.mkdir(parents=True, exist_ok=True)
-    source_path = converted / "doc.md"
-    source_path.write_text("Body text", encoding="utf-8")
+    relative_path = converted_artifact_relative("doc.pdf")
+    source_path = converted / relative_path
+    source_path.write_text("<loc_0><loc_0><loc_200><loc_40>Body text\n", encoding="utf-8")
 
-    group = BulkAnalysisGroup.create("Group", files=["doc.md"])
+    group = BulkAnalysisGroup.create("Group", files=[relative_path])
     metadata = ProjectMetadata(case_name="Case")
 
     monkeypatch.setattr(
@@ -1381,7 +1381,7 @@ def test_bulk_worker_surfaces_gateway_spend_limit_rejection(
     worker = BulkAnalysisWorker(
         project_dir=project_dir,
         group=group,
-        files=["doc.md"],
+        files=[relative_path],
         metadata=metadata,
         force_rerun=True,
         llm_backend=_ResultBackend(
@@ -1396,7 +1396,7 @@ def test_bulk_worker_surfaces_gateway_spend_limit_rejection(
 
     worker._run()
 
-    assert failures == [("doc.md", "Gateway spend limit exceeded")]
+    assert failures == [(relative_path, "Gateway spend limit exceeded")]
     assert finished == [(0, 1)]
 
 

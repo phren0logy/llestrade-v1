@@ -12,6 +12,7 @@ from src.app.core.citations import (
     CitationStore,
     strip_citation_tokens,
 )
+from src.app.core.converted_documents import is_doctags_artifact, load_converted_document_text
 from src.app.core.llm_catalog import calculate_usage_cost
 from src.app.core.llm_operation_settings import LLMReasoningSettings
 from src.app.core.prompt_assembly import append_generated_prompt_section
@@ -209,7 +210,11 @@ class ReportWorkerBase(DashboardWorker):
                 raise FileNotFoundError(f"Selected input missing: {relative}")
             if absolute.suffix.lower() not in {".md", ".txt"}:
                 raise RuntimeError(f"Unsupported input type: {relative}")
-            content = strip_citation_tokens(absolute.read_text(encoding="utf-8")).strip()
+            if is_doctags_artifact(absolute):
+                raw_content = load_converted_document_text(absolute)
+            else:
+                raw_content = absolute.read_text(encoding="utf-8")
+            content = strip_citation_tokens(raw_content).strip()
             section_header = self._render_section_header(category, relative)
             lines.append(f"<!--- report-input: {category} | {relative} --->")
             lines.append(section_header)

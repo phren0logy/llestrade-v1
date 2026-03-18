@@ -29,7 +29,7 @@ class _StubConversionWorker(QObject, QRunnable):
     fatal_error = Signal(str)
     finished = Signal(int, int)
 
-    def __init__(self, jobs, *, helper: str = "azure_di", options=None) -> None:  # noqa: ANN001
+    def __init__(self, jobs, *, helper: str = "docling", options=None) -> None:  # noqa: ANN001
         QObject.__init__(self)
         QRunnable.__init__(self)
         self.setAutoDelete(False)
@@ -60,7 +60,7 @@ def _jobs(tmp_path: Path, count: int) -> list[ConversionJob]:
             ConversionJob(
                 source_path=tmp_path / f"doc-{idx}.pdf",
                 relative_path=f"folder/doc-{idx}.pdf",
-                destination_path=tmp_path / "converted" / f"doc-{idx}.md",
+                destination_path=tmp_path / "converted" / f"doc-{idx}.pdf.doctags.txt",
                 conversion_type="pdf",
             )
         )
@@ -89,7 +89,7 @@ def test_conversion_service_limits_parallel_workers_and_replenishes_queue(
 
     started = service.run(
         jobs=jobs,
-        helper="azure_di",
+        helper="docling",
         options={},
         on_progress=lambda processed, total, relative: progress.append((processed, total, relative)),
         on_failed=lambda *_args: None,
@@ -144,7 +144,7 @@ def test_conversion_service_stops_launching_new_jobs_after_fatal_error(
 
     service.run(
         jobs=jobs,
-        helper="azure_di",
+        helper="docling",
         options={},
         on_progress=lambda *_args: None,
         on_failed=lambda *_args: None,
@@ -158,7 +158,7 @@ def test_conversion_service_stops_launching_new_jobs_after_fatal_error(
     assert isinstance(second, _StubConversionWorker)
     assert isinstance(third, _StubConversionWorker)
 
-    first.fatal_error.emit("Azure credentials rejected")
+    first.fatal_error.emit("Docling runtime unavailable")
     assert second.cancel_called is True
     assert third.cancel_called is True
 
@@ -166,7 +166,7 @@ def test_conversion_service_stops_launching_new_jobs_after_fatal_error(
     second.finished.emit(1, 0)
     third.finished.emit(1, 0)
 
-    assert fatals == ["Azure credentials rejected"]
+    assert fatals == ["Docling runtime unavailable"]
     assert len(pool.started) == 3
     assert finished == [(2, 1)]
     assert service.is_running() is False

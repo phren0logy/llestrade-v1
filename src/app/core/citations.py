@@ -19,12 +19,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Iterable, Iterator, List, Mapping, Optional, Sequence
 
+from src.app.core.doctags import build_geometry_spans_from_doctags, parse_doctags_blocks
+
 PAGE_MARKER_RE = re.compile(r"<!---\s*.+?#page=(\d+)\s*--->")
 LOCAL_CITATION_TOKEN_RE = re.compile(r"\[(C\d{1,5})\]")
 INLINE_CITATION_TOKEN_RE = re.compile(r"\[CIT:(ev_[a-z0-9]{8,64})\]|\[(C\d{1,5})\]")
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
 
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 
 
 @dataclass(frozen=True)
@@ -104,6 +106,31 @@ class CitationStore:
     def db_path(self) -> Path:
         return self._db_path
 
+    def get_document_metadata(self, relative_path: str) -> dict[str, object] | None:
+        with self._connection() as conn:
+            row = conn.execute(
+                (
+                    "SELECT relative_path, source_checksum, source_relative_path, source_absolute_path, pages_pdf, "
+                    "pages_detected, content_format, pipeline_mode, vlm_preset, standard_profile "
+                    "FROM documents WHERE relative_path = ?"
+                ),
+                (relative_path,),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "relative_path": str(row["relative_path"]),
+            "source_checksum": str(row["source_checksum"] or "") or None,
+            "source_relative_path": str(row["source_relative_path"] or "") or None,
+            "source_absolute_path": str(row["source_absolute_path"] or "") or None,
+            "pages_pdf": _to_int(row["pages_pdf"]),
+            "pages_detected": _to_int(row["pages_detected"]),
+            "content_format": str(row["content_format"] or "") or None,
+            "pipeline_mode": str(row["pipeline_mode"] or "") or None,
+            "vlm_preset": str(row["vlm_preset"] or "") or None,
+            "standard_profile": str(row["standard_profile"] or "") or None,
+        }
+
     def index_converted_document(
         self,
         *,
@@ -115,12 +142,20 @@ class CitationStore:
         pages_detected: int | None,
         source_relative_path: str | None = None,
         source_absolute_path: str | None = None,
+        content_format: str = "markdown",
+        pipeline_mode: str | None = None,
+        vlm_preset: str | None = None,
+        standard_profile: str | None = None,
     ) -> IndexStats:
         """Index converted markdown segments and Azure geometry spans."""
 
         indexed_at = _utcnow_iso()
-        segments = _segment_markdown(markdown_text, source_checksum or "")
-        geometry_spans = self._extract_geometry_spans(azure_raw_json_path)
+        if content_format == "doctags":
+            segments = _segment_doctags(markdown_text, source_checksum or "")
+            geometry_spans = build_geometry_spans_from_doctags(markdown_text)
+        else:
+            segments = _segment_markdown(markdown_text, source_checksum or "")
+            geometry_spans = self._extract_geometry_spans(azure_raw_json_path)
 
         with self._connection() as conn:
             conn.execute("BEGIN")
@@ -134,6 +169,10 @@ class CitationStore:
                 source_relative_path=source_relative_path,
                 source_absolute_path=source_absolute_path,
                 indexed_at=indexed_at,
+                content_format=content_format,
+                pipeline_mode=pipeline_mode,
+                vlm_preset=vlm_preset,
+                standard_profile=standard_profile,
             )
             conn.execute("DELETE FROM segments WHERE document_id = ?", (document_id,))
             conn.execute("DELETE FROM geometry_spans WHERE document_id = ?", (document_id,))
@@ -193,6 +232,35 @@ class CitationStore:
             relative_path=relative_path,
             segments_indexed=len(segments),
             geometry_spans_indexed=len(geometry_spans),
+        )
+
+    def index_doctags_document(
+        self,
+        *,
+        relative_path: str,
+        doctags_text: str,
+        source_checksum: str | None,
+        pages_pdf: int | None,
+        pages_detected: int | None,
+        source_relative_path: str | None = None,
+        source_absolute_path: str | None = None,
+        pipeline_mode: str | None = "vlm_primary",
+        vlm_preset: str | None = "granite_docling",
+        standard_profile: str | None = None,
+    ) -> IndexStats:
+        return self.index_converted_document(
+            relative_path=relative_path,
+            markdown_text=doctags_text,
+            source_checksum=source_checksum,
+            azure_raw_json_path=None,
+            pages_pdf=pages_pdf,
+            pages_detected=pages_detected,
+            source_relative_path=source_relative_path,
+            source_absolute_path=source_absolute_path,
+            content_format="doctags",
+            pipeline_mode=pipeline_mode,
+            vlm_preset=vlm_preset,
+            standard_profile=standard_profile,
         )
 
     def list_local_citation_entries(
@@ -850,6 +918,10 @@ class CitationStore:
         source_relative_path: str | None,
         source_absolute_path: str | None,
         indexed_at: str,
+        content_format: str | None,
+        pipeline_mode: str | None,
+        vlm_preset: str | None,
+        standard_profile: str | None,
     ) -> int:
         azure_rel = ""
         if azure_raw_json_path:
@@ -867,8 +939,9 @@ class CitationStore:
                 (
                     "INSERT INTO documents ("
                     "relative_path, source_checksum, azure_raw_json_path, pages_pdf, pages_detected, "
-                    "source_relative_path, source_absolute_path, indexed_at"
-                    ") VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+                    "source_relative_path, source_absolute_path, content_format, pipeline_mode, "
+                    "vlm_preset, standard_profile, indexed_at"
+                    ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
                 ),
                 (
                     relative_path,
@@ -878,6 +951,10 @@ class CitationStore:
                     pages_detected,
                     source_relative_path,
                     source_absolute_path,
+                    content_format,
+                    pipeline_mode,
+                    vlm_preset,
+                    standard_profile,
                     indexed_at,
                 ),
             )
@@ -887,7 +964,8 @@ class CitationStore:
         conn.execute(
             (
                 "UPDATE documents SET source_checksum = ?, azure_raw_json_path = ?, pages_pdf = ?, "
-                "pages_detected = ?, source_relative_path = ?, source_absolute_path = ?, indexed_at = ? WHERE id = ?"
+                "pages_detected = ?, source_relative_path = ?, source_absolute_path = ?, content_format = ?, "
+                "pipeline_mode = ?, vlm_preset = ?, standard_profile = ?, indexed_at = ? WHERE id = ?"
             ),
             (
                 source_checksum,
@@ -896,6 +974,10 @@ class CitationStore:
                 pages_detected,
                 source_relative_path,
                 source_absolute_path,
+                content_format,
+                pipeline_mode,
+                vlm_preset,
+                standard_profile,
                 indexed_at,
                 document_id,
             ),
@@ -916,6 +998,10 @@ class CitationStore:
                 self._apply_schema_v2(conn)
                 version = 2
 
+            if version < 3:
+                self._apply_schema_v3(conn)
+                version = 3
+
             conn.execute(f"PRAGMA user_version = {version}")
             conn.commit()
 
@@ -931,6 +1017,10 @@ class CitationStore:
                 pages_detected INTEGER,
                 source_relative_path TEXT,
                 source_absolute_path TEXT,
+                content_format TEXT,
+                pipeline_mode TEXT,
+                vlm_preset TEXT,
+                standard_profile TEXT,
                 indexed_at TEXT NOT NULL
             );
 
@@ -1026,6 +1116,20 @@ class CitationStore:
                     raise
         conn.execute("CREATE INDEX IF NOT EXISTS idx_output_citations_label ON output_citations(citation_label)")
 
+    def _apply_schema_v3(self, conn: sqlite3.Connection) -> None:
+        statements = [
+            "ALTER TABLE documents ADD COLUMN content_format TEXT",
+            "ALTER TABLE documents ADD COLUMN pipeline_mode TEXT",
+            "ALTER TABLE documents ADD COLUMN vlm_preset TEXT",
+            "ALTER TABLE documents ADD COLUMN standard_profile TEXT",
+        ]
+        for statement in statements:
+            try:
+                conn.execute(statement)
+            except sqlite3.OperationalError as exc:
+                if "duplicate column name" not in str(exc).lower():
+                    raise
+
     @contextmanager
     def _connection(self) -> Iterator[sqlite3.Connection]:
         conn = self._connect()
@@ -1108,6 +1212,28 @@ def _segment_markdown(markdown_text: str, source_checksum: str) -> list[dict[str
         char_pos += len(line)
 
     flush_buffer(char_pos)
+    return segments
+
+
+def _segment_doctags(doctags_text: str, source_checksum: str) -> list[dict[str, object]]:
+    segments: list[dict[str, object]] = []
+    for block in parse_doctags_blocks(doctags_text):
+        pieces = _split_long_segment(block.text)
+        for offset, piece in enumerate(pieces):
+            ordinal = (block.ordinal - 1) * 100 + offset + 1
+            normalized = _normalize_text(piece)
+            ev_id = _ev_id(source_checksum, block.page_number, ordinal, normalized)
+            segments.append(
+                {
+                    "ev_id": ev_id,
+                    "page_number": block.page_number,
+                    "ordinal": ordinal,
+                    "text": piece,
+                    "normalized_text": normalized,
+                    "start_offset": None,
+                    "end_offset": None,
+                }
+            )
     return segments
 
 

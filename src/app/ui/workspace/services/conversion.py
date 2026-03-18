@@ -63,7 +63,7 @@ class ConversionService:
 
         state = _ConversionBatchState(
             batch_id=uuid4().hex[:8],
-            helper=helper or "azure_di",
+            helper=helper or "docling",
             options=dict(options or {}),
             total=len(queued),
             pending=queued,

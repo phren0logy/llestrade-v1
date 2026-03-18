@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Mapping, Optional, Sequence
 
-from src.app.core.azure_artifacts import is_azure_raw_artifact
+from src.app.core.converted_documents import is_doctags_artifact, source_relative_from_artifact
 from src.common.llm.chunking import ChunkingStrategy
 from src.common.llm.request_budget import estimate_request_input_tokens
 from src.common.llm.request_budget import estimate_text_input_tokens
@@ -62,15 +62,11 @@ def prepare_documents(
             LOGGER.warning("Converted file missing for bulk analysis: %s", source_path)
             continue
 
-        # Only process markdown or text files produced by conversion
-        if source_path.suffix.lower() not in {".md", ".txt"}:
-            LOGGER.warning("Skipping non-markdown file for bulk analysis: %s", source_path)
-            continue
-        if is_azure_raw_artifact(source_path):
-            LOGGER.debug("Skipping Azure raw sidecar for bulk analysis: %s", source_path)
+        if not is_doctags_artifact(source_path):
+            LOGGER.warning("Skipping non-DocTags file for bulk analysis: %s", source_path)
             continue
 
-        output_relative = Path(relative).with_suffix("")
+        output_relative = Path(source_relative_from_artifact(relative) or relative)
         output_filename = f"{output_relative.name}_analysis.md"
         output_path = group_root / output_relative.parent / output_filename
         documents.append(
