@@ -143,6 +143,51 @@ def test_validate_placeholders_can_continue_on_user_confirmation(
     assert allowed is True
 
 
+def test_validate_placeholders_uses_project_metadata_for_report_fields(
+    monkeypatch: pytest.MonkeyPatch,
+    qt_app: QApplication,
+    tmp_path: Path,
+) -> None:
+    assert qt_app is not None
+    controller = _build_controller(monkeypatch, tmp_path)
+
+    manager = _ManagerStub(tmp_path, values={})
+    manager.metadata = SimpleNamespace(
+        case_name="Case",
+        subject_name="Jane Roe",
+        date_of_birth="1970-01-02",
+        case_description="Referral context",
+    )
+    controller._project_manager = manager
+    controller._tab.generation_system_prompt_edit.setText(
+        "System prompt for {subject_name} ({subject_dob}) {case_info}"
+    )
+
+    monkeypatch.setattr(controller, "_read_prompt_file", lambda path: path)
+    monkeypatch.setattr(
+        reports_module,
+        "get_prompt_spec",
+        lambda _key: SimpleNamespace(
+            required=(),
+            optional=("subject_name", "subject_dob", "case_info"),
+        ),
+    )
+    question_calls: list[str] = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        lambda _parent, _title, message, *_args, **_kwargs: question_calls.append(message) or QMessageBox.No,
+    )
+
+    allowed = controller._validate_placeholders_before_run(
+        include_generation=True,
+        include_refinement=False,
+    )
+
+    assert allowed is True
+    assert question_calls == []
+
+
 def test_start_draft_job_blocks_when_gateway_key_is_rejected(
     monkeypatch: pytest.MonkeyPatch,
     qt_app: QApplication,

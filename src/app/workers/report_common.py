@@ -193,6 +193,7 @@ class ReportWorkerBase(DashboardWorker):
     def _placeholder_map(self) -> Dict[str, str]:
         return build_report_base_placeholders(
             base_placeholders=self._base_placeholders,
+            metadata=self._metadata,
             project_name=self._project_name,
             project_dir=self._project_dir,
             timestamp=self._run_timestamp,

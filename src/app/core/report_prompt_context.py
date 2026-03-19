@@ -6,12 +6,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Mapping, Optional
 
+from src.app.core.project_manager import ProjectMetadata
 from src.app.core.placeholders.system import system_placeholder_map
 
 
 def build_report_base_placeholders(
     *,
     base_placeholders: Mapping[str, str],
+    metadata: ProjectMetadata | None,
     project_name: Optional[str],
     project_dir: Optional[Path],
     timestamp: Optional[datetime] = None,
@@ -28,6 +30,11 @@ def build_report_base_placeholders(
     ts = timestamp or datetime.now(timezone.utc)
 
     values: Dict[str, str] = dict(base_placeholders)
+    if metadata is not None:
+        values.setdefault("case_name", metadata.case_name or "")
+        values.setdefault("subject_name", metadata.subject_name or metadata.case_name or "")
+        values.setdefault("subject_dob", metadata.date_of_birth or "")
+        values.setdefault("case_info", metadata.case_description or "")
     values.update(
         system_placeholder_map(
             project_name=effective_name,

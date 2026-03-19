@@ -8,6 +8,7 @@ from src.app.core.report_prompt_context import (
     build_report_generation_placeholders,
     build_report_refinement_placeholders,
 )
+from src.app.core.project_manager import ProjectMetadata
 
 
 def test_build_report_base_placeholders_includes_system_values(tmp_path: Path) -> None:
@@ -16,6 +17,7 @@ def test_build_report_base_placeholders_includes_system_values(tmp_path: Path) -
 
     placeholders = build_report_base_placeholders(
         base_placeholders=base,
+        metadata=None,
         project_name="Sample Case",
         project_dir=tmp_path,
         timestamp=timestamp,
@@ -24,6 +26,25 @@ def test_build_report_base_placeholders_includes_system_values(tmp_path: Path) -
     assert placeholders["client"] == "ACME"
     assert placeholders["project_name"] == "Sample Case"
     assert placeholders["timestamp"] == timestamp.isoformat()
+
+
+def test_build_report_base_placeholders_includes_metadata_defaults(tmp_path: Path) -> None:
+    placeholders = build_report_base_placeholders(
+        base_placeholders={},
+        metadata=ProjectMetadata(
+            case_name="Sample Case",
+            subject_name="Jane Roe",
+            date_of_birth="1970-01-02",
+            case_description="Referral context",
+        ),
+        project_name="Sample Case",
+        project_dir=tmp_path,
+    )
+
+    assert placeholders["case_name"] == "Sample Case"
+    assert placeholders["subject_name"] == "Jane Roe"
+    assert placeholders["subject_dob"] == "1970-01-02"
+    assert placeholders["case_info"] == "Referral context"
 
 
 def test_build_report_generation_placeholders_adds_dynamic_values() -> None:

@@ -145,6 +145,12 @@ class ReportsController:
             return False
 
         values = manager.placeholder_mapping()
+        metadata = getattr(manager, "metadata", None)
+        if metadata:
+            values.setdefault("case_name", metadata.case_name or "")
+            values.setdefault("subject_name", metadata.subject_name or metadata.case_name or "")
+            values.setdefault("subject_dob", metadata.date_of_birth or "")
+            values.setdefault("case_info", metadata.case_description or "")
         missing_required: set[str] = set()
         missing_optional: set[str] = set()
         dynamic_keys = {
@@ -632,6 +638,7 @@ class ReportsController:
         project_dir = Path(manager.project_dir) if manager.project_dir else None
         base_placeholders = build_report_base_placeholders(
             base_placeholders=base_inputs,
+            metadata=manager.metadata,
             project_name=manager.project_name,
             project_dir=project_dir,
         )
