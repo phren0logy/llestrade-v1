@@ -20,7 +20,7 @@ def read_refinement_prompt(path: Path) -> str:
 def validate_refinement_prompt(content: str) -> None:
     """Ensure required refinement placeholders exist."""
 
-    ensure_required_placeholders("refinement_prompt", content)
+    ensure_required_placeholders("report_refine_user", content)
 
 
 def read_generation_prompt(path: Path) -> str:
@@ -32,7 +32,7 @@ def read_generation_prompt(path: Path) -> str:
 def validate_generation_prompt(content: str) -> None:
     """Ensure required generation placeholders exist."""
 
-    ensure_required_placeholders("report_generation_user_prompt", content)
+    ensure_required_placeholders("report_draft_user", content)
 
 
 __all__ = [

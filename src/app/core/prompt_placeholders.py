@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, Iterable, Mapping, Sequence
 
+from src.app.core.bundled_prompts import PROMPTS, canonical_prompt_key
+
 
 class MissingPlaceholdersError(ValueError):
     """Raised when a prompt template is missing required placeholders."""
@@ -48,7 +50,7 @@ def register_prompt_spec(spec: PromptPlaceholderSpec) -> None:
 def get_prompt_spec(prompt_key: str) -> PromptPlaceholderSpec | None:
     """Return the placeholder specification for the prompt key, if known."""
 
-    return _PROMPT_SPECS.get(prompt_key)
+    return _PROMPT_SPECS.get(canonical_prompt_key(prompt_key))
 
 
 def ensure_required_placeholders(prompt_key: str, template: str) -> None:
@@ -105,88 +107,15 @@ def all_prompt_specs() -> tuple[PromptPlaceholderSpec, ...]:
 
 
 def _register_defaults() -> None:
-    register_prompt_spec(
-        PromptPlaceholderSpec(
-            key="document_analysis_system_prompt",
-            required=(),
-            optional=_sorted(("subject_name", "subject_dob", "case_info")),
-            description="System prompt for bulk analysis runs.",
+    for prompt in PROMPTS:
+        register_prompt_spec(
+            PromptPlaceholderSpec(
+                key=prompt.key,
+                required=prompt.required,
+                optional=prompt.optional,
+                description=prompt.description,
+            )
         )
-    )
-    register_prompt_spec(
-        PromptPlaceholderSpec(
-            key="document_bulk_analysis_prompt",
-            required=("document_content",),
-            optional=_sorted(
-                ("subject_name", "subject_dob", "case_info", "document_name", "chunk_index", "chunk_total")
-            ),
-            description="User prompt for per-document bulk analysis.",
-        )
-    )
-    register_prompt_spec(
-        PromptPlaceholderSpec(
-            key="integrated_analysis_prompt",
-            required=("document_content",),
-            optional=_sorted(("subject_name", "subject_dob", "case_info")),
-            description="Prompt for combining multiple document analyses.",
-        )
-    )
-    register_prompt_spec(
-        PromptPlaceholderSpec(
-            key="report_generation_user_prompt",
-            required=("template_section", "transcript", "additional_documents"),
-            optional=_sorted(("section_title", "document_content")),
-            description="User prompt for report section generation.",
-        )
-    )
-    register_prompt_spec(
-        PromptPlaceholderSpec(
-            key="refinement_prompt",
-            required=("draft_report", "template"),
-            optional=_sorted(("transcript",)),
-            description="Prompt for refining the generated report draft.",
-        )
-    )
-    register_prompt_spec(
-        PromptPlaceholderSpec(
-            key="report_generation_instructions",
-            required=("template_section", "transcript"),
-            optional=_sorted(()),
-            description="Instructions fragment for section generation.",
-        )
-    )
-    register_prompt_spec(
-        PromptPlaceholderSpec(
-            key="report_generation_system_prompt",
-            required=(),
-            optional=_sorted(()),
-            description="System prompt for report section generation.",
-        )
-    )
-    register_prompt_spec(
-        PromptPlaceholderSpec(
-            key="report_refinement_system_prompt",
-            required=(),
-            optional=_sorted(()),
-            description="System prompt for report refinement.",
-        )
-    )
-    register_prompt_spec(
-        PromptPlaceholderSpec(
-            key="section_processing",
-            required=(),
-            optional=_sorted(()),
-            description="Legacy section processing prompt.",
-        )
-    )
-    register_prompt_spec(
-        PromptPlaceholderSpec(
-            key="system_prompt",
-            required=(),
-            optional=_sorted(()),
-            description="Default global system prompt.",
-        )
-    )
 
 
 _register_defaults()

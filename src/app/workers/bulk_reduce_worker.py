@@ -952,7 +952,7 @@ class BulkReduceWorker(DashboardWorker):
                 )
             )
         else:
-            references.append(PromptReference(identifier="document_analysis_system_prompt", role="system"))
+            references.append(PromptReference(identifier="bulk_system", role="system"))
 
         user_path = (self._group.user_prompt_path or "").strip()
         if user_path:
@@ -963,7 +963,8 @@ class BulkReduceWorker(DashboardWorker):
                 )
             )
         else:
-            references.append(PromptReference(identifier="document_bulk_analysis_prompt", role="user"))
+            user_identifier = "bulk_combined" if self._group.operation == "combined" else "bulk_per_document"
+            references.append(PromptReference(identifier=user_identifier, role="user"))
 
         return [ref for ref in references if ref.to_dict()]
 

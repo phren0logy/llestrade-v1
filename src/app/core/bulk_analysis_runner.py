@@ -15,6 +15,7 @@ from src.common.llm.request_budget import estimate_text_input_tokens
 from src.common.llm.tokens import SAFE_WINDOW_RATIO, TokenCounter
 from src.config.paths import app_base_dir, app_resource_root
 from src.config.prompt_store import get_bundled_dir, get_custom_dir
+from src.app.core.bundled_prompts import canonical_prompt_reference
 
 from .bulk_analysis_groups import BulkAnalysisGroup
 from .project_manager import ProjectMetadata
@@ -91,21 +92,26 @@ def load_prompts(
     system_template = _read_prompt_file(project_dir, group.system_prompt_path)
     if not system_template:
         try:
-            system_template = prompt_manager.get_template("document_analysis_system_prompt")
+            system_template = prompt_manager.get_template("bulk_system")
         except KeyError:
             system_template = "You are a forensic assistant."
 
     user_template = _read_prompt_file(project_dir, group.user_prompt_path)
     if not user_template:
         try:
-            user_template = prompt_manager.get_template("document_bulk_analysis_prompt")
+            user_template = prompt_manager.get_template(
+                "bulk_combined" if group.operation == "combined" else "bulk_per_document"
+            )
         except KeyError:
             user_template = (
                 "Summarise the provided document content focusing on key facts, timelines, "
                 "and clinical details.\n\n{document_content}"
             )
 
-    ensure_required_placeholders("document_bulk_analysis_prompt", user_template)
+    ensure_required_placeholders(
+        "bulk_combined" if group.operation == "combined" else "bulk_per_document",
+        user_template,
+    )
 
     return PromptBundle(system_template=system_template, user_template=user_template)
 
@@ -778,7 +784,7 @@ def _truncate_to_tokens(text: str, max_tokens: int) -> str:
 def _read_prompt_file(project_dir: Path, path_str: str | None) -> str:
     if not path_str:
         return ""
-    candidate = Path(path_str).expanduser()
+    candidate = Path(canonical_prompt_reference(path_str)).expanduser()
     search_paths: List[Path] = []
     if candidate.is_absolute():
         search_paths.append(candidate)

@@ -18,8 +18,8 @@ if TYPE_CHECKING:
     from src.app.core.project_manager import ProjectMetadata
 
 RECOVERY_VERSION = 1
-DEFAULT_BULK_SYSTEM_PROMPT_IDENTIFIER = "document_analysis_system_prompt"
-DEFAULT_BULK_USER_PROMPT_IDENTIFIER = "document_bulk_analysis_prompt"
+DEFAULT_BULK_SYSTEM_PROMPT_IDENTIFIER = "bulk_system"
+DEFAULT_BULK_USER_PROMPT_IDENTIFIER = "bulk_per_document"
 
 
 def _utcnow() -> str:

@@ -191,11 +191,11 @@ class ReportsController:
         refinement_system = self._read_prompt_file(self._tab.refinement_system_prompt_edit.text())
 
         if include_generation:
-            _analyse(generation_user, "report_generation_user_prompt", is_system=False)
-            _analyse(generation_system, "report_generation_system_prompt", is_system=True)
+            _analyse(generation_user, "report_draft_user", is_system=False)
+            _analyse(generation_system, "report_draft_system", is_system=True)
         if include_refinement:
-            _analyse(refinement_user, "refinement_prompt", is_system=False)
-            _analyse(refinement_system, "report_refinement_system_prompt", is_system=True)
+            _analyse(refinement_user, "report_refine_user", is_system=False)
+            _analyse(refinement_system, "report_refine_system", is_system=True)
 
         if missing_required or missing_optional:
             messages: list[str] = []
@@ -263,10 +263,10 @@ class ReportsController:
 
     def _initialise_prompt_tooltips(self) -> None:
         self._tab.generation_system_prompt_edit.setToolTip(
-            placeholder_summary("report_generation_system_prompt")
+            placeholder_summary("report_draft_system")
         )
         self._tab.refinement_system_prompt_edit.setToolTip(
-            placeholder_summary("report_refinement_system_prompt")
+            placeholder_summary("report_refine_system")
         )
 
     # ------------------------------------------------------------------
@@ -578,8 +578,8 @@ class ReportsController:
             title="Generation Prompt Preview",
             prompt_path=self._tab.generation_user_prompt_edit.text().strip(),
             system_prompt_path=self._tab.generation_system_prompt_edit.text().strip(),
-            prompt_spec_key="report_generation_user_prompt",
-            system_spec_key="report_generation_system_prompt",
+            prompt_spec_key="report_draft_user",
+            system_spec_key="report_draft_system",
         )
 
     def _preview_generation_system_prompt(self) -> None:
@@ -587,7 +587,7 @@ class ReportsController:
             title="Generation System Prompt Preview",
             prompt_path=self._tab.generation_system_prompt_edit.text().strip(),
             system_prompt_path="",
-            system_spec_key="report_generation_system_prompt",
+            system_spec_key="report_draft_system",
         )
 
     def _preview_refinement_prompt(self) -> None:
@@ -595,8 +595,8 @@ class ReportsController:
             title="Refinement Prompt Preview",
             prompt_path=self._tab.refinement_user_prompt_edit.text().strip(),
             system_prompt_path=self._tab.refinement_system_prompt_edit.text().strip(),
-            prompt_spec_key="refinement_prompt",
-            system_spec_key="report_refinement_system_prompt",
+            prompt_spec_key="report_refine_user",
+            system_spec_key="report_refine_system",
         )
 
     def _preview_refinement_system_prompt(self) -> None:
@@ -604,7 +604,7 @@ class ReportsController:
             title="Refinement System Prompt Preview",
             prompt_path=self._tab.refinement_system_prompt_edit.text().strip(),
             system_prompt_path="",
-            system_spec_key="report_refinement_system_prompt",
+            system_spec_key="report_refine_system",
         )
 
     def _show_prompt_preview(
@@ -662,7 +662,7 @@ class ReportsController:
         user_placeholders = dict(base_placeholders)
         user_rendered = ""
 
-        if prompt_spec_key == "report_generation_user_prompt":
+        if prompt_spec_key == "report_draft_user":
             template_section, section_title = self._preview_template_section(template_path)
             additional_documents = self._preview_additional_documents(selected_descriptors)
             transcript_text = self._safe_read_text(transcript_path)
@@ -675,7 +675,7 @@ class ReportsController:
             )
             if user_template:
                 user_rendered = format_prompt(user_template, user_placeholders)
-        elif prompt_spec_key == "refinement_prompt":
+        elif prompt_spec_key == "report_refine_user":
             draft_text = strip_citation_tokens(self._safe_read_text(draft_path))
             template_text = self._safe_read_text(template_path)
             transcript_text = self._safe_read_text(transcript_path)
@@ -1267,16 +1267,16 @@ class ReportsController:
                 self._tab.refinement_system_prompt_edit.setText(default_refinement_system)
 
     def _default_generation_user_prompt_path(self) -> str:
-        return default_prompt_path("default_generation_user.md")
+        return default_prompt_path("report_draft_user.md")
 
     def _default_generation_system_prompt_path(self) -> str:
-        return default_prompt_path("default_generation_system.md")
+        return default_prompt_path("report_draft_system.md")
 
     def _default_refinement_user_prompt_path(self) -> str:
-        return default_prompt_path("default_refinement_user.md")
+        return default_prompt_path("report_refine_user.md")
 
     def _default_refinement_system_prompt_path(self) -> str:
-        return default_prompt_path("default_refinement_system.md")
+        return default_prompt_path("report_refine_system.md")
 
     def _safe_initial(self, provider) -> Path:
         return safe_initial_path(provider, self._project_dir_or_home())

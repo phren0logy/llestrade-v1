@@ -214,7 +214,7 @@ class SimplifiedMainWindow(QMainWindow):
         def _on_clicked(btn):
             if btn == sync_prompts_btn:
                 try:
-                    result = sync_bundled_prompts(force=False)
+                    result = sync_bundled_prompts(force=True)
                     copied = len(result.get("copied", []))
                     updated = len(result.get("updated", []))
                     skipped = len(result.get("skipped", []))

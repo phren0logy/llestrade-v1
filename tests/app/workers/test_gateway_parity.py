@@ -18,6 +18,7 @@ from PySide6.QtWidgets import QApplication
 _ = PySide6
 
 from src.app.core.bulk_analysis_groups import BulkAnalysisGroup
+from src.app.core.converted_documents import converted_artifact_relative
 from src.app.core.project_manager import ProjectMetadata
 from src.app.core.report_inputs import REPORT_CATEGORY_CONVERTED
 from src.app.workers import bulk_analysis_worker, bulk_reduce_worker, report_common, report_worker
@@ -224,8 +225,10 @@ def _prepare_report_project(project_dir: Path) -> tuple[Path, Path, Path, Path, 
 def _prepare_bulk_project(project_dir: Path) -> tuple[BulkAnalysisGroup, BulkAnalysisGroup]:
     converted_dir = project_dir / "converted_documents"
     converted_dir.mkdir(parents=True, exist_ok=True)
-    converted_doc = converted_dir / "doc.md"
-    converted_doc.write_text("# Doc\n\nBody text for parity testing.", encoding="utf-8")
+    relative_path = converted_artifact_relative("doc.pdf")
+    converted_doc = converted_dir / relative_path
+    converted_doc.parent.mkdir(parents=True, exist_ok=True)
+    converted_doc.write_text("<loc_0><loc_0><loc_200><loc_40>Body text for parity testing.\n", encoding="utf-8")
 
     prompt_dir = project_dir / "prompts"
     prompt_dir.mkdir(parents=True, exist_ok=True)
@@ -241,7 +244,7 @@ def _prepare_bulk_project(project_dir: Path) -> tuple[BulkAnalysisGroup, BulkAna
 
     map_group = BulkAnalysisGroup.create(
         "Parity Map",
-        files=["doc.md"],
+        files=[relative_path],
         provider_id="anthropic",
         model="claude-sonnet-4-5",
         system_prompt_path="prompts/bulk_system.md",
@@ -260,7 +263,7 @@ def _prepare_bulk_project(project_dir: Path) -> tuple[BulkAnalysisGroup, BulkAna
     reduce_group.slug = "parity-reduce"
     reduce_group.group_id = "group-reduce"
     reduce_group.operation = "combined"
-    reduce_group.combine_converted_files = ["doc.md"]
+    reduce_group.combine_converted_files = [relative_path]
     reduce_group.combine_output_template = "combined_output.md"
 
     return map_group, reduce_group
@@ -410,6 +413,7 @@ def _run_bulk_map(
 ) -> dict[str, Any]:
     map_group, _ = _prepare_bulk_project(project_dir)
     metadata = ProjectMetadata(case_name="Case")
+    relative_path = converted_artifact_relative("doc.pdf")
 
     if legacy:
         llm_backend = _SequenceBackend(
@@ -423,7 +427,7 @@ def _run_bulk_map(
     worker = BulkAnalysisWorker(
         project_dir=project_dir,
         group=map_group,
-        files=["doc.md"],
+        files=[relative_path],
         metadata=metadata,
         force_rerun=True,
         placeholder_values={},
@@ -432,7 +436,7 @@ def _run_bulk_map(
     )
     worker._run()
 
-    output_path = project_dir / "bulk_analysis" / map_group.folder_name / "doc_analysis.md"
+    output_path = project_dir / "bulk_analysis" / map_group.folder_name / "doc.pdf_analysis.md"
     manifest_path = project_dir / "bulk_analysis" / map_group.folder_name / "manifest.json"
     return {
         "output": _read_markdown_snapshot(output_path, project_dir),

@@ -47,11 +47,13 @@ def analyse_group_placeholders(
             else:
                 optional.add(key)
     else:
-        user_spec = prompt_spec_getter("document_bulk_analysis_prompt")
+        user_spec = prompt_spec_getter(
+            "bulk_combined" if group.operation == "combined" else "bulk_per_document"
+        )
         if user_spec:
             required.update(user_spec.required)
             optional.update(user_spec.optional)
-        system_spec = prompt_spec_getter("document_analysis_system_prompt")
+        system_spec = prompt_spec_getter("bulk_system")
         if system_spec:
             required.update(system_spec.required)
             optional.update(system_spec.optional)

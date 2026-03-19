@@ -11,9 +11,9 @@ from src.app.core.prompt_placeholders import MissingPlaceholdersError
 
 class _StubPromptManager:
     def get_template(self, name: str) -> str:
-        if name == "document_analysis_system_prompt":
+        if name == "bulk_system":
             return "System"
-        if name == "document_bulk_analysis_prompt":
+        if name == "bulk_per_document":
             return "Summary without placeholder"
         raise KeyError(name)
 

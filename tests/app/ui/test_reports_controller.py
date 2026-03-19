@@ -448,8 +448,8 @@ def test_report_prompt_preview_includes_generated_citation_appendix(
         title="Generation Prompt Preview",
         prompt_path=str(user_prompt_path),
         system_prompt_path=str(system_prompt_path),
-        prompt_spec_key="report_generation_user_prompt",
-        system_spec_key="report_generation_system_prompt",
+        prompt_spec_key="report_draft_user",
+        system_spec_key="report_draft_system",
     )
 
     preview = captured["preview"]

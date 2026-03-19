@@ -8,6 +8,7 @@ from typing import Callable, List, Optional, Sequence
 from PySide6.QtWidgets import QMessageBox
 
 from src.app.core.bulk_paths import iter_map_outputs
+from src.app.core.bundled_prompts import canonical_prompt_reference
 from src.app.core.citations import strip_citation_tokens
 from src.app.core.converted_documents import is_doctags_artifact, load_converted_document_text
 from src.app.core.report_inputs import (
@@ -64,7 +65,7 @@ def validate_prompt_path(
 
 
 def read_prompt_file(path_str: str, project_dir: Optional[Path]) -> str:
-    path_str = (path_str or "").strip()
+    path_str = canonical_prompt_reference(path_str)
     if not path_str:
         return ""
     if not project_dir:
@@ -78,8 +79,11 @@ def read_prompt_file(path_str: str, project_dir: Optional[Path]) -> str:
             [
                 project_dir / path,
                 get_custom_dir() / path,
+                get_custom_dir() / path.name,
                 get_bundled_dir() / path,
+                get_bundled_dir() / path.name,
                 get_repo_prompts_dir() / path,
+                get_repo_prompts_dir() / path.name,
             ]
         )
     for candidate in candidates:
@@ -92,7 +96,7 @@ def read_prompt_file(path_str: str, project_dir: Optional[Path]) -> str:
 
 
 def normalize_prompt_path(path_str: str) -> str:
-    path_str = (path_str or "").strip()
+    path_str = canonical_prompt_reference(path_str)
     if not path_str:
         return ""
 
@@ -100,15 +104,20 @@ def normalize_prompt_path(path_str: str) -> str:
     if not path.is_absolute():
         return path_str
 
-    try:
-        relative = path.relative_to(get_repo_prompts_dir())
-    except Exception:
-        return path_str
-
-    for root in (get_custom_dir(), get_bundled_dir()):
-        candidate = root / relative
-        if candidate.exists():
-            return str(candidate)
+    for root in (get_repo_prompts_dir(), get_custom_dir(), get_bundled_dir()):
+        try:
+            relative = path.relative_to(root)
+        except Exception:
+            continue
+        canonical_relative = Path(canonical_prompt_reference(str(relative)))
+        for candidate_root in (get_custom_dir(), get_bundled_dir(), get_repo_prompts_dir()):
+            candidate = candidate_root / canonical_relative
+            if candidate.exists():
+                return str(candidate)
+            basename_candidate = candidate_root / canonical_relative.name
+            if basename_candidate.exists():
+                return str(basename_candidate)
+        return str((root / canonical_relative).resolve()) if (root / canonical_relative).exists() else str(path)
     return path_str
 
 
@@ -234,9 +243,10 @@ def collect_report_inputs(project_dir: Optional[Path]) -> List[ReportInputDescri
 
 
 def default_prompt_path(filename: str) -> str:
+    filename = Path(canonical_prompt_reference(filename)).name
     for candidate in (
-        get_bundled_dir() / "reports" / filename,
-        get_repo_prompts_dir() / "reports" / filename,
+        get_bundled_dir() / filename,
+        get_repo_prompts_dir() / filename,
     ):
         if candidate.exists():
             return str(candidate)

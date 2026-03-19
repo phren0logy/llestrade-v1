@@ -148,11 +148,11 @@ def generate_prompt_preview(
 
     required: set[str] = set()
     optional: set[str] = set()
-    system_spec = get_prompt_spec("document_analysis_system_prompt")
+    system_spec = get_prompt_spec("bulk_system")
     if system_spec:
         required.update(system_spec.required)
         optional.update(system_spec.optional)
-    user_spec = get_prompt_spec("document_bulk_analysis_prompt")
+    user_spec = get_prompt_spec("bulk_combined" if operation == "combined" else "bulk_per_document")
     if user_spec:
         required.update(user_spec.required)
         optional.update(user_spec.optional)

@@ -7,6 +7,7 @@ import logging
 from pathlib import Path
 from typing import Dict, Any, Optional
 from src.config.prompt_store import get_bundled_dir, get_custom_dir
+from src.app.core.bundled_prompts import canonical_prompt_key
 
 
 class PromptManager:
@@ -65,10 +66,11 @@ class PromptManager:
         Raises:
             KeyError: If template not found
         """
-        if name not in self.templates:
+        canonical = canonical_prompt_key(name)
+        if canonical not in self.templates:
             raise KeyError(f"Template not found: {name}")
             
-        template = self.templates[name]
+        template = self.templates[canonical]
         return template.format(**kwargs)
         
     def get_system_prompt(self) -> str:
@@ -78,7 +80,7 @@ class PromptManager:
             The system prompt content, or a default if not found
         """
         try:
-            return self.get_template("system_prompt")
+            return self.get_template("default_system")
         except KeyError:
             # Default system prompt if not found in templates
             logging.warning("Using default system prompt as template not found")

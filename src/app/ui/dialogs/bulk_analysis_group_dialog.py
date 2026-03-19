@@ -35,6 +35,7 @@ from src.config.prompt_store import get_bundled_dir, get_custom_dir
 from src.config.paths import app_resource_root
 from src.app.core.bulk_paths import iter_map_outputs, iter_map_outputs_under, resolve_map_output_path
 from src.app.core.bulk_analysis_groups import BulkAnalysisGroup
+from src.app.core.bundled_prompts import canonical_prompt_reference
 from src.app.core.converted_documents import is_doctags_artifact
 from src.app.core.llm_catalog import default_model_for_provider
 from src.app.core.project_manager import ProjectMetadata
@@ -46,8 +47,11 @@ from src.app.core.llm_operation_settings import CatalogTransport, LLMOperationSe
 from src.app.ui.widgets import LLMSettingsPanel
 from .prompt_preview_dialog import PromptPreviewDialog
 
-DEFAULT_SYSTEM_PROMPT = "prompts/document_analysis_system_prompt.md"
-DEFAULT_USER_PROMPT = "prompts/document_bulk_analysis_prompt.md"
+DEFAULT_SYSTEM_PROMPT = "prompts/bulk_system.md"
+DEFAULT_USER_PROMPTS = {
+    "per_document": "prompts/bulk_per_document.md",
+    "combined": "prompts/bulk_combined.md",
+}
 
 
 class BulkAnalysisGroupDialog(QDialog):
@@ -155,29 +159,29 @@ class BulkAnalysisGroupDialog(QDialog):
 
         self.system_prompt_edit = QLineEdit()
         self.system_prompt_edit.setToolTip(
-            placeholder_summary("document_analysis_system_prompt")
+            placeholder_summary("bulk_system")
         )
         self.system_prompt_button = QPushButton("Browse…")
         self.system_prompt_button.clicked.connect(lambda: self._choose_prompt_file(self.system_prompt_edit))
         form.addRow("System Prompt", self._wrap_with_button(self.system_prompt_edit, self.system_prompt_button))
         self._initialise_prompt_path(
             self.system_prompt_edit,
-            "document_analysis_system_prompt.md",
+            "bulk_system.md",
             DEFAULT_SYSTEM_PROMPT,
         )
         self.system_prompt_edit.editingFinished.connect(self._refresh_placeholder_requirements)
 
         self.user_prompt_edit = QLineEdit()
         self.user_prompt_edit.setToolTip(
-            placeholder_summary("document_bulk_analysis_prompt")
+            placeholder_summary("bulk_per_document")
         )
         self.user_prompt_button = QPushButton("Browse…")
         self.user_prompt_button.clicked.connect(lambda: self._choose_prompt_file(self.user_prompt_edit))
         form.addRow("User Prompt", self._wrap_with_button(self.user_prompt_edit, self.user_prompt_button))
         self._initialise_prompt_path(
             self.user_prompt_edit,
-            "document_bulk_analysis_prompt.md",
-            DEFAULT_USER_PROMPT,
+            "bulk_per_document.md",
+            DEFAULT_USER_PROMPTS["per_document"],
         )
         self.user_prompt_edit.editingFinished.connect(self._refresh_placeholder_requirements)
 
@@ -262,10 +266,12 @@ class BulkAnalysisGroupDialog(QDialog):
             "Prompt Files (*.txt *.md *.prompt);;All Files (*)",
         )
         if file_path:
-            line_edit.setText(self._normalise_path(Path(file_path)))
+            line_edit.setText(self._normalise_path(Path(canonical_prompt_reference(file_path))))
             self._refresh_placeholder_requirements()
 
     def _initialise_prompt_path(self, line_edit: QLineEdit, filename: str, fallback: str) -> None:
+        filename = Path(canonical_prompt_reference(filename)).name
+        fallback = canonical_prompt_reference(fallback)
         path: Optional[Path] = None
         try:
             candidate = get_bundled_dir() / filename
@@ -292,12 +298,13 @@ class BulkAnalysisGroupDialog(QDialog):
         required_defaults: set[str] = set()
         optional_defaults: set[str] = set()
 
-        system_spec = get_prompt_spec("document_analysis_system_prompt")
+        system_spec = get_prompt_spec("bulk_system")
+        user_prompt_key = "bulk_combined" if self.operation_combo.currentData() == "combined" else "bulk_per_document"
         if system_spec:
             required_defaults.update(system_spec.required)
             optional_defaults.update(system_spec.optional)
 
-        user_spec = get_prompt_spec("document_bulk_analysis_prompt")
+        user_spec = get_prompt_spec(user_prompt_key)
         if user_spec:
             required_defaults.update(user_spec.required)
             optional_defaults.update(user_spec.optional)
@@ -356,6 +363,11 @@ class BulkAnalysisGroupDialog(QDialog):
 
     def _on_operation_changed(self) -> None:
         combined = self.operation_combo.currentData() == "combined"
+        current_user = canonical_prompt_reference(self.user_prompt_edit.text().strip())
+        known_defaults = {DEFAULT_USER_PROMPTS["per_document"], DEFAULT_USER_PROMPTS["combined"]}
+        if current_user in known_defaults or not current_user:
+            next_default = DEFAULT_USER_PROMPTS["combined" if combined else "per_document"]
+            self.user_prompt_edit.setText(next_default)
         self.map_tree_group.setVisible(combined)
         # Combined options are still useful to adjust ahead of time
         self.order_combo.setEnabled(combined)
@@ -365,6 +377,9 @@ class BulkAnalysisGroupDialog(QDialog):
         self.manual_files_label.setVisible(combined)
         self.manual_files_edit.setVisible(combined)
         self.combined_inputs_label.setVisible(combined)
+        self.user_prompt_edit.setToolTip(
+            placeholder_summary("bulk_combined" if combined else "bulk_per_document")
+        )
         self._refresh_placeholder_requirements()
         self._refresh_combined_input_summary()
 

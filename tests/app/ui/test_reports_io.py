@@ -11,19 +11,17 @@ def test_default_prompt_path_prefers_synced_bundled_prompt(
 ) -> None:
     bundled_dir = tmp_path / "bundled"
     repo_dir = tmp_path / "repo"
-    bundled_reports = bundled_dir / "reports"
-    repo_reports = repo_dir / "reports"
-    bundled_reports.mkdir(parents=True)
-    repo_reports.mkdir(parents=True)
+    bundled_dir.mkdir(parents=True)
+    repo_dir.mkdir(parents=True)
 
-    bundled_prompt = bundled_reports / "default_generation_user.md"
+    bundled_prompt = bundled_dir / "report_draft_user.md"
     bundled_prompt.write_text("bundled", encoding="utf-8")
-    (repo_reports / "default_generation_user.md").write_text("repo", encoding="utf-8")
+    (repo_dir / "report_draft_user.md").write_text("repo", encoding="utf-8")
 
     monkeypatch.setattr(reports_io, "get_bundled_dir", lambda: bundled_dir)
     monkeypatch.setattr(reports_io, "get_repo_prompts_dir", lambda: repo_dir)
 
-    assert reports_io.default_prompt_path("default_generation_user.md") == str(bundled_prompt)
+    assert reports_io.default_prompt_path("report_draft_user.md") == str(bundled_prompt)
 
 
 def test_read_prompt_file_prefers_synced_bundled_prompt_before_repo_copy(
@@ -39,11 +37,9 @@ def test_read_prompt_file_prefers_synced_bundled_prompt_before_repo_copy(
     custom_dir.mkdir()
     repo_dir.mkdir()
 
-    relative = Path("reports/default_generation_user.md")
+    relative = Path("report_draft_user.md")
     bundled_prompt = bundled_dir / relative
     repo_prompt = repo_dir / relative
-    bundled_prompt.parent.mkdir(parents=True)
-    repo_prompt.parent.mkdir(parents=True)
     bundled_prompt.write_text("bundled", encoding="utf-8")
     repo_prompt.write_text("repo", encoding="utf-8")
 
@@ -65,11 +61,9 @@ def test_normalize_prompt_path_rewrites_repo_prompt_to_synced_bundled_copy(
     custom_dir.mkdir()
     repo_dir.mkdir()
 
-    relative = Path("reports/default_generation_user.md")
+    relative = Path("report_draft_user.md")
     bundled_prompt = bundled_dir / relative
     repo_prompt = repo_dir / relative
-    bundled_prompt.parent.mkdir(parents=True)
-    repo_prompt.parent.mkdir(parents=True)
     bundled_prompt.write_text("bundled", encoding="utf-8")
     repo_prompt.write_text("repo", encoding="utf-8")
 

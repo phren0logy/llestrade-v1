@@ -215,7 +215,7 @@ def _sync_resource(repo_dir: Path, bundled_dir: Path, *, force: bool) -> dict:
     }
 
 
-def sync_bundled_prompts(*, force: bool = False) -> dict:
+def sync_bundled_prompts(*, force: bool = True) -> dict:
     """Sync bundled prompts from the app resources into the user store."""
 
     return _sync_resource(get_repo_prompts_dir(), get_bundled_dir(), force=force)
