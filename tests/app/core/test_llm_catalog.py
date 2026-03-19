@@ -442,7 +442,11 @@ def test_resolve_catalog_model_for_gemini_uses_live_context_and_catalog_prices(
     )
     monkeypatch.setattr(llm_catalog, "_write_cached_discovered_models", lambda *args, **kwargs: None)
 
-    resolved = llm_catalog.resolve_catalog_model("gemini", "gemini-2.5-pro")
+    resolved = llm_catalog.resolve_catalog_model(
+        "gemini",
+        "gemini-2.5-pro",
+        live_discovery=True,
+    )
 
     assert resolved is not None
     assert resolved.context_window == 2_097_152
@@ -481,7 +485,10 @@ def test_default_provider_catalog_for_transport_uses_live_openai_discovery_with_
         ),
     )
 
-    catalog = llm_catalog.default_provider_catalog_for_transport(transport="direct")
+    catalog = llm_catalog.default_provider_catalog_for_transport(
+        transport="direct",
+        live_discovery=True,
+    )
     openai = next(provider for provider in catalog if provider.provider_id == "openai")
     resolved = next(model for model in openai.models if model.model_id == "gpt-5.4")
 

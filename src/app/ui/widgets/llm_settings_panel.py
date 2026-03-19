@@ -21,7 +21,6 @@ from src.app.core.llm_catalog import (
     LLMReasoningCapabilities,
     refresh_gateway_provider_catalog,
     reset_provider_catalog_cache,
-    resolve_catalog_model,
 )
 from src.app.core.llm_operation_settings import (
     CatalogTransport,
@@ -53,7 +52,7 @@ class LLMSettingsPanel(QWidget):
         self._provider_map = {}
         self._invalid_selection_message: str | None = None
         self._build_ui()
-        self._reload_catalog()
+        self._reload_catalog(live_discovery=False)
         self._refresh_model_options()
         self._update_custom_state()
         self._update_reasoning_controls()
@@ -76,7 +75,7 @@ class LLMSettingsPanel(QWidget):
             custom_model = self.custom_model_edit.text().strip()
             if not custom_model:
                 return None, "Enter a custom model id before continuing."
-            resolved = resolve_catalog_model(str(provider_id), custom_model, transport=self._transport)
+            resolved = self._resolve_loaded_model(str(provider_id), custom_model)
             context_window = int(self.custom_context_spin.value())
             if context_window <= 0:
                 if resolved and resolved.context_window:
@@ -97,7 +96,7 @@ class LLMSettingsPanel(QWidget):
         if not model_id:
             return None, "Select a model before continuing."
 
-        resolved = resolve_catalog_model(str(provider_id), model_id, transport=self._transport)
+        resolved = self._resolve_loaded_model(str(provider_id), model_id)
         if resolved is not None and resolved.context_window is None:
             context_window = int(self.custom_context_spin.value())
             if context_window <= 0:
@@ -125,7 +124,7 @@ class LLMSettingsPanel(QWidget):
 
         self._invalid_selection_message = None
         model_index = self.model_combo.findData(settings.model_id)
-        resolved = resolve_catalog_model(settings.provider_id, settings.model_id, transport=self._transport)
+        resolved = self._resolve_loaded_model(settings.provider_id, settings.model_id)
         needs_context_override = resolved is not None and resolved.context_window is None and settings.context_window is not None
         custom_mode = (settings.context_window is not None and not needs_context_override) or model_index == -1
         if provider_index == -1:
@@ -297,13 +296,30 @@ class LLMSettingsPanel(QWidget):
         self.reasoning_budget_spin.valueChanged.connect(self._on_reasoning_changed)
         self.advanced_toggle.toggled.connect(self._on_advanced_toggled)
 
-    def _reload_catalog(self) -> None:
-        self._provider_options = default_provider_catalog_for_transport(
-            include_azure=self._include_azure,
-            transport=self._transport,
-        )
+    def _reload_catalog(self, *, live_discovery: bool) -> None:
+        try:
+            self._provider_options = default_provider_catalog_for_transport(
+                include_azure=self._include_azure,
+                transport=self._transport,
+                live_discovery=live_discovery,
+            )
+        except TypeError:
+            self._provider_options = default_provider_catalog_for_transport(
+                include_azure=self._include_azure,
+                transport=self._transport,
+            )
         self._provider_map = provider_option_map(self._provider_options)
         self._populate_provider_options()
+
+    def _resolve_loaded_model(self, provider_id: str, model_id: str) -> object | None:
+        option = self._provider_map.get(str(provider_id or "").strip())
+        normalized = str(model_id or "").strip()
+        if option is None or not normalized:
+            return None
+        for model in option.models:
+            if model.model_id == normalized:
+                return model
+        return None
 
     def _populate_provider_options(self) -> None:
         self.provider_combo.clear()
@@ -353,7 +369,7 @@ class LLMSettingsPanel(QWidget):
         is_custom = self.model_combo.currentData() == _CUSTOM_MODEL_SENTINEL
         provider_id = str(self.provider_combo.currentData() or "").strip()
         model_id = self.custom_model_edit.text().strip() if is_custom else str(self.model_combo.currentData() or "").strip()
-        resolved = resolve_catalog_model(provider_id, model_id, transport=self._transport) if provider_id and model_id else None
+        resolved = self._resolve_loaded_model(provider_id, model_id) if provider_id and model_id else None
         needs_context = bool(is_custom or (resolved is not None and resolved.context_window is None))
 
         self.custom_model_label.setVisible(is_custom)
@@ -370,7 +386,7 @@ class LLMSettingsPanel(QWidget):
             refresh_gateway_provider_catalog(force=True)
         else:
             reset_provider_catalog_cache()
-        self._reload_catalog()
+        self._reload_catalog(live_discovery=True)
         provider_index = self.provider_combo.findData(current_provider)
         if provider_index != -1:
             self.provider_combo.setCurrentIndex(provider_index)
@@ -395,7 +411,7 @@ class LLMSettingsPanel(QWidget):
         model_data = self.model_combo.currentData()
         custom_mode = model_data == _CUSTOM_MODEL_SENTINEL
         model_id = self.custom_model_edit.text().strip() if custom_mode else str(model_data or "").strip()
-        option = resolve_catalog_model(provider_id, model_id, transport=self._transport) if provider_id and model_id else None
+        option = self._resolve_loaded_model(provider_id, model_id) if provider_id and model_id else None
         if option is None:
             return LLMReasoningCapabilities()
         return option.reasoning_capabilities
@@ -531,7 +547,7 @@ class LLMSettingsPanel(QWidget):
             self.model_details_label.clear()
             return
 
-        option = resolve_catalog_model(provider_id, model_id, transport=self._transport)
+        option = self._resolve_loaded_model(provider_id, model_id)
         if option is None:
             self.model_details_label.setText("Catalog details unavailable for this model.")
             return

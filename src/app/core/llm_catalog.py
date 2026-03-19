@@ -312,6 +312,7 @@ def default_provider_catalog_for_transport(
     *,
     include_azure: bool = False,
     transport: CatalogTransport = "direct",
+    live_discovery: bool = False,
 ) -> tuple[LLMProviderOption, ...]:
     """Return selector-ready provider/model metadata for a transport."""
 
@@ -333,7 +334,13 @@ def default_provider_catalog_for_transport(
 
     options: list[LLMProviderOption] = []
     for provider_id in provider_ids:
-        models = tuple(_iter_selector_models(provider_id, transport=transport))
+        models = tuple(
+            _iter_selector_models(
+                provider_id,
+                transport=transport,
+                live_discovery=live_discovery,
+            )
+        )
         if not models:
             continue
         options.append(
@@ -350,17 +357,28 @@ def default_model_for_provider(
     provider_id: str,
     *,
     transport: CatalogTransport = "direct",
+    live_discovery: bool = False,
 ) -> str | None:
     """Return the current default preset model for ``provider_id``."""
 
     env_var = _DEFAULT_MODEL_ENV_VARS.get(provider_id)
     env_model = os.getenv(env_var, "").strip() if env_var else ""
     if env_model:
-        matched = resolve_catalog_model(provider_id, env_model, transport=transport)
+        matched = resolve_catalog_model(
+            provider_id,
+            env_model,
+            transport=transport,
+            live_discovery=live_discovery,
+        )
         if matched and matched.context_window:
             return matched.model_id
+        return env_model
 
-    provider = _find_provider(provider_id, transport=transport)
+    provider = _find_provider(
+        provider_id,
+        transport=transport,
+        live_discovery=live_discovery,
+    )
     if provider is None:
         return None
     for model in provider.models:
@@ -383,7 +401,7 @@ def runtime_default_model_for_provider(
     if env_model:
         return env_model
 
-    provider = _find_provider(provider_id, transport=transport)
+    provider = _find_provider(provider_id, transport=transport, live_discovery=True)
     if provider is not None:
         for model in provider.models:
             if model.context_window:
@@ -429,6 +447,7 @@ def resolve_catalog_model(
     model_id: str | None,
     *,
     transport: CatalogTransport = "direct",
+    live_discovery: bool = False,
 ) -> LLMModelOption | None:
     """Resolve ``model_id`` to catalog metadata when possible."""
 
@@ -436,13 +455,21 @@ def resolve_catalog_model(
     if not normalized:
         return None
 
-    for model in _iter_selector_models(provider_id, transport=transport):
+    for model in _iter_selector_models(
+        provider_id,
+        transport=transport,
+        live_discovery=live_discovery,
+    ):
         if model.model_id == normalized:
             return model
 
     if provider_id == "anthropic_bedrock":
         normalized = _BEDROCK_ANTHROPIC_ALIASES.get(normalized, normalized)
-        for model in _iter_selector_models(provider_id, transport=transport):
+        for model in _iter_selector_models(
+            provider_id,
+            transport=transport,
+            live_discovery=live_discovery,
+        ):
             if model.model_id == normalized:
                 return model
 
@@ -898,8 +925,13 @@ def _find_provider(
     provider_id: str,
     *,
     transport: CatalogTransport = "direct",
+    live_discovery: bool = False,
 ) -> LLMProviderOption | None:
-    for provider in default_provider_catalog_for_transport(include_azure=True, transport=transport):
+    for provider in default_provider_catalog_for_transport(
+        include_azure=True,
+        transport=transport,
+        live_discovery=live_discovery,
+    ):
         if provider.provider_id == provider_id:
             return provider
     return None
@@ -909,9 +941,10 @@ def _iter_selector_models(
     provider_id: str,
     *,
     transport: CatalogTransport = "direct",
+    live_discovery: bool = True,
 ) -> Sequence[LLMModelOption]:
     scope = _cache_scope(provider_id, transport=transport)
-    cache_key = (transport, provider_id, scope)
+    cache_key = (transport, provider_id, scope, live_discovery)
     with _provider_selector_models_lock:
         cached = _provider_selector_models.get(cache_key)
     if cached is not None:
@@ -924,11 +957,11 @@ def _iter_selector_models(
         )
         models = provider.models if provider is not None else ()
     elif provider_id == "gemini":
-        models = _gemini_runtime_models()
+        models = _gemini_runtime_models(live_discovery=live_discovery)
     elif provider_id == "openai":
-        models = _openai_runtime_models(transport=transport)
+        models = _openai_runtime_models(transport=transport, live_discovery=live_discovery)
     elif provider_id == "anthropic":
-        models = _anthropic_runtime_models(transport=transport)
+        models = _anthropic_runtime_models(transport=transport, live_discovery=live_discovery)
     elif provider_id == "azure_openai":
         models = _azure_runtime_models()
     elif provider_id == "anthropic_bedrock":
@@ -1260,15 +1293,33 @@ def _build_discovered_model_options(
     return tuple(models)
 
 
-def _openai_runtime_models(*, transport: CatalogTransport) -> tuple[LLMModelOption, ...]:
-    discovered = _discover_models_with_cache("openai", transport=transport, fetcher=_discover_openai_models_live)
+def _openai_runtime_models(
+    *,
+    transport: CatalogTransport,
+    live_discovery: bool = True,
+) -> tuple[LLMModelOption, ...]:
+    discovered = _discover_models_with_cache(
+        "openai",
+        transport=transport,
+        fetcher=_discover_openai_models_live,
+        allow_live_discovery=live_discovery,
+    )
     if discovered:
         return _build_discovered_model_options("openai", discovered)
     return _iter_snapshot_selector_models("openai")
 
 
-def _anthropic_runtime_models(*, transport: CatalogTransport) -> tuple[LLMModelOption, ...]:
-    discovered = _discover_models_with_cache("anthropic", transport=transport, fetcher=_discover_anthropic_models_live)
+def _anthropic_runtime_models(
+    *,
+    transport: CatalogTransport,
+    live_discovery: bool = True,
+) -> tuple[LLMModelOption, ...]:
+    discovered = _discover_models_with_cache(
+        "anthropic",
+        transport=transport,
+        fetcher=_discover_anthropic_models_live,
+        allow_live_discovery=live_discovery,
+    )
     if discovered:
         return _build_discovered_model_options("anthropic", discovered)
     return _iter_snapshot_selector_models("anthropic")
@@ -1319,8 +1370,13 @@ def _gateway_runtime_models(provider_id: str) -> tuple[LLMModelOption, ...]:
     return _iter_snapshot_selector_models(provider_id)
 
 
-def _gemini_runtime_models() -> tuple[LLMModelOption, ...]:
-    discovered = _discover_models_with_cache("gemini", transport="direct", fetcher=_discover_gemini_models_live)
+def _gemini_runtime_models(*, live_discovery: bool = True) -> tuple[LLMModelOption, ...]:
+    discovered = _discover_models_with_cache(
+        "gemini",
+        transport="direct",
+        fetcher=_discover_gemini_models_live,
+        allow_live_discovery=live_discovery,
+    )
     if discovered:
         return _build_gemini_model_options(discovered)
     return _iter_snapshot_selector_models("gemini")
@@ -1367,16 +1423,18 @@ def _discover_models_with_cache(
     *,
     transport: CatalogTransport,
     fetcher: Any,
+    allow_live_discovery: bool = True,
 ) -> tuple[_DiscoveredModel, ...]:
-    try:
-        discovered = tuple(fetcher() or ())
-    except Exception:
-        logger.debug("Unable to discover models for %s/%s", transport, provider_id, exc_info=True)
-        discovered = ()
+    if allow_live_discovery:
+        try:
+            discovered = tuple(fetcher() or ())
+        except Exception:
+            logger.debug("Unable to discover models for %s/%s", transport, provider_id, exc_info=True)
+            discovered = ()
 
-    if discovered:
-        _write_cached_discovered_models(provider_id, transport=transport, discovered=discovered)
-        return discovered
+        if discovered:
+            _write_cached_discovered_models(provider_id, transport=transport, discovered=discovered)
+            return discovered
 
     return _load_cached_discovered_models(provider_id, transport=transport)
 

@@ -380,9 +380,12 @@ class ReportState:
             last_refinement_draft=data.get("last_refinement_draft"),
             history=history,
         )
+        stored_model = data.get("last_model")
+        if stored_model in (None, ""):
+            stored_model = _default_primary_model()
         llm_settings = settings_from_report_preferences(
             provider_id=str(data.get("last_provider", "anthropic")),
-            model=str(data.get("last_model", _default_primary_model())),
+            model=str(stored_model),
             custom_model=data.get("last_custom_model"),
             context_window=(
                 int(data["last_context_window"])
