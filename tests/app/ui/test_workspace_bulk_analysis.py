@@ -9,6 +9,7 @@ from PySide6.QtGui import QFontDatabase
 from PySide6.QtWidgets import QApplication, QDialog, QFileDialog, QPushButton, QMessageBox
 
 from src.app.core.bulk_analysis_runner import PromptBundle
+from src.app.core.converted_documents import converted_artifact_relative
 from src.app.core.job_cost_estimates import CostForecast
 
 from src.app.core.file_tracker import FileTracker, WorkspaceGroupMetrics
@@ -43,6 +44,10 @@ class _CaptureThreadPool:
         self.last_worker = worker
 
 
+SOURCE_RELATIVE = "folder/record.pdf"
+CONVERTED_RELATIVE = converted_artifact_relative(SOURCE_RELATIVE)
+
+
 @pytest.fixture(scope="module")
 def qt_app() -> QApplication:
     app = QApplication.instance()
@@ -58,16 +63,16 @@ def _create_project_with_group(tmp_path: Path) -> tuple[ProjectManager, BulkAnal
     manager = ProjectManager()
     manager.create_project(projects_root, ProjectMetadata(case_name="Bulk Analysis Demo"))
 
-    converted_doc = manager.project_dir / "converted_documents" / "folder" / "record.md"
+    converted_doc = manager.project_dir / "converted_documents" / CONVERTED_RELATIVE
     converted_doc.parent.mkdir(parents=True, exist_ok=True)
-    converted_doc.write_text("# Heading\nBody", encoding="utf-8")
+    converted_doc.write_text("<loc_0><loc_0><loc_220><loc_40>Body\n", encoding="utf-8")
 
     # Ensure the tracker sees our converted document so the workspace resolves it.
     FileTracker(manager.project_dir).scan()
 
     group = BulkAnalysisGroup.create(
         name="Demo Group",
-        files=["folder/record.md"],
+        files=[CONVERTED_RELATIVE],
         provider_id="anthropic",
         model="claude-sonnet-4-5",
     )
@@ -83,9 +88,9 @@ def _create_project_with_combined_group(tmp_path: Path) -> tuple[ProjectManager,
     manager = ProjectManager()
     manager.create_project(projects_root, ProjectMetadata(case_name="Combined Demo"))
 
-    converted_doc = manager.project_dir / "converted_documents" / "folder" / "record.md"
+    converted_doc = manager.project_dir / "converted_documents" / CONVERTED_RELATIVE
     converted_doc.parent.mkdir(parents=True, exist_ok=True)
-    converted_doc.write_text("# Heading\nBody", encoding="utf-8")
+    converted_doc.write_text("<loc_0><loc_0><loc_220><loc_40>Body\n", encoding="utf-8")
     FileTracker(manager.project_dir).scan()
 
     group = BulkAnalysisGroup.create(
@@ -94,7 +99,7 @@ def _create_project_with_combined_group(tmp_path: Path) -> tuple[ProjectManager,
         model="claude-sonnet-4-5",
     )
     group.operation = "combined"
-    group.combine_converted_files = ["folder/record.md"]
+    group.combine_converted_files = [CONVERTED_RELATIVE]
     group.model_context_window = 200_000
     saved = manager.save_bulk_analysis_group(group)
     return manager, saved
@@ -164,7 +169,7 @@ def test_workspace_run_executes_worker_and_updates_ui(tmp_path: Path, qt_app: QA
     else:
         pytest.fail("Bulk analysis run did not complete")
 
-    expected_output = manager.project_dir / "bulk_analysis" / group.slug / "folder" / "record_analysis.md"
+    expected_output = manager.project_dir / "bulk_analysis" / group.slug / "folder" / "record.pdf_analysis.md"
     assert expected_output.exists()
     assert "Summary output" in expected_output.read_text(encoding="utf-8")
 
@@ -237,6 +242,26 @@ def test_workspace_defaults_to_bulk_tab_when_converted_docs_exist(
 
     current_text = workspace._tabs.tabText(workspace._tabs.currentIndex())
     assert current_text == "Bulk Analysis"
+
+    workspace.deleteLater()
+
+
+def test_workspace_limits_conversion_service_to_single_worker(
+    tmp_path: Path,
+    qt_app: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert qt_app is not None
+
+    manager, _group = _create_project_with_group(tmp_path)
+    pool = _CaptureThreadPool()
+    monkeypatch.setattr(project_workspace, "get_worker_pool", lambda: pool)
+
+    workspace = ProjectWorkspace()
+    workspace.set_project(manager)
+    QCoreApplication.processEvents()
+
+    assert workspace._conversion_service._max_workers == 1
 
     workspace.deleteLater()
 
@@ -444,7 +469,7 @@ def test_workspace_bulk_progress_detail_updates_active_progress_widget(
             percent=12,
             completed=0,
             total=1,
-            document_path="folder/record.md",
+            document_path=CONVERTED_RELATIVE,
             chunk_index=3,
             chunk_total=24,
             chunks_completed=3,
@@ -614,11 +639,11 @@ def test_bulk_map_run_passes_estimate_summary_to_service(
         group_id=group.group_id,
         name=group.name,
         slug=group.slug or group.folder_name,
-        converted_files=("folder/record.md",),
+        converted_files=(CONVERTED_RELATIVE,),
         converted_count=1,
         bulk_analysis_total=0,
         pending_bulk_analysis=1,
-        pending_files=("folder/record.md",),
+        pending_files=(CONVERTED_RELATIVE,),
         operation="per_document",
     )
 
@@ -679,11 +704,11 @@ def test_bulk_map_run_blocks_when_gateway_key_is_rejected(
         group_id=group.group_id,
         name=group.name,
         slug=group.slug or group.folder_name,
-        converted_files=("folder/record.md",),
+        converted_files=(CONVERTED_RELATIVE,),
         converted_count=1,
         bulk_analysis_total=0,
         pending_bulk_analysis=1,
-        pending_files=("folder/record.md",),
+        pending_files=(CONVERTED_RELATIVE,),
         operation="per_document",
     )
 
@@ -748,11 +773,11 @@ def test_bulk_map_run_can_continue_when_gateway_probe_is_rate_limited(
         group_id=group.group_id,
         name=group.name,
         slug=group.slug or group.folder_name,
-        converted_files=("folder/record.md",),
+        converted_files=(CONVERTED_RELATIVE,),
         converted_count=1,
         bulk_analysis_total=0,
         pending_bulk_analysis=1,
-        pending_files=("folder/record.md",),
+        pending_files=(CONVERTED_RELATIVE,),
         operation="per_document",
     )
 
@@ -818,11 +843,11 @@ def test_bulk_map_run_stays_blocked_when_user_cancels_rate_limited_gateway_probe
         group_id=group.group_id,
         name=group.name,
         slug=group.slug or group.folder_name,
-        converted_files=("folder/record.md",),
+        converted_files=(CONVERTED_RELATIVE,),
         converted_count=1,
         bulk_analysis_total=0,
         pending_bulk_analysis=1,
-        pending_files=("folder/record.md",),
+        pending_files=(CONVERTED_RELATIVE,),
         operation="per_document",
     )
 
@@ -888,11 +913,11 @@ def test_bulk_auto_run_skips_rate_limited_gateway_probe_without_modal(
         group_id=group.group_id,
         name=group.name,
         slug=group.slug or group.folder_name,
-        converted_files=("folder/record.md",),
+        converted_files=(CONVERTED_RELATIVE,),
         converted_count=1,
         bulk_analysis_total=0,
         pending_bulk_analysis=1,
-        pending_files=("folder/record.md",),
+        pending_files=(CONVERTED_RELATIVE,),
         operation="per_document",
     )
 
@@ -1036,11 +1061,11 @@ def test_bulk_map_run_prompt_change_resume_keeps_remaining_docs(
         group_id=group.group_id,
         name=group.name,
         slug=group.slug or group.folder_name,
-        converted_files=("folder/record.md",),
+        converted_files=(CONVERTED_RELATIVE,),
         converted_count=1,
         bulk_analysis_total=0,
         pending_bulk_analysis=1,
-        pending_files=("folder/record.md",),
+        pending_files=(CONVERTED_RELATIVE,),
         operation="per_document",
     )
 
@@ -1102,11 +1127,11 @@ def test_bulk_map_run_missing_prompt_defaults_to_restart_with_replacement(
         group_id=group.group_id,
         name=group.name,
         slug=group.slug or group.folder_name,
-        converted_files=("folder/record.md",),
+        converted_files=(CONVERTED_RELATIVE,),
         converted_count=1,
         bulk_analysis_total=0,
         pending_bulk_analysis=1,
-        pending_files=("folder/record.md",),
+        pending_files=(CONVERTED_RELATIVE,),
         operation="per_document",
     )
 
@@ -1178,11 +1203,11 @@ def test_bulk_map_auto_run_skips_when_prompt_recovery_needs_review(
         group_id=group.group_id,
         name=group.name,
         slug=group.slug or group.folder_name,
-        converted_files=("folder/record.md",),
+        converted_files=(CONVERTED_RELATIVE,),
         converted_count=1,
         bulk_analysis_total=0,
         pending_bulk_analysis=1,
-        pending_files=("folder/record.md",),
+        pending_files=(CONVERTED_RELATIVE,),
         operation="per_document",
     )
 

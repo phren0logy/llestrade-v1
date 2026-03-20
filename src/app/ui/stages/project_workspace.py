@@ -100,7 +100,7 @@ class ProjectWorkspace(QWidget):
         self._reports_controller: ReportsController | None = None
 
         self._documents_controller: DocumentsController | None = None
-        self._conversion_service = ConversionService(self._workers)
+        self._conversion_service = ConversionService(self._workers, max_workers=1)
         self._highlight_service = HighlightsService(self._workers)
         llm_backend = self._build_llm_backend()
         self._llm_transport = backend_transport_name(llm_backend)
