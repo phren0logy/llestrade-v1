@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import platform
 import sys
 import time
@@ -12,6 +13,7 @@ from typing import Any, Mapping
 from src.app.core.doctags import render_doctags_pages, render_doctags_text
 
 DEFAULT_VLM_PRESET = "granite_docling"
+LOGGER = logging.getLogger(__name__)
 
 
 class DoclingLocalError(RuntimeError):
@@ -99,6 +101,13 @@ def convert_pdf_to_doctags(
         )
         conversion = converter.convert(source=str(source_path))
         document = conversion.document
+        repaired_boxes = _normalize_document_bboxes(document)
+        if repaired_boxes:
+            LOGGER.warning(
+                "Normalized %s malformed Docling bbox(es) before DocTags export for %s",
+                repaired_boxes,
+                source_path.name,
+            )
         doctags_content = document.export_to_doctags()
     except Exception as exc:
         raise DoclingLocalError(f"Local Docling conversion failed for {source_path.name}: {exc}") from exc
@@ -132,6 +141,69 @@ def _doc_page_count(document: object) -> int | None:
         return len(pages)
     except Exception:
         return None
+
+
+def _normalize_document_bboxes(document: object) -> int:
+    """Canonicalize malformed bbox coordinate ordering in-place.
+
+    Docling occasionally emits provenance boxes whose top/bottom ordering is inverted.
+    The DocTags serializer asserts on those values. We normalize any bbox-like object
+    reachable from the converted document before export.
+    """
+
+    try:
+        from docling_core.types.doc.base import BoundingBox
+    except Exception:
+        return 0
+
+    repaired = 0
+    seen: set[int] = set()
+
+    def _walk(value: object) -> None:
+        nonlocal repaired
+        if value is None:
+            return
+        if isinstance(value, (str, bytes, int, float, bool)):
+            return
+
+        value_id = id(value)
+        if value_id in seen:
+            return
+        seen.add(value_id)
+
+        bbox = getattr(value, "bbox", None)
+        if bbox is not None and hasattr(bbox, "as_tuple") and hasattr(bbox, "coord_origin"):
+            try:
+                current = bbox.as_tuple()
+                normalized = BoundingBox.from_tuple(current, bbox.coord_origin)
+            except Exception:
+                normalized = None
+            if normalized is not None and normalized.as_tuple() != current:
+                try:
+                    value.bbox = normalized
+                    repaired += 1
+                except Exception:
+                    pass
+
+        if isinstance(value, dict):
+            for child in value.values():
+                _walk(child)
+            return
+
+        if isinstance(value, (list, tuple, set)):
+            for child in value:
+                _walk(child)
+            return
+
+        try:
+            children = vars(value).values()
+        except Exception:
+            return
+        for child in children:
+            _walk(child)
+
+    _walk(document)
+    return repaired
 
 
 __all__ = [
